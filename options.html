@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bilidown 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="settings-shell">
+      <header>
+        <div class="settings-heading-row">
+          <div class="eyebrow">bilidown</div>
+          <div
+            class="language-switch"
+            role="group"
+            aria-label="Interface language"
+            data-i18n-aria-label="languageGroupLabel"
+          >
+            <button
+              class="language-option"
+              type="button"
+              data-language="en"
+              aria-pressed="true"
+            >
+              English
+            </button>
+            <button
+              class="language-option"
+              type="button"
+              data-language="zh-CN"
+              aria-pressed="false"
+            >
+              中文
+            </button>
+          </div>
+        </div>
+        <h1 data-i18n="heading">bilidown 设置</h1>
+        <p class="lede" data-i18n="lede">
+          密钥保存在当前 Chrome 配置中，只在使用 AI 功能时发送给 minimax。
+          本扩展没有开发者服务器或数据分析。
+        </p>
+      </header>
+
+      <form id="settingsForm">
+        <section class="card">
+          <h2>语音识别（阿里云百炼）</h2>
+          <label for="asrApiKey">百炼 API Key</label>
+          <input
+            id="asrApiKey"
+            name="asrApiKey"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="sk-..."
+          />
+          <p class="help">
+            bilidown 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。
+            <a
+              href="https://bailian.console.aliyun.com/?apiKey=1"
+              target="_blank"
+              rel="noreferrer"
+              >获取百炼 API Key</a>。不填写时仅尝试使用B站字幕。
+          </p>
+        </section>
+
+        <section class="card">
+          <h2 data-i18n="whisperHeading">本地 Whisper（可选）</h2>
+          <p class="help" data-i18n="whisperHelp">
+            启动 <code>start_whisper_server.bat</code> 后，B 站没有原生字幕
+            时会下载音轨让本地 Whisper 转写，再调用 AI 校正专有名词。
+          </p>
+
+          <label class="checkbox-label" data-i18n="whisperEnabledLabel">
+            <input id="whisperEnabled" type="checkbox" />
+            <span>启用本地 Whisper 兜底</span>
+          </label>
+
+          <div data-whisper-field>
+            <label for="whisperUrl" data-i18n="whisperUrlLabel"
+              >Whisper server URL</label
+            >
+            <input
+              id="whisperUrl"
+              name="whisperUrl"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="http://127.0.0.1:7860"
+            />
+
+            <label for="whisperModel" data-i18n="whisperModelLabel"
+              >Whisper 模型</label
+            >
+            <select id="whisperModel" name="whisperModel">
+              <option value="tiny">tiny（~75 MB，极快）</option>
+              <option value="base">base（~150 MB，默认）</option>
+              <option value="small">small（~500 MB，较好）</option>
+              <option value="medium">medium（~1.5 GB，精确）</option>
+              <option value="large-v3">large-v3（~3 GB，最精确）</option>
+              <option value="turbo">turbo（~1.5 GB，快速 large）</option>
+            </select>
+
+            <label for="whisperLanguage" data-i18n="whisperLanguageLabel"
+              >Whisper 语言（留空自动检测）</label
+            >
+            <input
+              id="whisperLanguage"
+              name="whisperLanguage"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="zh / en / ja ..."
+            />
+
+            <label for="subtitlesDir" data-i18n="subtitlesDirLabel"
+              >字幕缓存目录</label
+            >
+            <input
+              id="subtitlesDir"
+              name="subtitlesDir"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="C:/Users/you/videoprocess/subtitles"
+            />
+            <p class="help" data-i18n="subtitlesDirHelp">
+              Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。
+              下次再打开同一视频会直接读缓存，不再跑 Whisper。
+            </p>
+
+            <p class="help" style="margin-top: 10px">
+              <button
+                id="whisperTestBtn"
+                class="secondary"
+                type="button"
+                data-i18n="whisperTestBtn"
+              >
+                测试连接
+              </button>
+              <span
+                id="whisperTestStatus"
+                role="status"
+                aria-live="polite"
+                style="margin-left: 10px"
+              ></span>
+            </p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 data-i18n="aiProvider">AI provider</h2>
+
+          <label for="aiProvider" data-i18n="aiProviderSelectLabel"
+            >Provider</label
+          >
+          <select id="aiProvider" name="aiProvider">
+            <option value="minimax" data-i18n="providerOptionMinimax"
+              >minimax (MiniMax-M3)</option
+            >
+            <option value="deepseek" data-i18n="providerOptionDeepseek"
+              >DeepSeek</option
+            >
+            <option value="glm" data-i18n="providerOptionGlm"
+              >GLM (Zhipu)</option
+            >
+            <option value="other" data-i18n="providerOptionOther"
+              >Other model</option
+            >
+          </select>
+
+          <div class="provider-fields" data-provider-field="minimax">
+            <label for="minimaxApiKey" data-i18n="minimaxApiKeyLabel"
+              >minimax API key</label
+            >
+            <input
+              id="minimaxApiKey"
+              name="minimaxApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste your minimax key"
+            />
+            <p class="help">
+              <span data-i18n="minimaxHelp"
+                >bilidown uses minimax for overviews, explanations,
+                translation, and note polishing.</span
+              >
+              <a
+                href="https://platform.minimaxi.com/user-center/basic-information/interface-key"
+                target="_blank"
+                rel="noreferrer"
+                data-i18n="minimaxLink"
+                >Create a minimax API key</a
+              ><span data-i18n="minimaxHelpSuffix">.</span>
+            </p>
+          </div>
+
+          <div class="provider-fields" data-provider-field="deepseek">
+            <label for="deepseekApiKey" data-i18n="deepseekApiKeyLabel"
+              >DeepSeek API key</label
+            >
+            <input
+              id="deepseekApiKey"
+              name="deepseekApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste your DeepSeek key"
+            />
+            <p class="help">
+              <span data-i18n="deepseekHelp"
+                >bilidown uses DeepSeek for overviews, explanations,
+                translation, and note polishing.</span
+              >
+              <a
+                href="https://platform.deepseek.com/api_keys"
+                target="_blank"
+                rel="noreferrer"
+                data-i18n="deepseekLink"
+                >Create a DeepSeek API key</a
+              ><span data-i18n="deepseekHelpSuffix">.</span>
+            </p>
+          </div>
+
+          <div class="provider-fields" data-provider-field="glm">
+            <label for="glmApiKey" data-i18n="glmApiKeyLabel"
+              >GLM API key</label
+            >
+            <input
+              id="glmApiKey"
+              name="glmApiKey"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste your Zhipu / Z.AI key"
+            />
+            <label for="glmApiType" data-i18n="glmApiTypeLabel"
+              >API type</label
+            >
+            <select id="glmApiType" name="glmApiType">
+              <option value="coding" data-i18n="glmApiTypeCoding"
+                >Coding Plan (subscription)</option
+              >
+              <option value="standard" data-i18n="glmApiTypeStandard"
+                >Standard API (pay-as-you-go)</option
+              >
+            </select>
+            <p class="help">
+              <span data-i18n="glmHelp"
+                >bilidown uses GLM (Zhipu / Z.AI) for overviews, explanations,
+                translation, and note polishing. Default model: glm-4.6.
+                Pick the API type that matches your key — the two endpoints
+                have different keys that are NOT interchangeable.</span
+              >
+              <a
+                href="https://open.bigmodel.cn/usercenter/apikeys"
+                target="_blank"
+                rel="noreferrer"
+                data-i18n="glmLink"
+                >Create a Zhipu API key</a
+              ><span data-i18n="glmHelpSuffix">.</span>
+            </p>
+          </div>
+
+          <div class="provider-fields provider-fields-other" data-provider-field="other">
+            <div class="local-remix-header">
+              <div class="local-remix-header-copy">
+                <span class="eyebrow" data-i18n="localRemix">Local remix</span>
+                <span class="customization-title" data-i18n="customizationTitle"
+                  >Want to use another AI model?</span
+                >
+                <span
+                  class="customization-purpose"
+                  data-i18n="customizationPurpose"
+                  >Edit and copy a safe prompt for your coding agent</span
+                >
+              </div>
+              <span class="agent-badge" data-i18n="agentBadge"
+                >Coding agent ready</span
+              >
+            </div>
+            <p class="help customization-intro" data-i18n="customizationIntro">
+              You can edit the prompt directly. Complete these three steps before
+              copying:
+            </p>
+            <ol class="customization-steps">
+              <li data-i18n="customizationStepFolder">
+                Open the extracted bilidown project folder in your coding
+                agent.
+              </li>
+              <li data-i18n="customizationStepReplace">
+                Replace [PROVIDER] and [MODEL] with the service and model you want
+                to use.
+              </li>
+              <li data-i18n="customizationStepKeys">
+                Never include API keys in the prompt or chat. Enter them yourself
+                after the code is ready.
+              </li>
+            </ol>
+            <label
+              for="customizationPrompt"
+              data-i18n="customizationPromptLabel"
+              >Editable customization prompt</label
+            >
+            <div
+              id="customizationPromptReminder"
+              class="prompt-reminder"
+              role="note"
+              aria-label="Prompt reminder"
+              data-i18n-aria-label="customizationReminderLabel"
+            >
+              <span data-i18n="customizationReminder"
+                >Before copying, replace [PROVIDER] and [MODEL] with the provider
+                and model you want to use.</span
+              >
+            </div>
+            <textarea
+              id="customizationPrompt"
+              rows="12"
+              aria-describedby="customizationPromptReminder"
+            >Customize this local bilidown workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is bilidown. If verification fails, stop and ask me to open the extracted bilidown project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.</textarea>
+            <div class="copy-actions">
+              <button
+                id="copyCustomizationPromptBtn"
+                type="button"
+                data-i18n="copyCustomizationPrompt"
+              >
+                Copy edited prompt
+              </button>
+              <span
+                id="copyStatus"
+                role="status"
+                aria-live="polite"
+              ></span>
+            </div>
+          </div>
+
+          <div class="privacy-note" data-i18n="privacyNote">
+            When you use AI features, the selected provider receives the
+            video transcript and relevant video context. Review the active
+            provider's terms and pricing before saving.
+          </div>
+        </section>
+
+        <div class="form-actions">
+          <button class="primary" type="submit" data-i18n="saveSettings">
+            Save settings
+          </button>
+          <span id="saveStatus" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+
+      <section class="card data-card">
+        <h2 data-i18n="localData">Local data</h2>
+        <p class="help" data-i18n="localDataHelp">
+          Summaries, translations, and notes are stored only in this Chrome
+          profile. You can remove them at any time.
+        </p>
+        <div class="data-actions">
+          <button id="clearCacheBtn" type="button" data-i18n="clearCache">
+            Clear cached summaries
+          </button>
+          <button id="clearNotesBtn" type="button" data-i18n="deleteNotes">
+            Delete all notes
+          </button>
+          <button
+            id="resetBtn"
+            class="danger"
+            type="button"
+            data-i18n="resetData"
+          >
+            Reset extension data
+          </button>
+        </div>
+
+        <div class="location-field" style="margin-top: 18px">
+          <label for="exportDir" data-i18n="exportDirLabel"
+            >Transcribe location</label
+          >
+          <div style="display: flex; gap: 8px; align-items: center">
+            <input
+              id="exportDir"
+              name="exportDir"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="C:/Users/you/Downloads"
+              style="flex: 1"
+            />
+            <button
+              id="pickExportDirBtn"
+              class="secondary"
+              type="button"
+              data-i18n="exportDirPickBtn"
+            >
+              Change location
+            </button>
+          </div>
+          <p class="help" data-i18n="exportDirHelp">
+            Where exported notes, summaries, and Whisper transcripts land.
+            Default: system Downloads. Click “Change location” to open the
+            system folder picker — pick a folder, the path is auto-filled, then
+            click <strong>Save settings</strong> below to persist. You can also
+            type a path directly (use <code>~/Downloads</code> for your home
+            Downloads).
+          </p>
+        </div>
+        <span id="dataStatus" role="status" aria-live="polite"></span>
+      </section>
+
+      <footer data-i18n-html="footer">
+        Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the
+        repository for the complete data-flow description.
+      </footer>
+    </main>
+
+    <script src="settings.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>
