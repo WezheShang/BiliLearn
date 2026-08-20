@@ -198,8 +198,9 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             filenames_str = (qs.get("filenames") or [""])[0]
+            bvid = (qs.get("bvid") or [""])[0]
             cache_dir = (qs.get("cache_dir") or [None])[0]
-            self._handle_local_file_get(filenames_str, cache_dir)
+            self._handle_local_file_get(filenames_str, cache_dir, bvid)
             return
         if self.path.startswith("/verify-path?"):
             from urllib.parse import urlparse, parse_qs
@@ -388,10 +389,18 @@ class Handler(BaseHTTPRequestHandler):
             "payload": payload,
         })
 
-    def _handle_local_file_get(self, filenames_str, cache_dir=None):
-        """Look for local subtitle files by name pattern (recursive)."""
-        if not filenames_str or not cache_dir:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "filenames and cache_dir required"})
+    def _handle_local_file_get(self, filenames_str=None, cache_dir=None, bvid=None):
+        """Look for local subtitle files by name pattern (recursive).
+
+        If `bvid` is supplied, scans every .txt/.md under cache_dir and
+        matches files whose first non-empty line is a `# Source: <bvid>`
+        header — that's how up-master-report labels its outputs. This
+        lets bilidown find subtitles even when the filename pattern
+        (YYYY-MM-DD_Title_UP) doesn't match (different date format, no
+        UP name, different folder layout, etc.).
+        """
+        if not cache_dir:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "cache_dir required"})
             return
 
         cache_path = Path(cache_dir)
@@ -402,36 +411,71 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        # Normalize filenames for case-insensitive matching
-        target_filenames = [f.strip().lower() for f in filenames_str.split(",") if f.strip()]
+        # --- Pass 1: filename match (original behavior) ---
+        if filenames_str:
+            target_filenames = [f.strip().lower() for f in filenames_str.split(",") if f.strip()]
+            for root, dirs, files in os.walk(cache_path):
+                for filename in files:
+                    if filename.lower() in target_filenames:
+                        result = self._read_subtitle_file(Path(root) / filename)
+                        if result is not None:
+                            self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
+                            return
 
-        # Recursively search for matching files
-        for root, dirs, files in os.walk(cache_path):
-            for filename in files:
-                # Case-insensitive match
-                if filename.lower() in target_filenames:
-                    file_path = Path(root) / filename
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            content = f.read()
-                        self._send_json(HTTPStatus.OK, {
-                            "ok": True,
-                            "payload": {
-                                "content": content,
-                                "filename": filename,
-                                "path": str(file_path),
-                            },
-                        })
-                        return
-                    except OSError as exc:
-                        LOG.exception(f"Failed to read {file_path}")
-                        continue
+        # --- Pass 2: bvid grep (header match) ---
+        if bvid:
+            target_bvid = bvid.strip()
+            if target_bvid:
+                bvid_pattern = re.compile(
+                    r"^#\s*source\s*[:=]\s*(" + re.escape(target_bvid) + r")\s*$",
+                    re.IGNORECASE | re.MULTILINE,
+                )
+                # Only consider text-ish files; skip the .m4a/.obsolete cruft
+                # up-master-report drops alongside the real subtitles.
+                for root, dirs, files in os.walk(cache_path):
+                    for filename in files:
+                        if not filename.lower().endswith((".txt", ".md", ".srt", ".lrc")):
+                            continue
+                        file_path = Path(root) / filename
+                        try:
+                            # Read the first ~2KB only — headers live at the top.
+                            # A full read of every .txt would be slow on
+                            # directories that also hold gigabytes of m4a.
+                            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                                head = f.read(2048)
+                        except OSError:
+                            continue
+                        if bvid_pattern.search(head):
+                            # Confirmed — re-read the whole file for the actual content.
+                            result = self._read_subtitle_file(file_path)
+                            if result is not None:
+                                self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
+                                return
 
         # None found
         self._send_json(HTTPStatus.NOT_FOUND, {
             "ok": False,
             "reason": "no matching file found",
         })
+
+    def _read_subtitle_file(self, file_path):
+        """Read a subtitle file and return (content, filename, path) tuple.
+
+        Returns None if the file is empty or unreadable.
+        """
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError as exc:
+            LOG.exception(f"Failed to read {file_path}")
+            return None
+        if not content or not content.strip():
+            return None
+        return {
+            "content": content,
+            "filename": file_path.name,
+            "path": str(file_path),
+        }
 
     def _handle_verify_path(self, path_str):
         """Verify a directory path exists and is writable."""
