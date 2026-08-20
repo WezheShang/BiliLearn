@@ -468,11 +468,20 @@ const YTD_OPTIONS = (() => {
     const copyStatus = doc.getElementById("copyStatus");
     const saveStatus = doc.getElementById("saveStatus");
     const dataStatus = doc.getElementById("dataStatus");
+    const dirtyBanner = doc.getElementById("dirtyBanner");
 
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
     const statusStates = new Map();
     const promptDrafts = createPromptDrafts();
     let currentLanguage = "en";
+
+    function markDirty() {
+      if (dirtyBanner) dirtyBanner.classList.remove("is-hidden");
+    }
+
+    function clearDirty() {
+      if (dirtyBanner) dirtyBanner.classList.add("is-hidden");
+    }
 
     function renderStatus(element) {
       const state = statusStates.get(element);
@@ -649,6 +658,7 @@ const YTD_OPTIONS = (() => {
         );
         applyProviderVisibility(settings.provider);
         if (asrProviderSelect) applyAsrProviderVisibility(settings.asrProvider);
+        clearDirty();
         setStatus(saveStatus, "saved");
       } catch (_error) {
         setStatus(saveStatus, "saveFailed");
@@ -717,6 +727,22 @@ const YTD_OPTIONS = (() => {
     }
 
     form.addEventListener("submit", saveSettings);
+    // Any user edit anywhere in the form flips the dirty flag so the red
+    // banner reminds them to save. We listen on the form so it covers
+    // every current and future field (input, select, textarea).
+    form.addEventListener("input", markDirty);
+    form.addEventListener("change", markDirty);
+    // If the user tries to navigate / close the tab with unsaved changes,
+    // ask for confirmation. Browsers show a generic message and ignore the
+    // return value, but the side effect of attaching the handler is enough.
+    root.addEventListener("beforeunload", (e) => {
+      if (dirtyBanner && !dirtyBanner.classList.contains("is-hidden")) {
+        e.preventDefault();
+        e.returnValue = "";
+        return "";
+      }
+      return undefined;
+    });
     aiProviderSelect.addEventListener("change", () => {
       applyProviderVisibility(aiProviderSelect.value);
     });

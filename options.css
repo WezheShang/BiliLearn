@@ -229,6 +229,19 @@ button.secondary {
   background: #f3f5f7;
   border-color: var(--border);
 }
+
+/* "Unsaved changes" warning banner — red so the user notices before they
+   navigate away or close the tab. Shown whenever any field in the form
+   has been edited since the last successful save. */
+.dirty-banner {
+  color: #b00020;
+  background: #fff0f0;
+  border: 1px solid #f3b8b8;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 0 0 16px;
+  font-weight: 600;
+}
 button.secondary:hover {
   background: #e9ecef;
   border-color: var(--accent);
