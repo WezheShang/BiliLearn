@@ -283,6 +283,55 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 });
 
 /**
+ * Service worker bootstrap: rehydrate the in-memory whisper job from
+ * chrome.storage.session and resume any job that was still running when
+ * Chrome killed the previous worker. The user closes/reopens the
+ * sidepanel constantly during multi-minute Whisper runs, so we MUST
+ * survive a SW eviction.
+ */
+async function bootstrapWhisperJob() {
+  let job = null;
+  try {
+    job = await loadWhisperJob();
+  } catch {
+    // storage.session may throw if the API isn't available; not fatal.
+    return;
+  }
+  if (!job) {
+    activeWhisperJob = null;
+    return;
+  }
+  activeWhisperJob = job;
+  const terminal = job.stage === WHISPER_STAGES.SUCCEEDED || job.stage === WHISPER_STAGES.FAILED;
+  if (terminal) {
+    // Don't re-run; let the sidepanel clear it via ackWhisperJobDone.
+    debugLog("[dk-bilidown BG] resuming in terminal state:", job.stage);
+    return;
+  }
+  // If we crashed mid-stage, just keep the in-memory record so the
+  // sidepanel can render the right loading text. Re-running the whole
+  // job from scratch would burn another 5+ minutes; the next user
+  // action (closing/reopening panel) will trigger a manual retry.
+  debugLog(
+    "[dk-bilidown BG] rehydrated in-flight whisper job at stage:",
+    job.stage,
+    "for",
+    job.videoId,
+  );
+}
+
+bootstrapWhisperJob().catch((err) =>
+  console.warn("[dk-bilidown BG] bootstrapWhisperJob failed:", err),
+);
+
+// Re-bootstrap on every cold start of the SW (e.g. after browser restart).
+// chrome.runtime.onStartup is the right hook for that, but onInstalled +
+// first message also covers the common "user reopens sidepanel" case.
+chrome.runtime.onStartup?.addListener(() => {
+  bootstrapWhisperJob().catch(() => {});
+});
+
+/**
  * Keep the side panel scoped to Bilibili tabs only.
  *
  * Chrome side panels are "global" by default: once opened, the panel follows
@@ -345,7 +394,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.pageNumber,
     )
       .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+      .catch((err) =>
+        sendResponse({
+          success: false,
+          error: err.message,
+          // 把分类后的错误信息一起传给 sidepanel，UI 那边根据 type
+          // 切换标题。message 字段仍然是兜底文案，老逻辑不挂。
+          bilibiliError: err.bilibiliError || null,
+        }),
+      );
     return true;
   }
 
@@ -459,6 +516,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       )
       .catch((error) => sendResponse({ error: error.message }));
     return true;
+  }
+
+  if (message.action === "getWhisperJobStatus") {
+    // The sidepanel asks "am I mid-transcription?" on open. We return
+    // the current in-memory + storage job so it can restore the right
+    // loading screen instead of showing the no-cache error.
+    loadWhisperJob()
+      .then((job) => sendResponse({ job: job || activeWhisperJob || null }))
+      .catch((err) => sendResponse({ job: null, error: err.message }));
+    return true;
+  }
+
+  if (message.action === "ackWhisperJobDone") {
+    // The sidepanel has consumed a terminal SUCCEEDED state. Drop the
+    // record so the next visit doesn't think we're still running.
+    setWhisperJob(null).catch(() => {});
+    sendResponse({ success: true });
+    return false;
   }
 
   if (message.action === "openOptions") {
@@ -594,12 +669,241 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 const BAILIAN_ASR_MODEL = "fun-asr";
 
-async function fetchBilibiliAudioBlob(videoId, cid) {
+// ============================================================
+// WHISPER JOB STATE (persisted across sidepanel / SW restarts)
+// ============================================================
+// When the user kicks off local Whisper, the audio download + ASR + AI
+// correction can take minutes. The sidepanel can be closed/reopened
+// during that window and the service worker can be evicted at any time.
+// We persist the current job in chrome.storage.session so:
+//   - background.js can resume the job after a SW restart
+//   - the sidepanel can re-show the correct loading screen on reopen
+const WHISPER_JOB_KEY = "whisper-job";
+const WHISPER_STAGES = Object.freeze({
+  STARTED: "started",
+  DOWNLOADING: "downloading",
+  READY_TO_TRANSCRIBE: "ready_to_transcribe",
+  TRANSCRIBING: "transcribing",
+  CORRECTING: "correcting",
+  // terminal states
+  SUCCEEDED: "succeeded",
+  FAILED: "failed",
+});
+
+let activeWhisperJob = null; // in-memory mirror; source of truth is storage
+
+function setWhisperJob(job) {
+  activeWhisperJob = job;
+  if (job === null) {
+    return chrome.storage.session.remove(WHISPER_JOB_KEY);
+  }
+  return chrome.storage.session.set({ [WHISPER_JOB_KEY]: job });
+}
+
+async function loadWhisperJob() {
+  const stored = await chrome.storage.session.get(WHISPER_JOB_KEY);
+  return stored[WHISPER_JOB_KEY] || null;
+}
+
+function sendWhisperProgress(stage, title, subtitle, extras = {}) {
+  // Update persisted job + broadcast to the sidepanel. Both are
+  // best-effort: storage may fail (private mode) and the panel may
+  // be closed — neither should break the running job.
+  if (activeWhisperJob && activeWhisperJob.stage !== "succeeded" && activeWhisperJob.stage !== "failed") {
+    const next = {
+      ...activeWhisperJob,
+      stage,
+      title,
+      subtitle,
+      stageStartedAt: Date.now(),
+      ...extras,
+    };
+    // Fire-and-forget; we don't want a slow storage write to stall ASR.
+    setWhisperJob(next).catch(() => {});
+  }
+  chrome.runtime
+    .sendMessage({
+      action: "transcriptProgress",
+      stage,
+      title,
+      subtitle,
+      ...extras,
+    })
+    .catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// B 站错误分类
+// ---------------------------------------------------------------------------
+//
+// `view` 接口（x/web-interface/view）和 `playurl` 接口（x/player/playurl）
+// 都会返回 code + message。我们把这些错误分成 4 类，给用户看的中文消息
+// 完全不同，sidepanel 拿到 type 之后切换标题。
+//
+// NOT_LOGGED_IN       ——  没登录 B 站，扩展拿不到 cookie
+// PAID_VIDEO          ——  充电视频 / 付费视频 / 合作视频
+// PREMIERE_OR_LIMITED ——  大会员 / 单点付费，账号无权限
+// NETWORK_OR_UNKNOWN  ——  兜底（CDN 抖动 / 接口限流 / 解析失败 / ...）
+const BILIBILI_ERROR_TYPES = Object.freeze({
+  NOT_LOGGED_IN: "NOT_LOGGED_IN",
+  PAID_VIDEO: "PAID_VIDEO",
+  PREMIERE_OR_LIMITED: "PREMIERE_OR_LIMITED",
+  NETWORK_OR_UNKNOWN: "NETWORK_OR_UNKNOWN",
+});
+
+const BILIBILI_ERROR_USER_MESSAGES = Object.freeze({
+  NOT_LOGGED_IN:
+    "🔒 请先在 B 站登录后再打开视频页面，扩展需要你的 B 站 cookie 才能下载音轨。",
+  PAID_VIDEO:
+    "💰 这是一部付费/充电视频。请确认你已经为该 UP 主充电后，再打开视频页面重试。",
+  PREMIERE_OR_LIMITED:
+    "🚫 视频需要大会员/购买，你当前账号没有权限。请先在 B 站开通大会员或购买该视频。",
+});
+
+const BILIBILI_ERROR_TITLES = Object.freeze({
+  NOT_LOGGED_IN: "B 站权限错误",
+  PAID_VIDEO: "B 站权限错误",
+  PREMIERE_OR_LIMITED: "B 站权限错误",
+  NETWORK_OR_UNKNOWN: "Whisper 转录失败",
+});
+
+/**
+ * 把 view / playurl 的返回结果归到 4 类错误之一。
+ *
+ * @param {Object} args
+ * @param {Object|undefined} args.viewPayload    x/web-interface/view 的 JSON
+ * @param {Object|undefined} args.playurlPayload x/player/playurl 的 JSON
+ * @param {string|undefined} args.rawMessage     下载音轨失败时的原始 message
+ * @returns {{ type: string, title: string, userMessage: string, source: string }}
+ *
+ * source 字段方便 audit log 判断是哪一步判断出来的：
+ *   - "view.code"        view 接口自己报的错
+ *   - "view.paid_flag"   view 返回了付费标记
+ *   - "playurl.code"     playurl 接口自己报的错
+ *   - "playurl.no_audio" playurl 返回但 audio 为空 + view 标记为付费
+ *   - "audio_download"   上面都过了但下载失败
+ *   - "default"          兜底
+ */
+function classifyBilibiliError({
+  viewPayload,
+  playurlPayload,
+  rawMessage,
+} = {}) {
+  // 1. view 接口自己报错（未登录 / 视频不存在 / 大会员）
+  if (viewPayload && typeof viewPayload === "object") {
+    const code = Number(viewPayload.code);
+    if (Number.isFinite(code)) {
+      if (code === -101 || code === -400) {
+        return {
+          type: BILIBILI_ERROR_TYPES.NOT_LOGGED_IN,
+          title: BILIBILI_ERROR_TITLES.NOT_LOGGED_IN,
+          userMessage: BILIBILI_ERROR_USER_MESSAGES.NOT_LOGGED_IN,
+          source: "view.code",
+        };
+      }
+      if (code === -104) {
+        return {
+          type: BILIBILI_ERROR_TYPES.PREMIERE_OR_LIMITED,
+          title: BILIBILI_ERROR_TITLES.PREMIERE_OR_LIMITED,
+          userMessage: BILIBILI_ERROR_USER_MESSAGES.PREMIERE_OR_LIMITED,
+          source: "view.code",
+        };
+      }
+    }
+  }
+
+  // 2. view 返回了付费/充电视频标记
+  const v0 =
+    viewPayload && viewPayload.data && Array.isArray(viewPayload.data.videos)
+      ? viewPayload.data.videos[0]
+      : null;
+  if (v0) {
+    const isPaid =
+      v0.is_upower_expert === 1 ||
+      v0.is_ugc_pay === 1 ||
+      v0.is_cooperation === 1;
+    if (isPaid) {
+      return {
+        type: BILIBILI_ERROR_TYPES.PAID_VIDEO,
+        title: BILIBILI_ERROR_TITLES.PAID_VIDEO,
+        userMessage: BILIBILI_ERROR_USER_MESSAGES.PAID_VIDEO,
+        source: "view.paid_flag",
+      };
+    }
+  }
+
+  // 3. playurl 自己报错
+  if (playurlPayload && typeof playurlPayload === "object") {
+    const code = Number(playurlPayload.code);
+    if (Number.isFinite(code)) {
+      if (code === -101 || code === -400) {
+        return {
+          type: BILIBILI_ERROR_TYPES.NOT_LOGGED_IN,
+          title: BILIBILI_ERROR_TITLES.NOT_LOGGED_IN,
+          userMessage: BILIBILI_ERROR_USER_MESSAGES.NOT_LOGGED_IN,
+          source: "playurl.code",
+        };
+      }
+      if (code === -104) {
+        return {
+          type: BILIBILI_ERROR_TYPES.PREMIERE_OR_LIMITED,
+          title: BILIBILI_ERROR_TITLES.PREMIERE_OR_LIMITED,
+          userMessage: BILIBILI_ERROR_USER_MESSAGES.PREMIERE_OR_LIMITED,
+          source: "playurl.code",
+        };
+      }
+    }
+    // playurl 返回成功但 audio 列表为空 + view 标记为付费 → 充电视频
+    const audioList = playurlPayload.data?.dash?.audio;
+    const hasAudio = Array.isArray(audioList) && audioList.length > 0;
+    if (!hasAudio && v0 && v0.is_upower_expert === 1) {
+      return {
+        type: BILIBILI_ERROR_TYPES.PAID_VIDEO,
+        title: BILIBILI_ERROR_TITLES.PAID_VIDEO,
+        userMessage: BILIBILI_ERROR_USER_MESSAGES.PAID_VIDEO,
+        source: "playurl.no_audio",
+      };
+    }
+  }
+
+  // 4. 兜底：网络 / CDN / 解析失败
+  return {
+    type: BILIBILI_ERROR_TYPES.NETWORK_OR_UNKNOWN,
+    title: BILIBILI_ERROR_TITLES.NETWORK_OR_UNKNOWN,
+    userMessage: `⚠️ 网络或服务端错误：${rawMessage || "未知错误"}`,
+    source: rawMessage ? "audio_download" : "default",
+  };
+}
+
+/**
+ * 构造带 bilibiliError 元信息的 Error。message 字段同时是 sidepanel 的
+ * 兜底展示文案，所以保留人类可读信息。
+ */
+function bilibiliErrorToException(classified) {
+  const err = new Error(classified.userMessage);
+  err.bilibiliError = {
+    type: classified.type,
+    title: classified.title,
+    userMessage: classified.userMessage,
+    source: classified.source,
+  };
+  return err;
+}
+
+async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
   const response = await fetch(
     `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(cid)}&fnval=16&qn=16`,
     { credentials: "include" },
   );
   const payload = await response.json();
+  // 先把 playurl 接口本身的错误（未登录 / 大会员 / 充电视频）归类出来
+  // 再看 audio 列表是否为空 —— 充电视频的典型表现是 dash.video 有
+  // 内容但 dash.audio 为空。
+  if (!response.ok || (typeof payload.code === "number" && payload.code !== 0)) {
+    throw bilibiliErrorToException(
+      classifyBilibiliError({ viewPayload, playurlPayload: payload }),
+    );
+  }
   const audioTracks = [...(payload.data?.dash?.audio || [])].sort(
     (a, b) =>
       (Number(a.bandwidth) || Number.MAX_SAFE_INTEGER) -
@@ -609,29 +913,68 @@ async function fetchBilibiliAudioBlob(videoId, cid) {
   // Selecting the smallest track cuts both the CDN download and Bailian upload.
   const audio = audioTracks[0];
   const candidates = [audio?.baseUrl, audio?.base_url, ...(audio?.backupUrl || []), ...(audio?.backup_url || [])].filter(Boolean);
-  if (!candidates.length) throw new Error("无法获取B站音轨地址。");
+  if (!candidates.length) {
+    throw bilibiliErrorToException(
+      classifyBilibiliError({ viewPayload, playurlPayload: payload, rawMessage: "无法获取B站音轨地址。" }),
+    );
+  }
 
   let lastError;
+  // B站 CDN commonly returns ERR_CONNECTION_CLOSED for individual audio
+  // chunks — try each candidate once, and on transient failures retry with
+  // exponential backoff so a single bad request doesn't fail the whole job.
+  const RETRY_DELAYS_MS = [0, 1000, 2000, 4000];
   for (const url of candidates) {
-    try {
-      const audioResponse = await fetch(url);
-      if (!audioResponse.ok) throw new Error(`HTTP ${audioResponse.status}`);
-      const expectedBytes = Number(audioResponse.headers.get("content-length")) || 0;
-      if (expectedBytes) {
-        chrome.runtime.sendMessage({
-          action: "transcriptProgress",
-          title: "正在下载B站音轨",
-          subtitle: `低码率音轨约 ${(expectedBytes / 1024 / 1024).toFixed(1)} MB`,
-        }).catch(() => {});
+    let attempt = 0;
+    let attemptError = null;
+    while (attempt < RETRY_DELAYS_MS.length) {
+      if (RETRY_DELAYS_MS[attempt] > 0) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
       }
-      const blob = await audioResponse.blob();
-      if (!blob.size) throw new Error("音轨为空");
-      return new Blob([blob], { type: "audio/mp4" });
-    } catch (error) {
-      lastError = error;
+      try {
+        const audioResponse = await fetch(url);
+        if (!audioResponse.ok) throw new Error(`HTTP ${audioResponse.status}`);
+        const expectedBytes = Number(audioResponse.headers.get("content-length")) || 0;
+        const blob = await audioResponse.blob();
+        if (!blob.size) throw new Error("音轨为空");
+        // Surface stage progress only after we actually have the byte count
+        // so the UI message isn't duplicated across retries.
+        if (expectedBytes) {
+          sendWhisperProgress(
+            WHISPER_STAGES.DOWNLOADING,
+            "正在下载B站音轨",
+            `低码率音轨约 ${(expectedBytes / 1024 / 1024).toFixed(1)} MB`,
+            { expectedBytes },
+          );
+        } else {
+          sendWhisperProgress(
+            WHISPER_STAGES.DOWNLOADING,
+            "正在下载B站音轨",
+            "请保持视频页面打开",
+          );
+        }
+        return new Blob([blob], { type: "audio/mp4" });
+      } catch (error) {
+        attemptError = error;
+        attempt += 1;
+        debugLog(
+          `[dk-bilidown BG] audio fetch attempt ${attempt} failed (${url.slice(0, 80)}…):`,
+          error?.message,
+        );
+      }
     }
+    lastError = attemptError;
+    // Try the next candidate (e.g. backupUrl) once we've exhausted retries
+    // on this one — the user might be able to fall back to a working CDN.
   }
-  throw new Error(`B站音轨下载失败：${lastError?.message || "未知错误"}`);
+  // 所有候选 URL 都重试完了还失败，分类成网络/CDN 错误
+  throw bilibiliErrorToException(
+    classifyBilibiliError({
+      viewPayload,
+      playurlPayload: payload,
+      rawMessage: lastError?.message || "未知错误",
+    }),
+  );
 }
 
 async function uploadAudioToBailian(blob, apiKey, videoId) {
@@ -714,9 +1057,9 @@ function normalizeBailianTranscript(data) {
   };
 }
 
-async function transcribeWithBailian(videoId, cid, apiKey) {
+async function transcribeWithBailian(videoId, cid, apiKey, viewPayload) {
   chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在下载B站音轨", subtitle: "请保持视频页面打开" }).catch(() => {});
-  const blob = await fetchBilibiliAudioBlob(videoId, cid);
+  const blob = await fetchBilibiliAudioBlob(videoId, cid, viewPayload);
   chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在上传音轨", subtitle: "上传至阿里云百炼临时空间" }).catch(() => {});
   const fileUrl = await uploadAudioToBailian(blob, apiKey, videoId);
   const taskResponse = await fetch("https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription", {
@@ -748,13 +1091,28 @@ async function transcribeWithBailian(videoId, cid, apiKey) {
  * @param {string} videoId - The Bilibili video ID (e.g., "dQw4w9WgXcQ")
  * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
  */
-async function transcribeWithLocalWhisper(videoId, cid, settings) {
+async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
   const url = (settings.whisperUrl || "").replace(/\/+$/, "");
   if (!url) {
     throw new Error("Local Whisper is selected as the ASR provider but whisperUrl is empty.");
   }
-  const audioBlob = await fetchBilibiliAudioBlob(videoId, cid);
+  // Stage 1 — audio download (with retry/backoff). The actual progress
+  // update is emitted from inside fetchBilibiliAudioBlob so it can report
+  // the byte count when it learns it.
+  sendWhisperProgress(
+    WHISPER_STAGES.DOWNLOADING,
+    "正在下载B站音轨",
+    "请保持视频页面打开",
+  );
+  const audioBlob = await fetchBilibiliAudioBlob(videoId, cid, viewPayload);
   const contentType = audioBlob.type || "audio/mp4";
+  // Stage 2 — about to call whisper server. Bridging the gap between
+  // "download done" and "server started" so the UI doesn't appear stuck.
+  sendWhisperProgress(
+    WHISPER_STAGES.READY_TO_TRANSCRIBE,
+    "音频下载完成，准备调用 Whisper",
+    `模型 ${settings.whisperModel || "base"} · ${url}`,
+  );
   const headers = {
     "Content-Type": contentType,
     "X-Whisper-Model": settings.whisperModel || "base",
@@ -762,6 +1120,14 @@ async function transcribeWithLocalWhisper(videoId, cid, settings) {
   if (settings.whisperLanguage) {
     headers["X-Whisper-Language"] = settings.whisperLanguage;
   }
+  // Stage 3 — actually calling the whisper server. The POST is synchronous
+  // from the SW's perspective; the user just sees "Whisper 转录中" until
+  // the server responds.
+  sendWhisperProgress(
+    WHISPER_STAGES.TRANSCRIBING,
+    "Whisper 转录中",
+    "长视频通常需要几分钟，可在终端查看 whisper_server.py 日志",
+  );
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30 * 60 * 1000); // 30 min
   let response;
@@ -812,6 +1178,14 @@ async function transcribeWithLocalWhisper(videoId, cid, settings) {
         .join("\n"),
     };
   }
+  // Stage 4 — AI correction over the raw segments. This is usually the
+  // longest step for short videos (1-2k tokens of diff per 10 minutes),
+  // so we surface it separately so the loading screen doesn't look frozen.
+  sendWhisperProgress(
+    WHISPER_STAGES.CORRECTING,
+    "AI 校正专有名词中",
+    `识别出 ${rawSegments.length} 段字幕，正在修正同音字错听`,
+  );
   try {
     const { segments: corrected, chapters } = await correctWhisperTranscript(
       rawSegments,
@@ -886,8 +1260,13 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
   possibleFilenames.push(`${cleanTitle}.srt`);
 
   try {
+    // Pass 1: filename match (legacy behavior). Pass 2: bvid grep
+    // (header match, covers up-master-report and any other pipeline
+    // that writes `# Source: <bvid>` at the top of its subtitles).
+    // The server tries filename first, then bvid, so this stays cheap.
     const qs = new URLSearchParams({
       filenames: possibleFilenames.join(","),
+      bvid: bvid || "",
       cache_dir: dir,
     });
     const response = await fetch(
@@ -982,6 +1361,53 @@ function parseLocalSubtitleContent(content, filename) {
         language: "zh",
       };
     }
+  }
+
+  // up-master-report format: [    0.0s ->     1.4s] text
+  // Plain .txt, may have leading `# Source:` / `# Duration:` / etc. comment
+  // lines (the bvid header is what let /local-file find the file in the
+  // first place). Try this before the SRT/simple fallbacks so segments
+  // get correct `duration` instead of all-zero.
+  const rangeMatchRegex = /^\[\s*(\d+(?:\.\d+)?)s\s*->\s*(\d+(?:\.\d+)?)s\s*\]\s*(.+)$/;
+  const rangeSegments = [];
+  let rangeHeaderSkipped = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (!rangeHeaderSkipped && trimmed.startsWith("#")) {
+      // Skip leading comment block (e.g. # Source: BV..., # Duration: ...).
+      rangeHeaderSkipped = true;
+      continue;
+    }
+    if (trimmed.startsWith("#")) continue; // mid-file comments too
+    const m = trimmed.match(rangeMatchRegex);
+    if (!m) continue;
+    const start = parseFloat(m[1]);
+    const end = parseFloat(m[2]);
+    const text = m[3].trim();
+    if (!text) continue;
+    rangeSegments.push({
+      start,
+      duration: Math.max(0, end - start),
+      text,
+      language: "zh",
+    });
+  }
+  if (rangeSegments.length > 0) {
+    let plain = "";
+    let ts = "";
+    for (const seg of rangeSegments) {
+      plain += seg.text + " ";
+      const minutes = Math.floor(seg.start / 60);
+      const seconds = Math.floor(seg.start % 60);
+      ts += `[${minutes}:${String(seconds).padStart(2, "0")}] ${seg.text}\n`;
+    }
+    return {
+      transcript: rangeSegments,
+      transcriptText: plain.trim(),
+      transcriptTextTimestamped: ts.trim(),
+      language: "zh",
+    };
   }
 
   // Fall back to SRT/Simple format parsing
@@ -1172,34 +1598,197 @@ async function handleTriggerWhisperTranscription(
   if (settings.asrProvider !== "whisper") {
     throw new Error("Local Whisper is not enabled. Open bilidown Settings.");
   }
-  // Look up the cid first so the cache file name is stable.
-  const viewResponse = await fetch(
-    `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(videoId)}`,
-    { credentials: "include" },
-  );
-  const view = await viewResponse.json();
-  if (!viewResponse.ok || view.code !== 0 || !view.data) {
-    throw new Error(view.message || "无法读取 B 站视频信息。");
-  }
-  const part = Math.max(1, Number(requestedPage) || 1);
-  const page = view.data.pages?.[part - 1] || view.data.pages?.[0];
-  if (!page?.cid) throw new Error("无法识别当前分 P 的 CID。");
+  // Persist a fresh job record BEFORE we touch the network, so a SW
+  // eviction or extension reload during the next 5+ minutes still leaves
+  // a job the sidepanel can resume from.
+  const requestedPageNumber = Math.max(1, Number(requestedPage) || 1);
+  await setWhisperJob({
+    type: "whisper-job",
+    videoId,
+    videoUrl: videoUrl || "",
+    pageNumber: requestedPageNumber,
+    stage: WHISPER_STAGES.STARTED,
+    title: "启动 Whisper 转录",
+    subtitle: "正在连接 B 站接口…",
+    startedAt: Date.now(),
+    stageStartedAt: Date.now(),
+  });
 
-  const result = await transcribeWithLocalWhisper(videoId, page.cid, settings);
-  // Persist to cache so the next visit is instant. We always save the
-  // segments we have, even if the AI correction step failed, so the user
-  // gets something to read instead of being asked to re-transcribe.
-  const cachePayload = {
-    bvid: videoId,
-    cid: page.cid,
-    source: result.source,
-    language: result.language,
-    savedAt: new Date().toISOString(),
-    transcript: result.transcript || [],
-    chapters: result.chapters || [],
+  let view;
+  try {
+    // Look up the cid first so the cache file name is stable.
+    const viewResponse = await fetch(
+      `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(videoId)}`,
+      { credentials: "include" },
+    );
+    view = await viewResponse.json();
+    // view 接口自己报错（未登录 / 大会员 / 视频不存在）→ 归类后抛
+    if (!viewResponse.ok || view.code !== 0 || !view.data) {
+      throw bilibiliErrorToException(
+        classifyBilibiliError({ viewPayload: view, rawMessage: view.message || "无法读取 B 站视频信息。" }),
+      );
+    }
+    // 充电视频：view 返回成功但 videos[0] 带付费标记 → 提前拦截，避免
+    // playurl 再走一次才在 audio 为空时发现。
+    const v0Header = view.data.videos?.[0] || null;
+    const preCheck = classifyBilibiliError({ viewPayload: view });
+    if (
+      preCheck.type === BILIBILI_ERROR_TYPES.PAID_VIDEO ||
+      preCheck.type === BILIBILI_ERROR_TYPES.PREMIERE_OR_LIMITED
+    ) {
+      throw bilibiliErrorToException(preCheck);
+    }
+    // 把 view 里的付费/合作标记存到 job，方便事后 audit log 一眼看出
+    // 这个视频到底卡在哪个分类上。空对象时也写一个空对象，避免
+    // 后续逻辑误以为还没拉过 view。
+    await setWhisperJob({
+      ...(activeWhisperJob || {}),
+      videoMeta: {
+        is_upower_expert: v0Header?.is_upower_expert ?? 0,
+        is_ugc_pay: v0Header?.is_ugc_pay ?? 0,
+        is_cooperation: v0Header?.is_cooperation ?? 0,
+        aid: v0Header?.aid ?? null,
+        bvid: videoId,
+        title: view.data.title || null,
+      },
+    });
+    const part = requestedPageNumber;
+    const page = view.data.pages?.[part - 1] || view.data.pages?.[0];
+    if (!page?.cid) throw new Error("无法识别当前分 P 的 CID。");
+
+    const result = await transcribeWithLocalWhisper(videoId, page.cid, settings, view);
+    // Persist to cache so the next visit is instant. We always save the
+    // segments we have, even if the AI correction step failed, so the user
+    // gets something to read instead of being asked to re-transcribe.
+    const cachePayload = {
+      bvid: videoId,
+      cid: page.cid,
+      source: result.source,
+      language: result.language,
+      savedAt: new Date().toISOString(),
+      transcript: result.transcript || [],
+      chapters: result.chapters || [],
+    };
+    await saveCachedTranscript(videoId, page.cid, cachePayload, settings);
+    // Mark the job as succeeded so the sidepanel can stop polling and
+    // fall through to the normal transcript render path. The terminal
+    // record is cleared in a follow-up tick to give the UI a chance to
+    // notice the SUCCEEDED state.
+    await setWhisperJob({
+      ...activeWhisperJob,
+      type: "whisper-job",
+      stage: WHISPER_STAGES.SUCCEEDED,
+      title: "Whisper 转录完成",
+      subtitle: "正在加载字幕…",
+      stageStartedAt: Date.now(),
+      finishedAt: Date.now(),
+      result: {
+        success: true,
+        source: result.source,
+        language: result.language,
+        transcriptLength: (result.transcript || []).length,
+        cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid),
+      },
+    });
+    return { ...result, cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid) };
+  } catch (err) {
+    // Persist a terminal FAILED state so the sidepanel can render an
+    // error rather than spinning forever. 有 bilibiliError 的错误用
+    // 它的 title / userMessage，否则退回通用文案。
+    const classified = err?.bilibiliError;
+    await setWhisperJob({
+      ...(activeWhisperJob || {}),
+      type: "whisper-job",
+      videoId,
+      videoUrl: videoUrl || "",
+      pageNumber: requestedPageNumber,
+      stage: WHISPER_STAGES.FAILED,
+      title: classified?.title || "Whisper 转录失败",
+      subtitle: classified?.userMessage || err?.message || String(err),
+      stageStartedAt: Date.now(),
+      finishedAt: Date.now(),
+      error: err?.message || String(err),
+      bilibiliErrorType: classified?.type || null,
+    });
+    throw err;
+  }
+}
+
+/**
+ * Fetch B站's own subtitle track for a video (human-uploaded or ai-zh auto).
+ * Returns a transcript payload in the same shape as `handleFetchTranscript`,
+ * or `null` if the video has no subtitle track (so the caller can fall
+ * through to local files / Whisper).
+ *
+ * Errors (network, bvid mismatch) bubble up so `handleFetchTranscript` can
+ * report them, but a missing track is a normal "fall through" condition.
+ */
+async function fetchBilibiliOfficialSubtitle(videoId, cid) {
+  const playerResponse = await fetch(
+    `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(cid)}`,
+    { credentials: "include", cache: "no-store" },
+  );
+  const player = await playerResponse.json();
+  if (!playerResponse.ok || player.code !== 0) {
+    throw new Error(player.message || "无法读取 B 站字幕列表。");
+  }
+  if (
+    String(player.data?.bvid || "") !== String(videoId) ||
+    Number(player.data?.cid) !== Number(cid)
+  ) {
+    throw new Error("B 站返回的字幕信息与当前视频不匹配，请刷新后重试。");
+  }
+
+  const subtitles = player.data?.subtitle?.subtitles || [];
+  // Prefer human-uploaded Chinese, then any Chinese (incl. ai-zh), then first track.
+  const preferred =
+    subtitles.find((item) => /^(zh|zh-CN|zh-Hans|zh-TW)/i.test(item.lan || "") && !/ai-zh/i.test(item.lan || "")) ||
+    subtitles.find((item) => /zh|ai-zh/i.test(item.lan || "")) ||
+    subtitles[0];
+  if (!preferred?.subtitle_url) return null;
+
+  const subtitleUrl = preferred.subtitle_url.startsWith("//")
+    ? `https:${preferred.subtitle_url}`
+    : preferred.subtitle_url;
+  const subtitleResponse = await fetch(subtitleUrl, { credentials: "include" });
+  if (!subtitleResponse.ok) throw new Error("B 站字幕文件下载失败。");
+  const data = await subtitleResponse.json();
+
+  const transcript = [];
+  let transcriptTextPlain = "";
+  let transcriptTextTimestamped = "";
+
+  if (data.body && Array.isArray(data.body)) {
+    for (const chunk of data.body) {
+      const cleanText = (chunk.content || "").trim();
+      if (!cleanText) continue;
+
+      const startSeconds = Math.max(0, Number(chunk.from) || 0);
+      const minutes = Math.floor(startSeconds / 60);
+      const seconds = startSeconds % 60;
+      const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+
+      transcript.push({
+        text: cleanText,
+        start: startSeconds,
+        duration: Math.max(0, (Number(chunk.to) || startSeconds) - startSeconds),
+        language: preferred.lan || null,
+      });
+      transcriptTextPlain += cleanText + " ";
+      transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
+    }
+  }
+
+  if (transcript.length === 0) return null;
+
+  return {
+    success: true,
+    transcript,
+    transcriptText: transcriptTextPlain.trim(),
+    transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+    language: preferred.lan || null,
+    source: "bilibili-subtitle",
   };
-  await saveCachedTranscript(videoId, page.cid, cachePayload, settings);
-  return { ...result, cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid) };
 }
 
 async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) {
@@ -1235,8 +1824,17 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
       return await transcribeWithBailian(videoId, page.cid, settings.asrApiKey);
     }
 
-    // First, try to look for local subtitle files (YYYY-MM-DD_videoTitle_upName.{txt,srt,md})
-    if (settings.asrProvider === "whisper" && settings.whisperUrl && settings.subtitlesDir) {
+    // B站官方字幕 (human or ai-zh) 优先于本地文件。本地字幕（up-master-report
+    // 之类）可能跟视频实际内容对不上号（标题错配、bvid 错位），所以 B站自己有
+    // 就别看本地。Bailian key 不影响这个顺序——只要 key 配了就走 Bailian。
+    const bilibiliSubtitle = await fetchBilibiliOfficialSubtitle(videoId, page.cid);
+    if (bilibiliSubtitle) {
+      return bilibiliSubtitle;
+    }
+
+    // 本地文件 fallback：B站没字幕时才看本地（whisper 旧 cache / up-master-report
+    // / bilidown 自己生成的 .md/.txt/.srt）
+    if (settings.whisperUrl && settings.subtitlesDir) {
       const localFile = await loadLocalSubtitleFile(
         videoId,
         videoTitle,
@@ -1289,94 +1887,11 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
       };
     }
 
-    // Whisper is disabled AND no Bailian key: nothing else can produce a
-    // transcript for videos without native B-station subtitles.
-    if (!settings.asrApiKey && settings.asrProvider === "none") {
-      // (we still let the code fall through to native subtitles below —
-      // many videos do have them.)
-    }
-
-    const playerResponse = await fetch(
-      `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(page.cid)}`,
-      { credentials: "include", cache: "no-store" },
-    );
-    const player = await playerResponse.json();
-    if (!playerResponse.ok || player.code !== 0) {
-      throw new Error(player.message || "无法读取 B 站字幕列表。");
-    }
-    if (
-      String(player.data?.bvid || "") !== String(videoId) ||
-      Number(player.data?.cid) !== Number(page.cid)
-    ) {
-      throw new Error("B 站返回的字幕信息与当前视频不匹配，请刷新后重试。");
-    }
-
-    const subtitles = player.data?.subtitle?.subtitles || [];
-    const preferred =
-      subtitles.find((item) => /zh|ai-zh/i.test(item.lan || "")) || subtitles[0];
-    if (!preferred?.subtitle_url) {
-      return {
-        success: false,
-        error: "NO_TRANSCRIPT",
-        message: "这个视频没有可用的 B 站字幕。第一版暂不进行音频转写。",
-      };
-    }
-    const subtitleUrl = preferred.subtitle_url.startsWith("//")
-      ? `https:${preferred.subtitle_url}`
-      : preferred.subtitle_url;
-    const subtitleResponse = await fetch(subtitleUrl, { credentials: "include" });
-    if (!subtitleResponse.ok) throw new Error("B 站字幕文件下载失败。");
-    const data = await subtitleResponse.json();
-
-    // Parse the response into our internal format
-    // Supadata returns: { content: [{ text, offset, duration, lang }], lang, availableLangs }
-    const transcript = [];
-    let transcriptTextPlain = ""; // Plain text for display/export
-    let transcriptTextTimestamped = ""; // Timestamped text for AI analysis
-
-    if (data.body && Array.isArray(data.body)) {
-      for (const chunk of data.body) {
-        if (chunk.content) {
-          const cleanText = chunk.content.trim();
-          if (!cleanText) continue; // Skip if nothing left after cleanup
-
-          const startSeconds = Math.max(0, Number(chunk.from) || 0);
-          const minutes = Math.floor(startSeconds / 60);
-          const seconds = startSeconds % 60;
-          const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
-          transcript.push({
-            text: cleanText,
-            start: startSeconds,
-            duration: Math.max(0, (Number(chunk.to) || startSeconds) - startSeconds),
-            language: preferred.lan || null,
-          });
-
-          // Plain text without timestamps (for display/export)
-          transcriptTextPlain += cleanText + " ";
-
-          // Timestamped text for minimax (format: [MM:SS] text)
-          // This allows the model to reference actual transcript positions.
-          transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
-        }
-      }
-    }
-
-    if (transcript.length === 0) {
-      return {
-        success: false,
-        error: "EMPTY_TRANSCRIPT",
-        message: "B 站返回了空字幕。",
-      };
-    }
-
+    // Nothing else worked: bail.
     return {
-      success: true,
-      transcript: transcript,
-      transcriptText: transcriptTextPlain.trim(), // For display
-      transcriptTextTimestamped: transcriptTextTimestamped.trim(), // For AI
-      language: preferred.lan || null,
-      source: "bilibili-subtitle",
+      success: false,
+      error: "NO_TRANSCRIPT",
+      message: "B 站没有字幕，本地也没有缓存文件。",
     };
   } catch (error) {
     console.error("Transcript fetch error:", error);
