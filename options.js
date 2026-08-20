@@ -627,8 +627,16 @@ const YTD_OPTIONS = (() => {
       // service via the local-remix prompt and may not have any key
       // configured yet. Skip the key-presence gate for that case so
       // they can save while iterating on the customization.
+      //
+      // Likewise, the AI key is not strictly required when the user has
+      // explicitly opted out of cloud ASR (asrProvider === "whisper" or
+      // "none") — Whisper runs locally, and "none" means the user only
+      // wants native B-station subtitles. In those cases the AI key is
+      // only needed for the polish/translate step, which the user can
+      // fill in later.
       const isOtherProvider = settings.provider === "other";
-      if (!isOtherProvider && !activeKey && !settings.asrApiKey) {
+      const asrIsLocalOnly = settings.asrProvider === "whisper" || settings.asrProvider === "none";
+      if (!isOtherProvider && !asrIsLocalOnly && !activeKey && !settings.asrApiKey) {
         setStatus(saveStatus, "addMiniMaxKey");
         return;
       }
