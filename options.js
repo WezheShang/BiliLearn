@@ -57,17 +57,6 @@ const YTD_OPTIONS = (() => {
       subtitlesDirLabel: "Subtitle cache directory",
       subtitlesDirHelp:
         "Whisper transcripts (and AI-corrected versions) are stored here, indexed by BV id. Re-opening the same video reads the cache instead of re-transcribing.",
-      exportDirLabel: "Transcribe location",
-      exportDirPickBtn: "Change location",
-      exportDirHelp:
-        "Where exported notes, summaries, and Whisper transcripts land. Default: system Downloads. Click \"选择目录\" to pick a folder, then click <strong>Save settings</strong> to persist your choice.",
-      pickDirBtn: "选择目录",
-      exportDirPicking: "Opening system folder picker…",
-      exportDirPickerFailed: "Could not open the folder picker. Please type the path manually.",
-      exportDirCancelled: "Selection cancelled",
-      exportDirPicked: ({ path }) => `Folder picked: ${path} — click Save settings to persist.`,
-      exportDirPathInferred: "Path set from the folder picker. Verify the value, edit if needed, then click Save settings.",
-      fsAccessUnavailable: "This browser doesn't expose a folder picker. Type the full path directly (e.g. C:\\Users\\you\\Documents\\notes).",
 
       saveSettings: "Save settings",
       localRemix: "Local remix",
@@ -170,17 +159,6 @@ const YTD_OPTIONS = (() => {
       subtitlesDirLabel: "字幕缓存目录",
       subtitlesDirHelp:
         "Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。再次打开同一视频会直接读缓存，不再跑 Whisper。",
-      exportDirLabel: "转写位置",
-      exportDirPickBtn: "更改位置",
-      exportDirHelp:
-        "导出笔记、总结、Whisper 字幕的默认位置。默认是系统 Downloads。点击「选择目录」选择文件夹，然后点击<strong>保存设置</strong>让修改生效。",
-      pickDirBtn: "选择目录",
-      exportDirPicking: "正在打开系统文件夹选择器…",
-      exportDirPickerFailed: "无法打开文件夹选择器。请手动输入完整路径。",
-      exportDirCancelled: "已取消",
-      exportDirPicked: ({ path }) => `已选择目录：${path}——点击保存设置生效。`,
-      exportDirPathInferred: "已根据所选文件夹设置路径。请检查/编辑后点击保存设置。",
-      fsAccessUnavailable: "当前浏览器不支持文件夹选择器。请直接输入完整路径（例如 C:\\Users\\you\\Documents\\notes）。",
 
       saveSettings: "保存设置",
       localRemix: "本地改造",
@@ -521,6 +499,16 @@ const YTD_OPTIONS = (() => {
       whisperField.classList.toggle("is-hidden", !enabled);
     }
 
+    function toggleAdvancedOptions() {
+      const whisperSection = doc.getElementById("whisperSection");
+      const btn = doc.getElementById("toggleAdvancedBtn");
+      if (!whisperSection || !btn) return;
+
+      const isHidden = whisperSection.classList.contains("is-hidden");
+      whisperSection.classList.toggle("is-hidden", !isHidden);
+      btn.textContent = isHidden ? "隐藏高级选项 ▴" : "显示高级选项 ▾";
+    }
+
     function applyLanguage(language) {
       const nextDraft = switchPromptDraft(
         promptDrafts,
@@ -696,28 +684,6 @@ const YTD_OPTIONS = (() => {
       setStatus(dataStatus, "notesDeleted");
     }
 
-    async function pickDirectory() {
-      if (!exportDirInput) return;
-
-      try {
-        const dirHandle = await window.showDirectoryPicker();
-        if (dirHandle && dirHandle.name) {
-          // Browser security: dirHandle.name only returns folder name, not full path.
-          // User may need to manually edit to full path if required.
-          exportDirInput.value = dirHandle.name;
-          setStatus(dataStatus, "exportDirPicked", { path: dirHandle.name });
-        } else {
-          setStatus(dataStatus, "exportDirCancelled");
-        }
-      } catch (err) {
-        if (err.name === "AbortError") {
-          setStatus(dataStatus, "exportDirCancelled");
-        } else {
-          setStatus(dataStatus, "exportDirPickerFailed");
-        }
-      }
-    }
-
     async function resetAllData() {
       const confirmed = root.confirm(
         translate(currentLanguage, "resetConfirm"),
@@ -745,9 +711,7 @@ const YTD_OPTIONS = (() => {
     if (whisperTestBtn) {
       whisperTestBtn.addEventListener("click", testWhisperConnection);
     }
-    if (pickDirBtn) {
-      pickDirBtn.addEventListener("click", pickDirectory);
-    }
+    doc.getElementById("toggleAdvancedBtn")?.addEventListener("click", toggleAdvancedOptions);
     copyCustomizationPromptBtn.addEventListener(
       "click",
       copyCustomizationPrompt,

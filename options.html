@@ -64,7 +64,13 @@
           </p>
         </section>
 
-        <section class="card">
+        <div class="form-actions" style="justify-content: flex-start; gap: 10px; margin-bottom: 15px;">
+          <button id="toggleAdvancedBtn" class="secondary" type="button">
+            显示高级选项 ▾
+          </button>
+        </div>
+
+        <section id="whisperSection" class="card is-hidden">
           <h2 data-i18n="whisperHeading">本地 Whisper（可选）</h2>
           <p class="help" data-i18n="whisperHelp">
             启动 <code>start_whisper_server.bat</code> 后，B 站没有原生字幕
