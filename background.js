@@ -751,7 +751,7 @@ async function transcribeWithBailian(videoId, cid, apiKey) {
 async function transcribeWithLocalWhisper(videoId, cid, settings) {
   const url = (settings.whisperUrl || "").replace(/\/+$/, "");
   if (!url) {
-    throw new Error("whisperEnabled is on but whisperUrl is empty.");
+    throw new Error("Local Whisper is selected as the ASR provider but whisperUrl is empty.");
   }
   const audioBlob = await fetchBilibiliAudioBlob(videoId, cid);
   const contentType = audioBlob.type || "audio/mp4";
@@ -1169,7 +1169,7 @@ async function handleTriggerWhisperTranscription(
   requestedPage = 1,
 ) {
   const settings = await getSettings();
-  if (!settings.whisperEnabled) {
+  if (settings.asrProvider !== "whisper") {
     throw new Error("Local Whisper is not enabled. Open bilidown Settings.");
   }
   // Look up the cid first so the cache file name is stable.
@@ -1236,7 +1236,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     }
 
     // First, try to look for local subtitle files (YYYY-MM-DD_videoTitle_upName.{txt,srt,md})
-    if (settings.whisperEnabled && settings.whisperUrl && settings.subtitlesDir) {
+    if (settings.asrProvider === "whisper" && settings.whisperUrl && settings.subtitlesDir) {
       const localFile = await loadLocalSubtitleFile(
         videoId,
         videoTitle,
@@ -1262,7 +1262,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     // before falling through to native subtitles. We do NOT auto-trigger
     // Whisper here — that requires an explicit user click — but we tell
     // the side panel which action is available.
-    if (settings.whisperEnabled) {
+    if (settings.asrProvider === "whisper") {
       const cached = await loadCachedTranscript(videoId, page.cid, settings);
       if (cached) {
         return {
@@ -1291,7 +1291,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
 
     // Whisper is disabled AND no Bailian key: nothing else can produce a
     // transcript for videos without native B-station subtitles.
-    if (!settings.asrApiKey && !settings.whisperEnabled) {
+    if (!settings.asrApiKey && settings.asrProvider === "none") {
       // (we still let the code fall through to native subtitles below —
       // many videos do have them.)
     }

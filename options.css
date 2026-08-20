@@ -215,9 +215,9 @@ select {
   cursor: pointer;
 }
 
-/* Whisper block mirrors the provider-field toggle pattern. */
-#whisperConfigFields {
-  margin-top: 12px;
+/* ASR provider block: spacing under the dropdown mirrors .provider-fields. */
+[data-asr-field] {
+  margin-top: 10px;
 }
 
 /* General hidden utility class for advanced options section */

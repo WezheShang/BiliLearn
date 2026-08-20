@@ -453,12 +453,12 @@ const YTD_OPTIONS = (() => {
       ...doc.querySelectorAll("[data-provider-field]"),
     ];
     const asrApiKeyInput = doc.getElementById("asrApiKey");
-    const whisperEnabled = doc.getElementById("whisperEnabled");
+    const asrProviderSelect = doc.getElementById("asrProvider");
+    const asrFieldEls = [...doc.querySelectorAll("[data-asr-field]")];
     const whisperUrlInput = doc.getElementById("whisperUrl");
     const whisperModelSelect = doc.getElementById("whisperModel");
     const whisperLanguageInput = doc.getElementById("whisperLanguage");
     const subtitlesDirInput = doc.getElementById("subtitlesDir");
-    const whisperConfigFields = doc.getElementById("whisperConfigFields");
     const whisperTestBtn = doc.getElementById("whisperTestBtn");
     const whisperTestStatus = doc.getElementById("whisperTestStatus");
     const customizationPrompt = doc.getElementById("customizationPrompt");
@@ -494,20 +494,13 @@ const YTD_OPTIONS = (() => {
       }
     }
 
-    function applyWhisperVisibility(enabled) {
-      const whisperConfigFields = doc.getElementById("whisperConfigFields");
-      if (!whisperConfigFields) return;
-      whisperConfigFields.classList.toggle("is-hidden", !enabled);
-    }
-
-    function toggleAdvancedOptions() {
-      const whisperSection = doc.getElementById("whisperSection");
-      const btn = doc.getElementById("toggleAdvancedBtn");
-      if (!whisperSection || !btn) return;
-
-      const isHidden = whisperSection.classList.contains("is-hidden");
-      whisperSection.classList.toggle("is-hidden", !isHidden);
-      btn.textContent = isHidden ? "隐藏高级选项 ▴" : "显示高级选项 ▾";
+    function applyAsrProviderVisibility(provider) {
+      const active = ["bailian", "whisper", "none"].includes(provider)
+        ? provider
+        : "bailian";
+      for (const el of asrFieldEls) {
+        el.classList.toggle("is-hidden", el.dataset.asrField !== active);
+      }
     }
 
     function applyLanguage(language) {
@@ -578,9 +571,9 @@ const YTD_OPTIONS = (() => {
         if (glmApiKeyInput) glmApiKeyInput.value = settings.glmApiKey;
         if (glmApiTypeSelect) glmApiTypeSelect.value = settings.glmApiType;
         asrApiKeyInput.value = settings.asrApiKey;
-        if (whisperEnabled) {
-          whisperEnabled.checked = settings.whisperEnabled === true;
-          applyWhisperVisibility(whisperEnabled.checked);
+        if (asrProviderSelect) {
+          asrProviderSelect.value = settings.asrProvider;
+          applyAsrProviderVisibility(settings.asrProvider);
         }
         if (whisperUrlInput) whisperUrlInput.value = settings.whisperUrl;
         if (whisperModelSelect) whisperModelSelect.value = settings.whisperModel;
@@ -622,7 +615,7 @@ const YTD_OPTIONS = (() => {
         glmApiKey: glmApiKeyInput ? glmApiKeyInput.value : "",
         glmApiType: glmApiTypeSelect ? glmApiTypeSelect.value : "",
         asrApiKey: asrApiKeyInput.value,
-        whisperEnabled: !!(whisperEnabled && whisperEnabled.checked),
+        asrProvider: asrProviderSelect ? asrProviderSelect.value : "bailian",
         whisperUrl: whisperUrlInput ? whisperUrlInput.value : "",
         whisperModel: whisperModelSelect ? whisperModelSelect.value : "",
         whisperLanguage: whisperLanguageInput ? whisperLanguageInput.value : "",
@@ -647,7 +640,7 @@ const YTD_OPTIONS = (() => {
           settings,
         );
         applyProviderVisibility(settings.provider);
-        if (whisperEnabled) applyWhisperVisibility(whisperEnabled.checked);
+        if (asrProviderSelect) applyAsrProviderVisibility(settings.asrProvider);
         setStatus(saveStatus, "saved");
       } catch (_error) {
         setStatus(saveStatus, "saveFailed");
@@ -719,15 +712,14 @@ const YTD_OPTIONS = (() => {
     aiProviderSelect.addEventListener("change", () => {
       applyProviderVisibility(aiProviderSelect.value);
     });
-    if (whisperEnabled) {
-      whisperEnabled.addEventListener("change", () => {
-        applyWhisperVisibility(whisperEnabled.checked);
+    if (asrProviderSelect) {
+      asrProviderSelect.addEventListener("change", () => {
+        applyAsrProviderVisibility(asrProviderSelect.value);
       });
     }
     if (whisperTestBtn) {
       whisperTestBtn.addEventListener("click", testWhisperConnection);
     }
-    doc.getElementById("toggleAdvancedBtn")?.addEventListener("click", toggleAdvancedOptions);
     copyCustomizationPromptBtn.addEventListener(
       "click",
       copyCustomizationPrompt,

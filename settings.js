@@ -95,12 +95,14 @@ var YTD_SETTINGS = (() => {
     glmApiType: DEFAULT_GLM_API_TYPE,
     aiBaseUrl: PROVIDER_PRESETS[DEFAULT_PROVIDER].baseUrl,
     aiModel: PROVIDER_PRESETS[DEFAULT_PROVIDER].model,
+    // Which speech-to-text engine to fall back on when B-station has no
+    // usable native subtitles. "none" disables ASR entirely, "bailian"
+    // uses Alibaba Bailian Fun-ASR (cloud, requires a key), "whisper"
+    // uses the local faster-whisper server (whisper_server.py).
+    asrProvider: "bailian",
     asrApiKey: "",
     supadataApiKey: "",
-    // Local Whisper fallback (used when neither native B-station subtitles
-    // nor Alibaba Bailian ASR produce useful text). Disabled by default —
-    // the user must opt in and start whisper_server.py separately.
-    whisperEnabled: false,
+    // Local Whisper configuration (only used when asrProvider === "whisper").
     whisperUrl: "http://127.0.0.1:7860",
     whisperModel: "base",
     whisperLanguage: "",
@@ -188,10 +190,12 @@ var YTD_SETTINGS = (() => {
         typeof input.aiModel === "string" && input.aiModel.trim()
           ? input.aiModel.trim()
           : preset.model,
+      asrProvider: ["bailian", "whisper", "none"].includes(input.asrProvider)
+        ? input.asrProvider
+        : DEFAULTS.asrProvider,
       asrApiKey:
         typeof input.asrApiKey === "string" ? input.asrApiKey.trim() : "",
       supadataApiKey: "",
-      whisperEnabled: input.whisperEnabled === true,
       whisperUrl:
         typeof input.whisperUrl === "string" && input.whisperUrl.trim()
           ? input.whisperUrl.trim().replace(/\/+$/, "")
@@ -215,6 +219,14 @@ var YTD_SETTINGS = (() => {
   }
 
   function migrateLegacyCustom(input = {}) {
+    // Older settings used a separate `whisperEnabled` boolean. Translate it
+    // into the new `asrProvider` enum so existing users keep their choice.
+    if (input && input.asrProvider == null) {
+      let asrProvider = DEFAULTS.asrProvider;
+      if (input.whisperEnabled === true) asrProvider = "whisper";
+      else if (input.asrApiKey) asrProvider = "bailian";
+      input = { ...input, asrProvider };
+    }
     return {
       settings: normalize(input),
       migrated: isLegacyCustom(input),
