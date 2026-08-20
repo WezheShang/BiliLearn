@@ -9,6 +9,7 @@
     "sidePanel",
     "storage",
     "tabs",
+    "cookies",
     "declarativeNetRequestWithHostAccess",
     "downloads"
   ],
