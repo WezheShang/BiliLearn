@@ -659,6 +659,30 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+.regenerate-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--sage-dim);
+  color: var(--sage);
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: all 0.14s ease;
+  opacity: 0.8;
+}
+
+.regenerate-btn:hover:not(:disabled) {
+  background: rgba(0, 174, 236, 0.2);
+  opacity: 1;
+}
+
+.regenerate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Colored dot indicator */
 .source-dot {
   display: inline-block;

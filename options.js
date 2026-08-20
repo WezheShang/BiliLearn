@@ -60,13 +60,15 @@ const YTD_OPTIONS = (() => {
       exportDirLabel: "Transcribe location",
       exportDirPickBtn: "Change location",
       exportDirHelp:
-        "Where exported notes, summaries, and Whisper transcripts land. Default: system Downloads. Click \u201cChange location\u201d to pick another folder via a system dialog.",
+        "Where exported notes, summaries, and Whisper transcripts land. Default: system Downloads. Click \"选择目录\" to pick a folder, then click <strong>Save settings</strong> to persist your choice.",
+      pickDirBtn: "选择目录",
       exportDirPicking: "Opening system folder picker…",
       exportDirPickerFailed: "Could not open the folder picker. Please type the path manually.",
       exportDirCancelled: "Selection cancelled",
       exportDirPicked: ({ path }) => `Folder picked: ${path} — click Save settings to persist.`,
       exportDirPathInferred: "Path set from the folder picker. Verify the value, edit if needed, then click Save settings.",
       fsAccessUnavailable: "This browser doesn't expose a folder picker. Type the full path directly (e.g. C:\\Users\\you\\Documents\\notes).",
+
       saveSettings: "Save settings",
       localRemix: "Local remix",
       customizationTitle: "Want to use another AI model?",
@@ -171,13 +173,15 @@ const YTD_OPTIONS = (() => {
       exportDirLabel: "转写位置",
       exportDirPickBtn: "更改位置",
       exportDirHelp:
-        "导出笔记、总结、Whisper 字幕的默认位置。默认是系统 Downloads。点击\"更改位置\"用系统对话框选目录。",
+        "导出笔记、总结、Whisper 字幕的默认位置。默认是系统 Downloads。点击「选择目录」选择文件夹，然后点击<strong>保存设置</strong>让修改生效。",
+      pickDirBtn: "选择目录",
       exportDirPicking: "正在打开系统文件夹选择器…",
       exportDirPickerFailed: "无法打开文件夹选择器。请手动输入完整路径。",
       exportDirCancelled: "已取消",
       exportDirPicked: ({ path }) => `已选择目录：${path}——点击保存设置生效。`,
       exportDirPathInferred: "已根据所选文件夹设置路径。请检查/编辑后点击保存设置。",
       fsAccessUnavailable: "当前浏览器不支持文件夹选择器。请直接输入完整路径（例如 C:\\Users\\you\\Documents\\notes）。",
+
       saveSettings: "保存设置",
       localRemix: "本地改造",
       customizationTitle: "想使用其他 AI 模型？",
@@ -476,7 +480,6 @@ const YTD_OPTIONS = (() => {
     const whisperModelSelect = doc.getElementById("whisperModel");
     const whisperLanguageInput = doc.getElementById("whisperLanguage");
     const subtitlesDirInput = doc.getElementById("subtitlesDir");
-    const exportDirInput = doc.getElementById("exportDir");
     const whisperField = doc.querySelector("[data-whisper-field]");
     const whisperTestBtn = doc.getElementById("whisperTestBtn");
     const whisperTestStatus = doc.getElementById("whisperTestStatus");
@@ -487,6 +490,7 @@ const YTD_OPTIONS = (() => {
     const copyStatus = doc.getElementById("copyStatus");
     const saveStatus = doc.getElementById("saveStatus");
     const dataStatus = doc.getElementById("dataStatus");
+
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
     const statusStates = new Map();
     const promptDrafts = createPromptDrafts();
@@ -578,7 +582,6 @@ const YTD_OPTIONS = (() => {
         if (whisperModelSelect) whisperModelSelect.value = settings.whisperModel;
         if (whisperLanguageInput) whisperLanguageInput.value = settings.whisperLanguage;
         if (subtitlesDirInput) subtitlesDirInput.value = settings.subtitlesDir;
-        if (exportDirInput) exportDirInput.value = settings.exportDir;
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -620,7 +623,6 @@ const YTD_OPTIONS = (() => {
         whisperModel: whisperModelSelect ? whisperModelSelect.value : "",
         whisperLanguage: whisperLanguageInput ? whisperLanguageInput.value : "",
         subtitlesDir: subtitlesDirInput ? subtitlesDirInput.value : "",
-        exportDir: exportDirInput ? exportDirInput.value : "",
       });
 
       const activeKey = settingsApi.activeApiKey(settings);
@@ -682,121 +684,6 @@ const YTD_OPTIONS = (() => {
       }
     }
 
-    /**
-     * Open the system folder picker via the File System Access API.
-     *
-     * `window.showDirectoryPicker()` is the modern web-platform API for
-     * choosing a directory — same native dialog you see in VSCode,
-     * Slack, etc. It's available in Chrome 86+ and Edge 86+, including
-     * in extension pages (chrome-extension://) which count as secure
-     * contexts.
-     *
-     * The API returns a `FileSystemDirectoryHandle`, not a string path.
-     * To recover the absolute path, we walk the parent chain
-     * (`handle.getParentHandle()`, Chrome 110+) and reconstruct the
-     * path from the root, then match against KNOWN_HOMES so the user
-     * gets a sensible full path on the input. If no KNOWN_HOMES matches
-     * (e.g. an external drive), we fall back to the partial path and
-     * ask the user to confirm.
-     *
-     * This replaces the previous "Save As dialog + extract folder"
-     * workaround, which required the user to type a fake filename.
-     */
-    async function pickExportDirectory() {
-      if (!exportDirInput || !dataStatus) return;
-      setStatus(dataStatus, "exportDirPicking");
-
-      if (typeof window.showDirectoryPicker !== "function") {
-        // Old browser or insecure context. Fall back to a text input.
-        setStatus(dataStatus, "fsAccessUnavailable");
-        exportDirInput.focus();
-        return;
-      }
-
-      let dirHandle;
-      try {
-        dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-      } catch (err) {
-        if (err && (err.name === "AbortError" || err.code === 20)) {
-          setStatus(dataStatus, "exportDirCancelled");
-        } else {
-          console.error("Folder picker error:", err);
-          setStatus(dataStatus, "exportDirPickerFailed");
-        }
-        return;
-      }
-
-      // Walk the parent chain to reconstruct the path. Each step
-      // appends the parent's name; we stop when getParentHandle is
-      // unsupported, throws, or returns the same handle (we're at root).
-      const parts = [dirHandle.name];
-      let current = dirHandle;
-      const KNOWN_HOMES = settingsApi.KNOWN_HOMES || [];
-      const supportsGetParent =
-        typeof current.getParentHandle === "function";
-
-      if (supportsGetParent) {
-        // Bound the walk so a buggy/slow filesystem can't hang us.
-        for (let safety = 0; safety < 32; safety += 1) {
-          let parent;
-          try {
-            parent = await current.getParentHandle();
-          } catch (_e) {
-            break;
-          }
-          if (!parent || parent.name === current.name) break;
-          parts.unshift(parent.name);
-          current = parent;
-        }
-      }
-
-      // Match against KNOWN_HOMES so the user gets a real absolute
-      // path (e.g. C:/Users/username/Downloads) rather than the
-      // driver-relative form (Users/username/Downloads).
-      //
-      // KNOWN_HOMES entries look like "C:/Users/username" or
-      // "/Users/username". The path we just walked (`parts`) is
-      // always relative to the filesystem root, so:
-      //   - For Windows homes ("C:/Users/foo"), the FIRST segment of
-      //     the home is the drive letter, which is NOT in `parts`.
-      //     We compare parts[0..N) against homeParts[1..N+1).
-      //   - For POSIX homes ("/Users/foo"), the home's first segment
-      //     IS the path root. We compare parts[0..N) against
-      //     homeParts[0..N).
-      let resolvedPath = parts.join("/");
-      let matched = false;
-      for (const home of KNOWN_HOMES) {
-        const homeParts = home.split(/[\\/]+/).filter(Boolean);
-        if (homeParts.length === 0) continue;
-        const isWindowsHome = /^[A-Z]:$/i.test(homeParts[0]);
-        // `homeSuffix` is the part of the home that the picked path
-        // should align against. Drop the drive letter for Windows.
-        const homeSuffix = isWindowsHome ? homeParts.slice(1) : homeParts;
-        if (parts.length < homeSuffix.length) continue;
-        const pathStart = parts.slice(0, homeSuffix.length);
-        if (
-          pathStart.join("/").toLowerCase() !== homeSuffix.join("/").toLowerCase()
-        ) {
-          continue;
-        }
-        const relative = parts.slice(homeSuffix.length).join("/");
-        resolvedPath = relative ? `${home}/${relative}` : home;
-        matched = true;
-        break;
-      }
-
-      exportDirInput.value = resolvedPath;
-      // Highlight the input so the user notices the change and can
-      // verify / edit the path before clicking "Save settings" below.
-      exportDirInput.focus();
-      exportDirInput.select();
-      if (!matched) {
-        setStatus(dataStatus, "exportDirPathInferred");
-      } else {
-        setStatus(dataStatus, "exportDirPicked", { path: resolvedPath });
-      }
-    }
-
     async function clearCachedSummaries() {
       const all = await storage.get(null);
       const keys = Object.keys(all).filter((key) => key.startsWith("bilidown_"));
@@ -807,6 +694,28 @@ const YTD_OPTIONS = (() => {
     async function clearNotes() {
       await storage.remove("ytd_notes");
       setStatus(dataStatus, "notesDeleted");
+    }
+
+    async function pickDirectory() {
+      if (!exportDirInput) return;
+
+      try {
+        const dirHandle = await window.showDirectoryPicker();
+        if (dirHandle && dirHandle.name) {
+          // Browser security: dirHandle.name only returns folder name, not full path.
+          // User may need to manually edit to full path if required.
+          exportDirInput.value = dirHandle.name;
+          setStatus(dataStatus, "exportDirPicked", { path: dirHandle.name });
+        } else {
+          setStatus(dataStatus, "exportDirCancelled");
+        }
+      } catch (err) {
+        if (err.name === "AbortError") {
+          setStatus(dataStatus, "exportDirCancelled");
+        } else {
+          setStatus(dataStatus, "exportDirPickerFailed");
+        }
+      }
     }
 
     async function resetAllData() {
@@ -836,9 +745,8 @@ const YTD_OPTIONS = (() => {
     if (whisperTestBtn) {
       whisperTestBtn.addEventListener("click", testWhisperConnection);
     }
-    const pickExportDirBtn = doc.getElementById("pickExportDirBtn");
-    if (pickExportDirBtn) {
-      pickExportDirBtn.addEventListener("click", pickExportDirectory);
+    if (pickDirBtn) {
+      pickDirBtn.addEventListener("click", pickDirectory);
     }
     copyCustomizationPromptBtn.addEventListener(
       "click",

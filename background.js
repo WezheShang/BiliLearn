@@ -87,13 +87,25 @@ async function requestAiCompletion({
   responseFormat,
 }) {
   const settings = await getSettings();
-  if (!YTD_SETTINGS.activeApiKey(settings)) {
+  const activeKey = YTD_SETTINGS.activeApiKey(settings);
+  if (!activeKey) {
     const error = new Error(
       "AI provider API key not configured. Open bilidown Settings.",
     );
     error.code = "NO_AI_KEY";
     throw error;
   }
+
+  // Debug logging for GLM troubleshooting
+  if (settings.provider === "glm") {
+    console.log("[dk-bilidown] GLM config:", {
+      apiType: settings.glmApiType,
+      baseUrl: settings.aiBaseUrl,
+      model: settings.aiModel,
+      keyPrefix: activeKey ? activeKey.substring(0, 8) + "..." : "empty",
+    });
+  }
+
   const body = {
     model: settings.aiModel,
     messages,
@@ -834,6 +846,159 @@ async function transcribeWithLocalWhisper(videoId, cid, settings) {
   }
 }
 
+/**
+ * Look for local subtitle files by filename pattern: YYYY-MM-DD_videoTitle_upName.{txt,srt,md}
+ * Parse the file content into transcript format.
+ */
+async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, settings) {
+  const dir = settings && typeof settings.subtitlesDir === "string"
+    ? settings.subtitlesDir.trim().replace(/[\\/]+$/, "")
+    : "";
+  if (!dir) return null;
+
+  // Generate possible filenames
+  const cleanTitle = (videoTitle || "")
+    .replace(/[<>:"/\\|?*]/g, "_") // Replace invalid filename chars
+    .trim()
+    .substring(0, 100); // Limit length
+  const cleanChannel = (channelName || "")
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .trim()
+    .substring(0, 50);
+
+  const possibleFilenames = [];
+  if (pubDate) {
+    possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.md`);
+    possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.txt`);
+    possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.srt`);
+  }
+  // Fallback without date
+  possibleFilenames.push(`${cleanTitle}_${cleanChannel}.md`);
+  possibleFilenames.push(`${cleanTitle}_${cleanChannel}.txt`);
+  possibleFilenames.push(`${cleanTitle}_${cleanChannel}.srt`);
+
+  try {
+    const qs = new URLSearchParams({
+      filenames: possibleFilenames.join(","),
+      cache_dir: dir,
+    });
+    const response = await fetch(
+      `${settings.whisperUrl}/local-file?${qs.toString()}`,
+      { method: "GET" },
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      debugLog("[dk-bilidown BG] local file lookup failed:", response.status);
+      return null;
+    }
+    const data = await response.json();
+    if (!data || !data.ok || !data.payload) return null;
+
+    // Parse the file content
+    const { content, filename } = data.payload;
+    const transcript = parseLocalSubtitleContent(content, filename);
+    if (!transcript) return null;
+
+    return {
+      ...transcript,
+      source: "local-file",
+      cachePath: `${dir}/${filename}`,
+    };
+  } catch (error) {
+    debugLog("[dk-bilidown BG] local file load error:", error);
+    return null;
+  }
+}
+
+/**
+ * Parse local subtitle content (txt/srt/md) into transcript format
+ * Expected format: lines with timestamps like [MM:SS] or [HH:MM:SS]
+ */
+function parseLocalSubtitleContent(content, filename) {
+  const lines = content.split(/\r?\n/);
+  const transcript = [];
+  let transcriptTextPlain = "";
+  let transcriptTextTimestamped = "";
+
+  // Try to detect format
+  const isSrt = filename.endsWith(".srt");
+  const lineRegex = isSrt
+    ? /^\[(\d{2}):(\d{2}):(\d{2}),(\d{3})\]\s*(.+)$/ // SRT: [00:01:23,456] text
+    : /^\[(\d{1,2}):(\d{2})\]\s*(.+)$/; // Simple: [MM:SS] text
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const match = trimmed.match(lineRegex);
+    if (match) {
+      let startSeconds;
+      if (isSrt) {
+        // SRT format: [HH:MM:SS,mmm]
+        const [, hours, minutes, seconds, milliseconds] = match;
+        startSeconds =
+          parseInt(hours, 10) * 3600 +
+          parseInt(minutes, 10) * 60 +
+          parseInt(seconds, 10) +
+          parseInt(milliseconds, 10) / 1000;
+      } else {
+        // Simple format: [MM:SS]
+        const [, minutes, seconds] = match;
+        startSeconds = parseInt(minutes, 10) * 60 + parseInt(seconds, 10);
+      }
+      const text = match[match.length - 1].trim();
+      if (!text) continue;
+
+      const minutes = Math.floor(startSeconds / 60);
+      const seconds = Math.floor(startSeconds % 60);
+      const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+
+      transcript.push({
+        text,
+        start: startSeconds,
+        duration: 0, // Duration unknown in simple format
+        language: "zh", // Assume Chinese for local files
+      });
+
+      transcriptTextPlain += text + " ";
+      transcriptTextTimestamped += `[${timestamp}] ${text}\n`;
+    } else {
+      // Try to match without brackets: 00:01:23 or 01:23 format
+      const timeMatch = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s+(.+)$/);
+      if (timeMatch) {
+        const [, minutes, seconds, extraSeconds, text] = timeMatch;
+        startSeconds = parseInt(minutes, 10) * 60 + parseInt(seconds, 10);
+        if (extraSeconds) {
+          startSeconds += parseInt(extraSeconds, 10);
+        }
+        const cleanText = text.trim();
+        if (!cleanText) continue;
+
+        const timestamp = `${minutes}:${String(parseInt(seconds, 10)).padStart(2, "0")}`;
+
+        transcript.push({
+          text: cleanText,
+          start: startSeconds,
+          duration: 0,
+          language: "zh",
+        });
+
+        transcriptTextPlain += cleanText + " ";
+        transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
+      }
+    }
+  }
+
+  if (transcript.length === 0) return null;
+
+  return {
+    transcript,
+    transcriptText: transcriptTextPlain.trim(),
+    transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+    language: "zh",
+  };
+}
+
 async function loadCachedTranscript(bvid, cid, settings) {
   const url = (settings.whisperUrl || "").replace(/\/+$/, "");
   if (!url || !YTD_SETTINGS.whisperCachePath(settings, bvid, cid)) return null;
@@ -993,11 +1158,41 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     const page = view.data.pages?.[part - 1] || view.data.pages?.[0];
     if (!page?.cid) throw new Error("无法识别当前分 P 的 CID。");
 
+    // Extract video metadata for local file lookup
+    const videoTitle = view.data.title || "";
+    const channelName = view.data.owner?.name || "";
+    const pubDate = view.data.pubdate
+      ? new Date(view.data.pubdate * 1000).toISOString().split("T")[0]
+      : "";
+
     // When configured, ASR is the source of truth. This avoids incorrect
     // Bilibili ai-zh tracks and also covers videos without subtitle tracks.
     const settings = await getSettings();
     if (settings.asrApiKey) {
       return await transcribeWithBailian(videoId, page.cid, settings.asrApiKey);
+    }
+
+    // First, try to look for local subtitle files (YYYY-MM-DD_videoTitle_upName.{txt,srt,md})
+    if (settings.whisperEnabled && settings.whisperUrl && settings.subtitlesDir) {
+      const localFile = await loadLocalSubtitleFile(
+        videoId,
+        videoTitle,
+        channelName,
+        pubDate,
+        settings
+      );
+      if (localFile) {
+        return {
+          success: true,
+          source: "local-file",
+          language: localFile.language || "unknown",
+          chapters: localFile.chapters || [],
+          transcript: Array.isArray(localFile.transcript) ? localFile.transcript : [],
+          transcriptText: localFile.transcriptText || "",
+          transcriptTextTimestamped: localFile.transcriptTextTimestamped || "",
+          cachePath: localFile.cachePath,
+        };
+      }
     }
 
     // If local Whisper is enabled, look for a previously-cached transcript
@@ -1026,7 +1221,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         success: false,
         error: "WHISPER_NEEDED",
         message:
-          "这个视频没有缓存的本地 Whisper 字幕。点击“用 Whisper 转录”后开始转写，结果会保存到字幕目录供下次直接使用。",
+          "没有找到官方字幕或本地字幕文件。点击下方按钮启动 Whisper 转写，结果会保存到字幕目录供下次直接使用。",
         cacheDir: settings.subtitlesDir || "",
       };
     }

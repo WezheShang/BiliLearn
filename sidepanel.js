@@ -903,9 +903,60 @@ function renderTranscript() {
   badge.className = "transcript-source-badge";
   const sourceLabel = currentTranscriptSource === "aliyun-fun-asr"
     ? "阿里云 Fun-ASR 语音识别"
+    : currentTranscriptSource === "local-file"
+    ? "本地字幕"
+    : currentTranscriptSource === "local-cache"
+    ? "本地 Whisper 缓存"
+    : currentTranscriptSource === "local-whisper"
+    ? "本地 Whisper 转写"
+    : currentTranscriptSource === "local-whisper-corrected"
+    ? "本地 Whisper（AI 修正）"
     : "B站视频字幕";
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${sourceLabel} · ${escapeHtml(getOriginalTranscriptLabel())}`;
+
+  let badgeContent = `<span class="source-dot source-dot--subs"></span> ${sourceLabel} · ${escapeHtml(getOriginalTranscriptLabel())}`;
+
+  // Add "Regenerate" button for local files
+  if (currentTranscriptSource === "local-file") {
+    badgeContent += `<button id="regenerateWhisperBtn" class="regenerate-btn">🔄 重新生成</button>`;
+  }
+
+  badge.innerHTML = badgeContent;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
+
+  // Attach event listener to regenerate button
+  const regenerateBtn = document.getElementById("regenerateWhisperBtn");
+  if (regenerateBtn) {
+    regenerateBtn.addEventListener("click", async () => {
+      regenerateBtn.disabled = true;
+      regenerateBtn.textContent = "正在启动…";
+      updateLoading("启动 Whisper 转录", "重新转写当前视频");
+      showState("loading");
+      try {
+        const result = await chrome.runtime.sendMessage({
+          action: "triggerWhisperTranscription",
+          videoId: currentVideoId?.split("@p")[0] || "",
+          pageNumber: Math.max(
+            1,
+            Number(String(currentVideoId?.split("@p")[1] || "1").replace(/^p/i, "")) || 1,
+          ),
+          videoUrl: currentVideoUrl || "",
+        });
+        if (result && result.success) {
+          await chrome.storage.local.remove(`bilidown_${currentVideoId}`);
+          currentVideoId = null;
+          await startBilidown(currentVideoId, currentVideoUrl);
+        } else {
+          showError(
+            "Whisper 转录失败",
+            (result && (result.message || result.error)) ||
+              "请检查 whisper_server.py 是否在运行。",
+          );
+        }
+      } catch (err) {
+        showError("Whisper 转录失败", err?.message || String(err));
+      }
+    });
+  }
 
   // Group entries using smart sentence-boundary + time-guardrail logic
   const grouped = groupTranscriptEntries(currentTranscript);
@@ -1662,29 +1713,47 @@ async function downloadTextFile(text, filename, mimeType = "text/plain;charset=u
     const STORAGE_KEY = "ytd_settings";
     const stored = await chrome.storage.local.get(STORAGE_KEY);
     exportDir = (stored?.[STORAGE_KEY]?.exportDir || "").trim();
+    console.log("[dk-bilidown] Export directory from storage:", exportDir || "(default Downloads)");
   } catch (_err) {
     // Storage might be locked or unavailable; fall through to default.
+    console.error("[dk-bilidown] Failed to read exportDir from storage:", _err);
   }
+
+  const downloadOptions = {
+    url: dataUrl,
+    filename: filename,
+    conflictAction: "uniquify",
+  };
 
   if (exportDir) {
     // Build the full path. Strip any trailing separator from exportDir
     // and use a forward slash — Chrome accepts forward slashes on
     // Windows, macOS, and Linux in the filename parameter.
     const fullPath = `${exportDir.replace(/[\\/]+$/, "")}/${filename}`;
-    chrome.downloads.download({
-      url: dataUrl,
-      filename: fullPath,
-      saveAs: true,
-      conflictAction: "uniquify",
-    });
+    downloadOptions.filename = fullPath;
+    downloadOptions.saveAs = true; // Show Save As dialog with path pre-filled
   } else {
-    // No custom path configured → silent download to default Downloads.
-    chrome.downloads.download({
-      url: dataUrl,
-      filename: filename,
-      saveAs: false,
-      conflictAction: "uniquify",
-    });
+    downloadOptions.saveAs = false; // Silent download to default Downloads
+  }
+
+  try {
+    const downloadId = await chrome.downloads.download(downloadOptions);
+    console.log("[dk-bilidown] Download started, ID:", downloadId, "options:", downloadOptions);
+  } catch (error) {
+    console.error("[dk-bilidown] Failed to start download:", error);
+    // Try a fallback: just use the filename without path
+    try {
+      const fallbackId = await chrome.downloads.download({
+        url: dataUrl,
+        filename: filename,
+        saveAs: false,
+        conflictAction: "uniquify",
+      });
+      console.log("[dk-bilidown] Fallback download started, ID:", fallbackId);
+    } catch (fallbackError) {
+      console.error("[dk-bilidown] Fallback download also failed:", fallbackError);
+      alert("下载失败：\n" + error.message);
+    }
   }
 }
 

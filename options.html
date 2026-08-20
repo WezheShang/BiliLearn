@@ -76,7 +76,7 @@
             <span>启用本地 Whisper 兜底</span>
           </label>
 
-          <div data-whisper-field>
+          <div data-whisper-field class="is-hidden">
             <label for="whisperUrl" data-i18n="whisperUrlLabel"
               >Whisper server URL</label
             >
@@ -372,39 +372,6 @@
           >
             Reset extension data
           </button>
-        </div>
-
-        <div class="location-field" style="margin-top: 18px">
-          <label for="exportDir" data-i18n="exportDirLabel"
-            >Transcribe location</label
-          >
-          <div style="display: flex; gap: 8px; align-items: center">
-            <input
-              id="exportDir"
-              name="exportDir"
-              type="text"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="C:/Users/you/Downloads"
-              style="flex: 1"
-            />
-            <button
-              id="pickExportDirBtn"
-              class="secondary"
-              type="button"
-              data-i18n="exportDirPickBtn"
-            >
-              Change location
-            </button>
-          </div>
-          <p class="help" data-i18n="exportDirHelp">
-            Where exported notes, summaries, and Whisper transcripts land.
-            Default: system Downloads. Click “Change location” to open the
-            system folder picker — pick a folder, the path is auto-filled, then
-            click <strong>Save settings</strong> below to persist. You can also
-            type a path directly (use <code>~/Downloads</code> for your home
-            Downloads).
-          </p>
         </div>
         <span id="dataStatus" role="status" aria-live="polite"></span>
       </section>

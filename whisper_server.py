@@ -194,6 +194,19 @@ class Handler(BaseHTTPRequestHandler):
             cache_dir = (qs.get("cache_dir") or [None])[0]
             self._handle_cache_get(bvid, cid, cache_dir)
             return
+        if self.path.startswith("/local-file?"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            filenames_str = (qs.get("filenames") or [""])[0]
+            cache_dir = (qs.get("cache_dir") or [None])[0]
+            self._handle_local_file_get(filenames_str, cache_dir)
+            return
+        if self.path.startswith("/verify-path?"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            path_str = (qs.get("path") or [""])[0]
+            self._handle_verify_path(path_str)
+            return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found", "path": self.path})
 
     # ---------- POST ----------
@@ -373,6 +386,107 @@ class Handler(BaseHTTPRequestHandler):
             "ok": True,
             "cache_path": str(path),
             "payload": payload,
+        })
+
+    def _handle_local_file_get(self, filenames_str, cache_dir=None):
+        """Look for local subtitle files by name pattern."""
+        if not filenames_str or not cache_dir:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "filenames and cache_dir required"})
+            return
+
+        cache_path = Path(cache_dir)
+        if not cache_path.is_dir():
+            self._send_json(HTTPStatus.NOT_FOUND, {
+                "ok": False,
+                "reason": "cache directory not found",
+            })
+            return
+
+        # Try each filename in order
+        for filename in filenames_str.split(","):
+            filename = filename.strip()
+            if not filename:
+                continue
+            file_path = cache_path / filename
+            if file_path.is_file():
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    self._send_json(HTTPStatus.OK, {
+                        "ok": True,
+                        "payload": {
+                            "content": content,
+                            "filename": filename,
+                            "path": str(file_path),
+                        },
+                    })
+                    return
+                except OSError as exc:
+                    LOG.exception(f"Failed to read {file_path}")
+                    continue
+
+        # None found
+        self._send_json(HTTPStatus.NOT_FOUND, {
+            "ok": False,
+            "reason": "no matching file found",
+        })
+
+    def _handle_verify_path(self, path_str):
+        """Verify a directory path exists and is writable."""
+        if not path_str:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "path is required"})
+            return
+
+        try:
+            p = Path(path_str).resolve()
+        except (OSError, ValueError) as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {
+                "ok": False,
+                "error": f"invalid path: {exc}",
+            })
+            return
+
+        if not p.exists():
+            self._send_json(HTTPStatus.OK, {
+                "ok": False,
+                "exists": False,
+                "reason": "directory does not exist",
+                "path": str(p),
+            })
+            return
+
+        if not p.is_dir():
+            self._send_json(HTTPStatus.OK, {
+                "ok": False,
+                "exists": True,
+                "is_dir": False,
+                "reason": "path is not a directory",
+                "path": str(p),
+            })
+            return
+
+        # Test write permission by creating a temp file
+        try:
+            test_file = p / f".bilidown_write_test_{int(time.time())}.tmp"
+            test_file.touch()
+            test_file.unlink()
+        except OSError as exc:
+            self._send_json(HTTPStatus.OK, {
+                "ok": False,
+                "exists": True,
+                "is_dir": True,
+                "writable": False,
+                "error": f"permission denied: {exc}",
+                "path": str(p),
+            })
+            return
+
+        self._send_json(HTTPStatus.OK, {
+            "ok": True,
+            "exists": True,
+            "is_dir": True,
+            "writable": True,
+            "path": str(p),
         })
 
     def _handle_cache_write(self, body):
