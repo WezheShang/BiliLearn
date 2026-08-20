@@ -77,12 +77,12 @@
             时会下载音轨让本地 Whisper 转写，再调用 AI 校正专有名词。
           </p>
 
-          <label class="checkbox-label" data-i18n="whisperEnabledLabel">
-            <input id="whisperEnabled" type="checkbox" />
+          <label class="checkbox-label" data-i18n="whisperEnabledLabel" for="whisperEnabled">
+            <input id="whisperEnabled" type="checkbox">
             <span>启用本地 Whisper 兜底</span>
           </label>
 
-          <div data-whisper-field class="is-hidden">
+          <div id="whisperConfigFields" class="is-hidden">
             <label for="whisperUrl" data-i18n="whisperUrlLabel"
               >Whisper server URL</label
             >

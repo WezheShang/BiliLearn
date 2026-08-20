@@ -389,7 +389,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _handle_local_file_get(self, filenames_str, cache_dir=None):
-        """Look for local subtitle files by name pattern."""
+        """Look for local subtitle files by name pattern (recursive)."""
         if not filenames_str or not cache_dir:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "filenames and cache_dir required"})
             return
@@ -402,28 +402,30 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        # Try each filename in order
-        for filename in filenames_str.split(","):
-            filename = filename.strip()
-            if not filename:
-                continue
-            file_path = cache_path / filename
-            if file_path.is_file():
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    self._send_json(HTTPStatus.OK, {
-                        "ok": True,
-                        "payload": {
-                            "content": content,
-                            "filename": filename,
-                            "path": str(file_path),
-                        },
-                    })
-                    return
-                except OSError as exc:
-                    LOG.exception(f"Failed to read {file_path}")
-                    continue
+        # Normalize filenames for case-insensitive matching
+        target_filenames = [f.strip().lower() for f in filenames_str.split(",") if f.strip()]
+
+        # Recursively search for matching files
+        for root, dirs, files in os.walk(cache_path):
+            for filename in files:
+                # Case-insensitive match
+                if filename.lower() in target_filenames:
+                    file_path = Path(root) / filename
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        self._send_json(HTTPStatus.OK, {
+                            "ok": True,
+                            "payload": {
+                                "content": content,
+                                "filename": filename,
+                                "path": str(file_path),
+                            },
+                        })
+                        return
+                    except OSError as exc:
+                        LOG.exception(f"Failed to read {file_path}")
+                        continue
 
         # None found
         self._send_json(HTTPStatus.NOT_FOUND, {

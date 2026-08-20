@@ -107,7 +107,7 @@ var YTD_SETTINGS = (() => {
     // Where Whisper outputs and AI-corrected transcripts are cached on disk
     // so the user does not re-transcribe the same video on a later visit.
     // The path is user-configurable; we never write outside of it.
-    subtitlesDir: "C:/Users/username/videoprocess/subtitles",
+    subtitlesDir: "C:/Users/username/bilibilisubs",
     // Where exported notes / summaries / reports are written. Defaults to
     // the system Downloads folder; the user can change it to any writable
     // directory (e.g. a project folder or the subtitles cache). Supports

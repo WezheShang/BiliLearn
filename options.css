@@ -216,18 +216,13 @@ select {
 }
 
 /* Whisper block mirrors the provider-field toggle pattern. */
-[data-whisper-field] {
-  margin-top: 6px;
-}
-[data-whisper-field].is-hidden {
-  display: none;
-}
-[data-whisper-field] > label {
-  display: block;
+#whisperConfigFields {
   margin-top: 12px;
 }
-[data-whisper-field] > label:first-of-type {
-  margin-top: 0;
+
+/* General hidden utility class for advanced options section */
+.is-hidden {
+  display: none !important;
 }
 
 button.secondary {

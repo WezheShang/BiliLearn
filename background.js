@@ -15,7 +15,7 @@
 // chrome.storage.local and are never part of the extension source.
 importScripts("settings.js");
 
-const DEBUG = false;
+const DEBUG = true;
 const formatTimestamp = (seconds) => {
   const secs = Math.max(0, Number(seconds) || 0);
   const mins = Math.floor(secs / 60);
@@ -871,11 +871,19 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.md`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.txt`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.srt`);
+    // Fallback without UP name (for files like YYYY-MM-DD_Title.md)
+    possibleFilenames.push(`${pubDate}_${cleanTitle}.md`);
+    possibleFilenames.push(`${pubDate}_${cleanTitle}.txt`);
+    possibleFilenames.push(`${pubDate}_${cleanTitle}.srt`);
   }
   // Fallback without date
   possibleFilenames.push(`${cleanTitle}_${cleanChannel}.md`);
   possibleFilenames.push(`${cleanTitle}_${cleanChannel}.txt`);
   possibleFilenames.push(`${cleanTitle}_${cleanChannel}.srt`);
+  // Fallback without date and UP name
+  possibleFilenames.push(`${cleanTitle}.md`);
+  possibleFilenames.push(`${cleanTitle}.txt`);
+  possibleFilenames.push(`${cleanTitle}.srt`);
 
   try {
     const qs = new URLSearchParams({
@@ -912,7 +920,10 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
 
 /**
  * Parse local subtitle content (txt/srt/md) into transcript format
- * Expected format: lines with timestamps like [MM:SS] or [HH:MM:SS]
+ * Expected formats:
+ *   - Markdown: ## 段 N [0.00s → 29.70s] followed by text
+ *   - SRT: [HH:MM:SS,mmm] text
+ *   - Simple: [MM:SS] text
  */
 function parseLocalSubtitleContent(content, filename) {
   const lines = content.split(/\r?\n/);
@@ -920,8 +931,60 @@ function parseLocalSubtitleContent(content, filename) {
   let transcriptTextPlain = "";
   let transcriptTextTimestamped = "";
 
-  // Try to detect format
+  // Detect format based on filename and content
+  const isMarkdown = filename.endsWith(".md") || filename.endsWith(".markdown");
   const isSrt = filename.endsWith(".srt");
+
+  // Try to parse as Markdown format first
+  if (isMarkdown) {
+    let currentSegment = null;
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Match header: ## 段 N [0.00s → 29.70s]
+      const headerMatch = trimmed.match(/^##\s*段\s*\d+\s*\[\s*(\d+\.?\d*)s\s*→\s*(\d+\.?\d*)s\s*\]$/);
+      if (headerMatch) {
+        // Save previous segment if exists
+        if (currentSegment && currentSegment.text) {
+          transcript.push(currentSegment);
+          transcriptTextPlain += currentSegment.text + " ";
+          const timestamp = `${Math.floor(currentSegment.start / 60)}:${String(Math.floor(currentSegment.start % 60)).padStart(2, "0")}`;
+          transcriptTextTimestamped += `[${timestamp}] ${currentSegment.text}\n`;
+        }
+        // Start new segment
+        currentSegment = {
+          start: parseFloat(headerMatch[1]),
+          duration: parseFloat(headerMatch[2]) - parseFloat(headerMatch[1]),
+          text: "",
+          language: "zh",
+        };
+      } else if (currentSegment) {
+        // Add text to current segment
+        if (trimmed && !trimmed.startsWith("#")) {
+          if (currentSegment.text) currentSegment.text += " ";
+          currentSegment.text += trimmed;
+        }
+      }
+    }
+    // Don't forget the last segment
+    if (currentSegment && currentSegment.text) {
+      transcript.push(currentSegment);
+      transcriptTextPlain += currentSegment.text + " ";
+      const timestamp = `${Math.floor(currentSegment.start / 60)}:${String(Math.floor(currentSegment.start % 60)).padStart(2, "0")}`;
+      transcriptTextTimestamped += `[${timestamp}] ${currentSegment.text}\n`;
+    }
+
+    if (transcript.length > 0) {
+      return {
+        transcript,
+        transcriptText: transcriptTextPlain.trim(),
+        transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+        language: "zh",
+      };
+    }
+  }
+
+  // Fall back to SRT/Simple format parsing
   const lineRegex = isSrt
     ? /^\[(\d{2}):(\d{2}):(\d{2}),(\d{3})\]\s*(.+)$/ // SRT: [00:01:23,456] text
     : /^\[(\d{1,2}):(\d{2})\]\s*(.+)$/; // Simple: [MM:SS] text
@@ -967,7 +1030,7 @@ function parseLocalSubtitleContent(content, filename) {
       const timeMatch = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s+(.+)$/);
       if (timeMatch) {
         const [, minutes, seconds, extraSeconds, text] = timeMatch;
-        startSeconds = parseInt(minutes, 10) * 60 + parseInt(seconds, 10);
+        let startSeconds = parseInt(minutes, 10) * 60 + parseInt(seconds, 10);
         if (extraSeconds) {
           startSeconds += parseInt(extraSeconds, 10);
         }

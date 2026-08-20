@@ -458,7 +458,7 @@ const YTD_OPTIONS = (() => {
     const whisperModelSelect = doc.getElementById("whisperModel");
     const whisperLanguageInput = doc.getElementById("whisperLanguage");
     const subtitlesDirInput = doc.getElementById("subtitlesDir");
-    const whisperField = doc.querySelector("[data-whisper-field]");
+    const whisperConfigFields = doc.getElementById("whisperConfigFields");
     const whisperTestBtn = doc.getElementById("whisperTestBtn");
     const whisperTestStatus = doc.getElementById("whisperTestStatus");
     const customizationPrompt = doc.getElementById("customizationPrompt");
@@ -495,8 +495,9 @@ const YTD_OPTIONS = (() => {
     }
 
     function applyWhisperVisibility(enabled) {
-      if (!whisperField) return;
-      whisperField.classList.toggle("is-hidden", !enabled);
+      const whisperConfigFields = doc.getElementById("whisperConfigFields");
+      if (!whisperConfigFields) return;
+      whisperConfigFields.classList.toggle("is-hidden", !enabled);
     }
 
     function toggleAdvancedOptions() {
@@ -521,6 +522,21 @@ const YTD_OPTIONS = (() => {
       doc.title = translate(currentLanguage, "pageTitle");
 
       for (const element of doc.querySelectorAll("[data-i18n]")) {
+        // If the element has child elements, only translate the *last*
+        // <span> child (label text). Setting textContent on a parent
+        // would destroy child inputs / nested markup.
+        if (element.firstElementChild) {
+          const target = element.querySelector(
+            "span:not([data-i18n-skip])",
+          );
+          if (target) {
+            target.textContent = translate(
+              currentLanguage,
+              element.dataset.i18n,
+            );
+          }
+          continue;
+        }
         element.textContent = translate(
           currentLanguage,
           element.dataset.i18n,
