@@ -239,6 +239,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupEventListeners();
   await evictOldCacheEntries(20);
 
+  // If a whisper job is in flight (or just finished) from before this
+  // panel was last closed, restore the matching loading screen first so
+  // we don't flash the "no cache, click to start" error. We do this
+  // BEFORE the config check because the user has already kicked off a
+  // long job — they shouldn't be bounced to the config error mid-run.
+  const resumed = await maybeResumeWhisperJob();
+  if (resumed) return;
+
   const configStatus = await chrome.runtime.sendMessage({
     action: "checkConfig",
   });
@@ -250,6 +258,84 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await checkCurrentTab();
 });
+
+/**
+ * On panel open, ask the background "are you still running a whisper
+ * job for me?" If yes, jump straight to the loading state with the
+ * last-known stage text. If the job already terminated (succeeded /
+ * failed) we let the user see the result/failure then ack so we don't
+ * keep re-reading the terminal state forever.
+ */
+async function maybeResumeWhisperJob() {
+  let status;
+  try {
+    status = await chrome.runtime.sendMessage({ action: "getWhisperJobStatus" });
+  } catch {
+    return false;
+  }
+  const job = status && status.job;
+  if (!job) return false;
+  if (!job.videoId) return false; // malformed record, ignore
+
+  // Only resume if the active tab is a B站 page whose bvid matches the job.
+  // If the user is on a non-B站 tab, a different B站 video, or we can't
+  // tell what tab they're on, fall through to the normal flow — don't
+  // show another video's job state in someone else's sidebar.
+  const frontVideoId = await readActiveBilibiliVideoId();
+  if (!frontVideoId || frontVideoId !== job.videoId) {
+    return false;
+  }
+
+  // Show the loading screen with the persisted stage so the user knows
+  // the job is still running for THIS video.
+  showState("loading");
+  updateLoading(
+    job.title || "Whisper 转录中",
+    job.subtitle || "请保持视频页面打开",
+  );
+
+  if (job.stage === "succeeded") {
+    // Re-enter the normal flow so the new transcript renders. Drop the
+    // terminal record so the next visit doesn't see a stale state.
+    try {
+      await chrome.runtime.sendMessage({ action: "ackWhisperJobDone" });
+    } catch {}
+    await startBilidown(frontVideoId, job.videoUrl || "");
+    return true;
+  }
+  if (job.stage === "failed") {
+    try {
+      await chrome.runtime.sendMessage({ action: "ackWhisperJobDone" });
+    } catch {}
+    // 用 background 写入的 title / subtitle（带分类信息）覆盖默认标题
+    showError(
+      job.title || "Whisper 转录失败",
+      job.subtitle || job.error || "未知错误",
+    );
+    return true;
+  }
+  // Otherwise: still running. The transcriptProgress handler below will
+  // continue to update the loading text as the SW emits new stages.
+  return true;
+}
+
+/**
+ * Best-effort: read the bvid from the active tab's URL so we can tell
+ * whether a stored whisper job still belongs to the current view. We
+ * fall back to "" rather than throwing because the panel can run while
+ * the user is on chrome:// or a new-tab page.
+ */
+async function readActiveBilibiliVideoId() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const url = tabs && tabs[0] && tabs[0].url;
+    if (!url) return "";
+    const match = url.match(/bilibili\.com\/video\/([A-Za-z0-9]+)/);
+    return match ? match[1] : "";
+  } catch {
+    return "";
+  }
+}
 
 // Listen for messages from the bilidown button on Bilibili page
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -266,8 +352,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
   }
   if (message.action === "transcriptProgress") {
-    // Background is telling us the transcript fetch status changed
-    updateLoading(message.title, message.subtitle);
+    // Background is telling us the transcript fetch status changed.
+    // We now carry an explicit `stage` (downloading / ready_to_transcribe
+    // / transcribing / correcting) so the UI can pick more polished copy
+    // than the background's title/subtitle pair — but the SW-provided
+    // strings are always safe to render.
+    updateLoading(message.title || "Whisper 转录中", message.subtitle || "");
+    if (message.stage === "succeeded") {
+      // Server has signalled completion. The normal handler (the
+      // triggerWhisperTranscription caller's `result.success` branch)
+      // will re-enter startBilidown to render the new transcript. We
+      // acknowledge the terminal state here as a safety net for paths
+      // that don't go through the explicit success path.
+      try { chrome.runtime.sendMessage({ action: "ackWhisperJobDone" }); } catch {}
+    }
     sendResponse({ success: true });
   }
   if (message.action === "noteSaved") {
@@ -285,16 +383,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // FOLLOW THE ACTIVE TAB
 // ============================================================
 // The panel watches which tab is in front of it and reacts:
-//   - Front tab is NOT Bilibili  -> the panel closes itself (window.close()).
-//     We do this OURSELVES rather than relying only on the background
-//     script's per-tab enable/disable, because Chrome doesn't reliably
-//     apply per-tab panel state to tabs spawned in unusual ways (e.g. a
-//     link opened from another app) — which let the panel linger on
-//     non-Bilibili pages.
-//   - Front tab IS Bilibili but on a different video -> refresh the digest.
-//     Bilibili is a single-page app (clicking a video swaps content without
-//     a reload), so we track URL changes; startBilidown() caches per video,
-//     making re-checks instant and free for already-digested videos.
+//   - Front tab is NOT a B站 video -> show the "not on a B站 video"
+//     state in the same sidebar. (We used to call window.close() here,
+//     but that forced the user to click the extension icon again to
+//     reopen the panel after every tab switch — too much friction.)
+//   - Front tab IS a B站 video (same or different) -> refresh the
+//     digest. Bilibili is a single-page app (clicking a video swaps
+//     content without a reload), so we track URL changes; startBilidown()
+//     caches per video, making re-checks instant and free for
+//     already-digested videos.
 //
 // Everything is scoped to the window this panel lives in: tab switches in
 // OTHER browser windows must not close this panel or hijack its content.
@@ -321,13 +418,18 @@ function panelIsShowingResults() {
 }
 
 /**
- * Reacts to the URL now in front of the panel: close on non-Bilibili,
- * refresh the digest when the video changed.
+ * Reacts to the URL now in front of the panel: refresh on a new B站
+ * video, otherwise show the "not on a B站 video" state. The sidebar
+ * stays open — closing it on tab switch was a friction point.
  */
 function handleFrontTabUrl(url) {
   if (!/^https:\/\/www\.bilibili\.com\/video\//.test(url || "")) {
-    // Panel is a Bilibili-only tool — remove itself from non-Bilibili tabs.
-    window.close();
+    // Not a B站 video. Show the no-video state in the same sidebar —
+    // closing it on every tab switch felt jarring and forced the user
+    // to click the extension icon again to bring it back.
+    if (typeof checkCurrentTab === "function") {
+      checkCurrentTab();
+    }
     return;
   }
 
@@ -457,87 +559,72 @@ function setNotesFilter(showAll) {
 
 async function checkCurrentTab() {
   try {
-    // Try multiple strategies to find the Bilibili tab
-    let tab = null;
-    const diagnostics = [];
-
-    // Strategy 1: Active tab in last focused window
-    let tabs = await chrome.tabs.query({
+    // Only consider the user's actual current tab. We used to fall back
+    // to "any Bilibili tab" when the active tab was non-B站, which made
+    // the sidebar display the wrong video's subtitles after the user
+    // switched away (e.g. opened a chat tab). Now we show a clear
+    // "not on a Bilibili video" state instead.
+    const tabs = await chrome.tabs.query({
       active: true,
       lastFocusedWindow: true,
     });
-    diagnostics.push(
-      "活动标签页: " + (tabs[0]?.url || "(无 URL 权限或非网页)")
-    );
-    if (tabs[0]?.url?.includes("bilibili.com/video/")) {
-      tab = tabs[0];
-    }
+    const tab = tabs[0] || null;
+    const url = tab?.url || "";
 
-    // Strategy 2: Any active Bilibili tab
-    if (!tab) {
-      tabs = await chrome.tabs.query({
-        url: "https://www.bilibili.com/video/*",
-        active: true,
-      });
-      if (tabs[0]) tab = tabs[0];
-    }
+    debugLog("[dk-bilidown Panel] Active tab:", tab?.id, url);
 
-    // Strategy 3: Any Bilibili tab (last resort)
-    if (!tab) {
-      tabs = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
-      if (tabs[0]) tab = tabs[0];
-    }
-
-    debugLog("[dk-bilidown Panel] Found tab:", tab?.id, tab?.url);
-
-    if (!tab?.url) {
+    if (!url) {
       showWelcome(
-        "未检测到 B 站视频。\n" +
-          diagnostics.join("\n") +
-          "\n提示：需要打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
+        "当前标签页无法识别（B 站需要普通网页标签，不是扩展页/设置页）。"
+      );
+      return;
+    }
+
+    if (!/^https:\/\/www\.bilibili\.com\/video\//.test(url)) {
+      showWelcome(
+        "当前页面不是 B 站视频。\n当前页面: " + url +
+        "\n提示：bilidown 只会显示 B 站视频的字幕。请打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
+      );
+      return;
+    }
+
+    const videoId = extractVideoId(url);
+    if (!videoId) {
+      showWelcome(
+        "未匹配到 B 站视频地址。\n当前页面: " + url +
+        "\n提示：需要 https://www.bilibili.com/video/BV… 格式（暂不支持番剧/直播页）。"
       );
       return;
     }
 
     // Store the tab ID for reliable messaging later
     bilibiliTabId = tab.id;
+    currentVideoUrl = url;
 
-    const videoId = extractVideoId(tab.url);
-
-    if (videoId) {
-      currentVideoUrl = tab.url;
-
-      try {
-        // Route through background script for reliable message passing
-        const result = await chrome.runtime.sendMessage({
-          action: "relayToContent",
-          payload: { action: "getVideoInfo" },
-        });
-        debugLog("[dk-bilidown Panel] getVideoInfo result:", result);
-        if (result.success && result.response) {
-          currentVideoTitle = result.response.title || "";
-          currentChannelName = result.response.channelName || "";
-          currentVideoDescription = result.response.description || "";
-          currentVideoDuration = result.response.duration || 0;
-          currentPubDate = result.response.pubdate || "";
-        }
-      } catch (e) {
-        console.error("[dk-bilidown Panel] getVideoInfo error:", e);
-        currentVideoTitle = "";
-        currentChannelName = "";
-        currentVideoDescription = "";
-        currentVideoDuration = 0;
-        currentPubDate = "";
+    try {
+      // Route through background script for reliable message passing
+      const result = await chrome.runtime.sendMessage({
+        action: "relayToContent",
+        payload: { action: "getVideoInfo" },
+      });
+      debugLog("[dk-bilidown Panel] getVideoInfo result:", result);
+      if (result.success && result.response) {
+        currentVideoTitle = result.response.title || "";
+        currentChannelName = result.response.channelName || "";
+        currentVideoDescription = result.response.description || "";
+        currentVideoDuration = result.response.duration || 0;
+        currentPubDate = result.response.pubdate || "";
       }
-
-      startBilidown(videoId, tab.url);
-    } else {
-      showWelcome(
-        "未匹配到 B 站视频地址。\n当前页面: " +
-          (tab.url || "(无 URL)") +
-          "\n提示：需要 https://www.bilibili.com/video/BV… 格式（暂不支持番剧/直播页）。"
-      );
+    } catch (e) {
+      console.error("[dk-bilidown Panel] getVideoInfo error:", e);
+      currentVideoTitle = "";
+      currentChannelName = "";
+      currentVideoDescription = "";
+      currentVideoDuration = 0;
+      currentPubDate = "";
     }
+
+    startBilidown(videoId, url);
   } catch (error) {
     console.error("Tab check error:", error);
     showWelcome("检测出错: " + (error?.message || error));
@@ -942,18 +1029,22 @@ function renderTranscript() {
           videoUrl: currentVideoUrl || "",
         });
         if (result && result.success) {
-          await chrome.storage.local.remove(`bilidown_${currentVideoId}`);
+          if (result.alreadyRunning) {
+            // Same rationale as the showWhisperPrompt trigger: don't start
+            // a parallel inference when one is already running.
+            const resumed = await maybeResumeWhisperJob();
+            if (resumed) return;
+          }
+          // Capture before nulling — startBilidown needs the id to refetch.
+          const vid = currentVideoId;
+          await chrome.storage.local.remove(`bilidown_${vid}`);
           currentVideoId = null;
-          await startBilidown(currentVideoId, currentVideoUrl);
+          await startBilidown(vid, currentVideoUrl);
         } else {
-          showError(
-            "Whisper 转录失败",
-            (result && (result.message || result.error)) ||
-              "请检查 whisper_server.py 是否在运行。",
-          );
+          showWhisperError(result);
         }
       } catch (err) {
-        showError("Whisper 转录失败", err?.message || String(err));
+        showWhisperError(err);
       }
     });
   }
@@ -1218,6 +1309,43 @@ function showError(title, message) {
   document.getElementById("errorBtn").textContent = "重新尝试";
 }
 
+/**
+ * 把 background 抛回来的错误（带 bilibiliError 分类）翻译成 sidepanel
+ * 能直接显示的 { title, message }。
+ *
+ * 兼容三种来源：
+ *  1. triggerWhisperTranscription 的 result（带 bilibiliError 字段）
+ *  2. catch 到的 Error（带 err.bilibiliError）
+ *  3. 旧逻辑 / 字符串（直接当 message 显示）
+ */
+function classifyWhisperError(input) {
+  // 1. 字符串：直接当 message，title 用默认
+  if (typeof input === "string") {
+    return { title: "Whisper 转录失败", message: input };
+  }
+  // 2. Error 对象
+  if (input instanceof Error) {
+    if (input.bilibiliError) {
+      return { title: input.bilibiliError.title, message: input.bilibiliError.userMessage };
+    }
+    return { title: "Whisper 转录失败", message: input.message || String(input) };
+  }
+  // 3. result 对象
+  if (input && typeof input === "object") {
+    if (input.bilibiliError) {
+      return { title: input.bilibiliError.title, message: input.bilibiliError.userMessage };
+    }
+    const message = input.message || input.error || "请检查 whisper_server.py 是否在运行。";
+    return { title: "Whisper 转录失败", message };
+  }
+  return { title: "Whisper 转录失败", message: "未知错误" };
+}
+
+function showWhisperError(input) {
+  const { title, message } = classifyWhisperError(input);
+  showError(title, message);
+}
+
 function showWhisperPrompt(videoId, videoUrl, cacheDir) {
   showState("error");
   document.getElementById("errorTitle").textContent =
@@ -1245,22 +1373,26 @@ function showWhisperPrompt(videoId, videoUrl, cacheDir) {
         videoUrl,
       });
       if (result && result.success) {
+        if (result.alreadyRunning) {
+          // A transcription for this video is already in flight
+          // (double-click / reopened panel / regenerate race). Attach to
+          // the running job's progress UI instead of starting a parallel
+          // CPU inference — see whisper_server dedup notes.
+          const resumed = await maybeResumeWhisperJob();
+          if (resumed) return;
+        }
         // Re-enter the normal flow so the new transcript renders with the
         // same UI as a first-time analysis.
         await chrome.storage.local.remove(`bilidown_${videoId}`);
         currentVideoId = null;
         await startBilidown(videoId, videoUrl);
       } else {
-        showError(
-          "Whisper 转录失败",
-          (result && (result.message || result.error)) ||
-            "请检查 whisper_server.py 是否在运行。",
-        );
+        showWhisperError(result);
         btn.disabled = false;
         btn.textContent = "🎙️ 用 Whisper 转录";
       }
     } catch (err) {
-      showError("Whisper 转录失败", err?.message || String(err));
+      showWhisperError(err);
       btn.disabled = false;
       btn.textContent = "🎙️ 用 Whisper 转录";
     }
@@ -1991,7 +2123,15 @@ function getTranscriptContext(selectedText) {
  * Cache expires after 30 days. Oldest entries evicted when > 20 videos cached.
  */
 async function saveToCache(videoId) {
-  if (!videoId || !currentTranscript) return;
+  // Guard against caching an unusable transcript (empty array is truthy,
+  // so the old `!currentTranscript` check let empty/legacy-shaped
+  // segments through and poisoned every future open of this video).
+  const usableTranscript =
+    Array.isArray(currentTranscript) &&
+    currentTranscript.some(
+      (seg) => seg && typeof seg.text === "string" && seg.text.trim().length > 0,
+    );
+  if (!videoId || !usableTranscript) return;
 
   try {
     // Persist semantic-segment translations for this video.
@@ -2086,6 +2226,25 @@ async function loadFromCache(videoId) {
     const cached = result[`bilidown_${videoId}`];
 
     if (!cached) return null;
+
+    // Poisoned/legacy cache guard (2026-08-22): entries saved before the
+    // background normalizeSegment fix store transcript segments in the raw
+    // {from, to, content} shape. They render as an empty transcript list
+    // AND short-circuit every future fetch (this function returning non-null
+    // skips the network entirely), so a video hit by the old bug never
+    // self-heals — the panel keeps "recognizing" the subtitle but shows
+    // nothing. Treat "no segment carries usable text" as a cache miss so
+    // the next open refetches and overwrites with a good entry.
+    if (
+      !Array.isArray(cached.transcript) ||
+      !cached.transcript.some(
+        (seg) =>
+          seg && typeof seg.text === "string" && seg.text.trim().length > 0,
+      )
+    ) {
+      debugLog("Rejecting poisoned/legacy cache entry for", videoId);
+      return null;
+    }
 
     const storedSettings = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
     const wantsAsr = !!YTD_SETTINGS.normalize(

@@ -29,6 +29,13 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
+// Module-level flag: tracks whether we've already warned once about
+// "Receiving end does not exist" for relay messages. The sidepanel's
+// playback tracker fires getCurrentTime every second, so without this
+// gate the console would get spammed with one error per tick. Resetting
+// the SW (e.g. via "Reload" in chrome://extensions) clears the flag.
+let relayNoReceiverWarned = false;
+
 // Prevent the Bilibili content script from reading API keys or cached data.
 // Side panel, options, and service-worker contexts remain trusted.
 chrome.storage.local
@@ -655,8 +662,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: false, error: "No Bilibili tab found" });
         }
       } catch (err) {
-        console.error("[dk-bilidown BG] Relay error:", err.message);
-        sendResponse({ success: false, error: err.message });
+        // "Receiving end does not exist" is the normal state when the
+        // content script hasn't been injected yet (page just loaded,
+        // tab is a non-Bilibili frame, extension was reloaded mid-session,
+        // etc.). It is NOT actionable — the sidepanel's playback tracker
+        // calls this every second, so logging at error level flooded
+        // the console. Log once per service-worker lifetime at warn
+        // level, then demote further occurrences to debug.
+        const message = err?.message || String(err);
+        const isExpectedNoReceiver =
+          /Receiving end does not exist/i.test(message) ||
+          /Could not establish connection/i.test(message);
+        if (isExpectedNoReceiver) {
+          if (!relayNoReceiverWarned) {
+            relayNoReceiverWarned = true;
+            console.warn(
+              "[dk-bilidown BG] Relay: content script not present. " +
+                "Further occurrences will be silent — this is normal " +
+                "for tabs where the script hasn't injected yet.",
+            );
+          } else {
+            debugLog("[dk-bilidown BG] Relay (silent):", message);
+          }
+        } else {
+          console.error("[dk-bilidown BG] Relay error:", message);
+        }
+        sendResponse({ success: false, error: message });
       }
     })();
     return true; // Keep channel open for async response
@@ -698,6 +729,38 @@ function setWhisperJob(job) {
     return chrome.storage.session.remove(WHISPER_JOB_KEY);
   }
   return chrome.storage.session.set({ [WHISPER_JOB_KEY]: job });
+}
+
+/**
+ * Coerce a transcript segment into the canonical {start, duration, text,
+ * language} shape used by sidepanel renderers and the B站 official
+ * subtitle path. The transcribe pipeline internally produces
+ * {from, to, content}; without this, segments saved to the cache
+ * (or returned inline) render as an empty list because
+ * groupTranscriptEntries reads `entry.text` / `entry.start`.
+ *
+ * Idempotent: segments already in the canonical shape pass through.
+ */
+function normalizeSegment(seg) {
+  if (!seg || typeof seg !== "object") return null;
+  const start = Number(seg.start ?? seg.from) || 0;
+  const end = Number(seg.to ?? seg.end ?? start) || start;
+  // If the segment already carries an explicit `duration`, trust it —
+  // recomputing from end-start silently degrades to 0 for inputs in the
+  // canonical {start, duration, text} shape (e.g. JSON cache files we
+  // wrote ourselves with normalizeSegment applied at write time).
+  const explicitDuration = Number(seg.duration);
+  const duration = Number.isFinite(explicitDuration) && explicitDuration >= 0
+    ? explicitDuration
+    : Math.max(0, end - start);
+  const text = String(seg.text ?? seg.content ?? "").trim();
+  if (!text) return null;
+  return {
+    start,
+    duration,
+    text,
+    language: seg.language || null,
+  };
 }
 
 async function loadWhisperJob() {
@@ -1245,19 +1308,26 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.md`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.txt`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.srt`);
+    // .json covers the bilidown-written Whisper cache (also saved with
+    // the {date}_{title}_{UP}.json convention since 2026-08-22 so the
+    // local-file path and the cache path agree on the same filename).
+    possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.json`);
     // Fallback without UP name (for files like YYYY-MM-DD_Title.md)
     possibleFilenames.push(`${pubDate}_${cleanTitle}.md`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}.txt`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}.srt`);
+    possibleFilenames.push(`${pubDate}_${cleanTitle}.json`);
   }
   // Fallback without date
   possibleFilenames.push(`${cleanTitle}_${cleanChannel}.md`);
   possibleFilenames.push(`${cleanTitle}_${cleanChannel}.txt`);
   possibleFilenames.push(`${cleanTitle}_${cleanChannel}.srt`);
+  possibleFilenames.push(`${cleanTitle}_${cleanChannel}.json`);
   // Fallback without date and UP name
   possibleFilenames.push(`${cleanTitle}.md`);
   possibleFilenames.push(`${cleanTitle}.txt`);
   possibleFilenames.push(`${cleanTitle}.srt`);
+  possibleFilenames.push(`${cleanTitle}.json`);
 
   try {
     // Pass 1: filename match (legacy behavior). Pass 2: bvid grep
@@ -1298,21 +1368,59 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
 }
 
 /**
- * Parse local subtitle content (txt/srt/md) into transcript format
+ * Parse local subtitle content (txt/srt/md/json) into transcript format
  * Expected formats:
+ *   - JSON (Whisper cache): { bvid, cid, transcript: [{from, to, content}, ...] }
  *   - Markdown: ## 段 N [0.00s → 29.70s] followed by text
  *   - SRT: [HH:MM:SS,mmm] text
  *   - Simple: [MM:SS] text
  */
 function parseLocalSubtitleContent(content, filename) {
+  const lowerName = (filename || "").toLowerCase();
+  const isJson = lowerName.endsWith(".json");
+  const isMarkdown = lowerName.endsWith(".md") || lowerName.endsWith(".markdown");
+  const isSrt = lowerName.endsWith(".srt");
+
+  // JSON branch: Whisper cache files (saved by the trigger flow as
+  // {bvid, cid, source, language, savedAt, transcript: [{from, to, content}, ...]}).
+  // Try first when extension is .json — the {from, to, content} shape is
+  // distinct enough that a JSON.parse failure means "this isn't actually a
+  // Whisper cache" and we can safely fall through to the line-based
+  // parsers below. Reuses normalizeSegment so older caches (raw
+  // {from, to, content}) and newer normalized ones ({start, duration,
+  // text}) both render correctly.
+  if (isJson) {
+    try {
+      const obj = JSON.parse(content);
+      const rawSegments = Array.isArray(obj?.transcript) ? obj.transcript : null;
+      if (rawSegments) {
+        const segments = rawSegments.map(normalizeSegment).filter(Boolean);
+        if (segments.length > 0) {
+          let plain = "";
+          let ts = "";
+          for (const seg of segments) {
+            plain += seg.text + " ";
+            ts += `[${formatTimestamp(seg.start)}] ${seg.text}\n`;
+          }
+          return {
+            transcript: segments,
+            transcriptText: plain.trim(),
+            transcriptTextTimestamped: ts.trim(),
+            language: obj.language || "zh",
+          };
+        }
+      }
+    } catch (_) {
+      // Not a Whisper cache JSON — fall through to line-based parsers
+      // (someone may have named a .txt as .json by mistake; don't break
+      // their workflow).
+    }
+  }
+
   const lines = content.split(/\r?\n/);
   const transcript = [];
   let transcriptTextPlain = "";
   let transcriptTextTimestamped = "";
-
-  // Detect format based on filename and content
-  const isMarkdown = filename.endsWith(".md") || filename.endsWith(".markdown");
-  const isSrt = filename.endsWith(".srt");
 
   // Try to parse as Markdown format first
   if (isMarkdown) {
@@ -1488,16 +1596,25 @@ function parseLocalSubtitleContent(content, filename) {
   };
 }
 
-async function loadCachedTranscript(bvid, cid, settings) {
+async function loadCachedTranscript(bvid, cid, settings, videoTitle, channelName, pubDate) {
   const url = (settings.whisperUrl || "").replace(/\/+$/, "");
-  if (!url || !YTD_SETTINGS.whisperCachePath(settings, bvid, cid)) return null;
-  const cachePath = YTD_SETTINGS.whisperCachePath(settings, bvid, cid);
+  if (!url || !YTD_SETTINGS.whisperCachePath(settings, bvid, cid, videoTitle, channelName, pubDate)) {
+    return null;
+  }
+  const cachePath = YTD_SETTINGS.whisperCachePath(settings, bvid, cid, videoTitle, channelName, pubDate);
   try {
     const qs = new URLSearchParams({
       bvid,
       cid: String(cid),
       cache_dir: settings.subtitlesDir || "",
     });
+    // Pass video metadata so whisper_server can use the same
+    // {date}_{title}_{UP}.json convention as .md/.txt/.srt lookups.
+    // Falls back to legacy bvid_cid.json naming server-side if any
+    // field is empty.
+    if (videoTitle) qs.set("title", videoTitle);
+    if (channelName) qs.set("channel", channelName);
+    if (pubDate) qs.set("pub_date", pubDate);
     const response = await fetch(
       `${url}/cache?${qs.toString()}`,
       { method: "GET" },
@@ -1513,7 +1630,7 @@ async function loadCachedTranscript(bvid, cid, settings) {
   }
 }
 
-async function saveCachedTranscript(bvid, cid, payload, settings) {
+async function saveCachedTranscript(bvid, cid, payload, settings, videoTitle, channelName, pubDate) {
   const url = (settings.whisperUrl || "").replace(/\/+$/, "");
   if (!url) return null;
   try {
@@ -1524,6 +1641,15 @@ async function saveCachedTranscript(bvid, cid, payload, settings) {
         bvid,
         cid: String(cid),
         cache_dir: settings.subtitlesDir || "",
+        // Same metadata pass-through as the read path. whisper_server
+        // uses these to pick {date}_{title}_{UP}.json when available,
+        // bvid_cid.json as a fallback. Keeping the read + write
+        // filenames in lockstep is what makes `loadLocalSubtitleFile`
+        // (which searches by human-friendly name) able to find a file
+        // we wrote ourselves.
+        title: videoTitle || "",
+        channel: channelName || "",
+        pub_date: pubDate || "",
         payload,
       }),
     });
@@ -1598,10 +1724,37 @@ async function handleTriggerWhisperTranscription(
   if (settings.asrProvider !== "whisper") {
     throw new Error("Local Whisper is not enabled. Open bilidown Settings.");
   }
+  const requestedPageNumber = Math.max(1, Number(requestedPage) || 1);
+
+  // Re-entry guard (2026-08-22): the extension can fire the same
+  // transcription twice (double-click, reopened panel, regenerate while
+  // running). Each duplicate ran a full parallel CPU inference on
+  // whisper_server — observed live: 3 concurrent transcribes of the same
+  // 5.5-minute audio, each slowing the others to a crawl and none
+  // finishing. If a non-terminal job for THIS video+page started <15 min
+  // ago, report alreadyRunning instead and let the sidepanel attach to
+  // the in-flight job's progress UI.
+  try {
+    const existing = await loadWhisperJob();
+    if (
+      existing &&
+      existing.videoId === videoId &&
+      Number(existing.pageNumber || 1) === requestedPageNumber &&
+      existing.stage !== WHISPER_STAGES.SUCCEEDED &&
+      existing.stage !== WHISPER_STAGES.FAILED &&
+      existing.startedAt &&
+      Date.now() - existing.startedAt < 15 * 60 * 1000
+    ) {
+      debugLog("[dk-bilidown BG] trigger blocked: job already running for", videoId);
+      return { success: true, alreadyRunning: true };
+    }
+  } catch {
+    // storage.session unavailable — fall through and start normally.
+  }
+
   // Persist a fresh job record BEFORE we touch the network, so a SW
   // eviction or extension reload during the next 5+ minutes still leaves
   // a job the sidepanel can resume from.
-  const requestedPageNumber = Math.max(1, Number(requestedPage) || 1);
   await setWhisperJob({
     type: "whisper-job",
     videoId,
@@ -1660,16 +1813,52 @@ async function handleTriggerWhisperTranscription(
     // Persist to cache so the next visit is instant. We always save the
     // segments we have, even if the AI correction step failed, so the user
     // gets something to read instead of being asked to re-transcribe.
+    // The transcribe pipeline returns segments shaped {from, to, content},
+    // but every downstream consumer (sidepanel groupTranscriptEntries,
+    // renderTranscript, transcriptText) expects the canonical
+    // {start, duration, text} shape used by B站 official subtitles.
+    // Normalize at the cache boundary so a saved cache renders correctly
+    // on the next visit.
+    const canonicalTranscript = (result.transcript || []).map(normalizeSegment);
     const cachePayload = {
       bvid: videoId,
       cid: page.cid,
       source: result.source,
       language: result.language,
       savedAt: new Date().toISOString(),
-      transcript: result.transcript || [],
+      transcript: canonicalTranscript,
       chapters: result.chapters || [],
     };
-    await saveCachedTranscript(videoId, page.cid, cachePayload, settings);
+    // Pass video metadata so the cache file is named with the same
+    // {date}_{title}_{UP}.json convention that loadLocalSubtitleFile
+    // searches for. Without this the write uses a bvid_cid.json name
+    // that the human-friendly filename lookup can never find.
+    const metaTitle = view.data.title || "";
+    const metaChannel = view.data.owner?.name || "";
+    const metaPubDate = view.data.pubdate
+      ? new Date(view.data.pubdate * 1000).toISOString().split("T")[0]
+      : "";
+    const saved = await saveCachedTranscript(
+      videoId,
+      page.cid,
+      cachePayload,
+      settings,
+      metaTitle,
+      metaChannel,
+      metaPubDate,
+    );
+    if (!saved) {
+      // saveCachedTranscript swallows network/server errors and returns
+      // null on failure. If we ignore that and continue, the trigger
+      // returns success=true but the cache is empty — the next visit's
+      // loadCachedTranscript will return null, the user lands back on
+      // the "click Whisper to start" prompt, and they think nothing
+      // happened. Surface the failure instead so they see a real error
+      // and can retry / check whisper_server.
+      throw new Error(
+        "字幕缓存保存失败（whisper_server 写入错误）。请确认 whisper_server.py 仍在 7860 端口运行后重试。",
+      );
+    }
     // Mark the job as succeeded so the sidepanel can stop polling and
     // fall through to the normal transcript render path. The terminal
     // record is cleared in a follow-up tick to give the UI a chance to
@@ -1687,10 +1876,14 @@ async function handleTriggerWhisperTranscription(
         source: result.source,
         language: result.language,
         transcriptLength: (result.transcript || []).length,
-        cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid),
+        cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid, metaTitle, metaChannel, metaPubDate),
       },
     });
-    return { ...result, cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid) };
+    return {
+      ...result,
+      transcript: canonicalTranscript,
+      cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid, metaTitle, metaChannel, metaPubDate),
+    };
   } catch (err) {
     // Persist a terminal FAILED state so the sidepanel can render an
     // error rather than spinning forever. 有 bilibiliError 的错误用
@@ -1861,19 +2054,42 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     // Whisper here — that requires an explicit user click — but we tell
     // the side panel which action is available.
     if (settings.asrProvider === "whisper") {
-      const cached = await loadCachedTranscript(videoId, page.cid, settings);
+      // Pass the same metadata the write path uses, so loadCachedTranscript
+      // can resolve to the {date}_{title}_{UP}.json file instead of the
+      // legacy bvid_cid.json name.
+      const cached = await loadCachedTranscript(
+        videoId,
+        page.cid,
+        settings,
+        videoTitle,
+        channelName,
+        pubDate,
+      );
       if (cached) {
+        // Normalize at the read boundary too — older caches may have been
+        // written with the {from, to, content} shape before this fix.
+        const canonicalTranscript = (cached.transcript || [])
+          .map(normalizeSegment)
+          .filter(Boolean);
+        // Both fields are needed by the sidepanel:
+        //   transcriptText          -> currentTranscriptText (display / export)
+        //   transcriptTextTimestamped -> currentTranscriptTimestamped (AI prompts)
+        // The local-cache path only has the timestamped form, so we
+        // derive the plain form by stripping the `[M:SS] ` prefix.
+        const plainText = canonicalTranscript
+          .map((seg) => seg.text)
+          .join(" ");
+        const timestampedText = canonicalTranscript
+          .map((seg) => `[${formatTimestamp(seg.start)}] ${seg.text}`)
+          .join("\n");
         return {
           success: true,
           source: "local-cache",
           language: cached.language || "unknown",
           chapters: cached.chapters || [],
-          transcript: Array.isArray(cached.transcript) ? cached.transcript : [],
-          transcriptText: Array.isArray(cached.transcript)
-            ? cached.transcript
-                .map((seg) => `[${formatTimestamp(seg.from)}] ${seg.content}`)
-                .join("\n")
-            : "",
+          transcript: canonicalTranscript,
+          transcriptText: plainText,
+          transcriptTextTimestamped: timestampedText,
           cachePath: cached.cachePath,
         };
       }

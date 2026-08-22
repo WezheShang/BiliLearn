@@ -24,6 +24,7 @@ for "large-v3"). Subsequent runs are cached.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -58,6 +59,40 @@ AVAILABLE_MODELS = [
     "large-v3",
     "turbo",
 ]
+
+# ---------------------------------------------------------------------------
+# /transcribe dedup — 2026-08-22
+#
+# The extension can fire the same transcription more than once (double-click
+# on the trigger button, reopened sidepanel, "regenerate" while a run is in
+# flight). whisper_server is a ThreadingHTTPServer, so each duplicate POST
+# ran a FULL parallel CPU inference — observed live: three concurrent
+# transcribes of the same 5.5-minute audio, each slowing the others down.
+#
+# Dedup key = sha256 of the audio bytes. First caller ("owner") runs the
+# real transcription; concurrent callers with identical audio block on an
+# event and receive the owner's result with `"reused": true`. Recent
+# results are kept in a small LRU so a retry right after completion also
+# reuses instead of re-running.
+# ---------------------------------------------------------------------------
+_TRANSCRIBE_LOCK = threading.Lock()
+_TRANSCRIBE_JOBS = {}       # audio sha256 -> {"event", "result", "error"}
+_TRANSCRIBE_JOB_ORDER = []  # insertion order for LRU pruning
+_TRANSCRIBE_JOB_CAP = 8
+
+
+def _transcribe_claim(audio_key):
+    """Returns (is_owner, job). See the block comment above."""
+    with _TRANSCRIBE_LOCK:
+        job = _TRANSCRIBE_JOBS.get(audio_key)
+        if job is None:
+            job = {"event": threading.Event(), "result": None, "error": None}
+            _TRANSCRIBE_JOBS[audio_key] = job
+            _TRANSCRIBE_JOB_ORDER.append(audio_key)
+            while len(_TRANSCRIBE_JOB_ORDER) > _TRANSCRIBE_JOB_CAP:
+                _TRANSCRIBE_JOBS.pop(_TRANSCRIBE_JOB_ORDER.pop(0), None)
+            return True, job
+        return False, job
 ALLOWED_AUDIO_DIRS = [
     Path(os.environ.get("TEMP", r"C:\Users\username\AppData\Local\Temp")),
     Path(r"C:\Users\username\bilidown\tmp"),
@@ -192,7 +227,11 @@ class Handler(BaseHTTPRequestHandler):
             bvid = (qs.get("bvid") or [""])[0]
             cid = (qs.get("cid") or [""])[0]
             cache_dir = (qs.get("cache_dir") or [None])[0]
-            self._handle_cache_get(bvid, cid, cache_dir)
+            # Optional metadata for {date}_{title}_{UP}.json naming.
+            video_title = (qs.get("title") or [None])[0] or None
+            channel_name = (qs.get("channel") or [None])[0] or None
+            pub_date = (qs.get("pub_date") or [None])[0] or None
+            self._handle_cache_get(bvid, cid, cache_dir, video_title, channel_name, pub_date)
             return
         if self.path.startswith("/local-file?"):
             from urllib.parse import urlparse, parse_qs
@@ -253,9 +292,13 @@ class Handler(BaseHTTPRequestHandler):
                 language = self.headers.get("X-Whisper-Language") or None
                 beam_size = int(self.headers.get("X-Whisper-Beam-Size") or "5")
                 audio_bytes = self.rfile.read(length)
-                self._transcribe_bytes(
-                    audio_bytes, model_name, language, beam_size,
-                    content_type.split(";", 1)[0].strip(),
+                audio_key = hashlib.sha256(audio_bytes).hexdigest()
+                self._transcribe_dedup(
+                    audio_key,
+                    lambda: self._transcribe_bytes(
+                        audio_bytes, model_name, language, beam_size,
+                        content_type.split(";", 1)[0].strip(),
+                    ),
                 )
                 return
 
@@ -275,7 +318,11 @@ class Handler(BaseHTTPRequestHandler):
             vad_filter = bool(body.get("vad_filter", True))
 
             path = _validate_audio_path(audio_path)
-            self._transcribe_path(path, model_name, language, beam_size, vad_filter)
+            audio_key = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            self._transcribe_dedup(
+                audio_key,
+                lambda: self._transcribe_path(path, model_name, language, beam_size, vad_filter),
+            )
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
@@ -284,6 +331,40 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": f"{type(exc).__name__}: {exc}"},
             )
+
+    def _transcribe_dedup(self, audio_key, run):
+        """Serialize identical transcriptions. `run` must RETURN the payload
+        dict (not send it) so both the owner's response and the waiters'
+        reused responses come from one source of truth."""
+        owner, job = _transcribe_claim(audio_key)
+        if not owner:
+            LOG.info("transcribe dedup: waiting on in-flight job %s", audio_key[:12])
+            if not job["event"].wait(timeout=3600):
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "duplicate transcription wait timed out", "reused": True},
+                )
+                return
+            if job["error"] is not None:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": job["error"], "reused": True},
+                )
+                return
+            payload = dict(job["result"] or {})
+            payload["reused"] = True
+            LOG.info("transcribe dedup: reusing result for %s", audio_key[:12])
+            self._send_json(HTTPStatus.OK, payload)
+            return
+        try:
+            payload = run()
+        except Exception as exc:  # noqa: BLE001
+            job["error"] = f"{type(exc).__name__}: {exc}"
+            job["event"].set()
+            raise
+        job["result"] = payload
+        job["event"].set()
+        self._send_json(HTTPStatus.OK, payload)
 
     def _transcribe_bytes(self, audio_bytes, model_name, language, beam_size, content_type):
         if model_name not in AVAILABLE_MODELS:
@@ -299,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
             f.write(audio_bytes)
             tmp_path = f.name
         try:
-            self._transcribe_path(tmp_path, model_name, language, beam_size, True)
+            return self._transcribe_path(tmp_path, model_name, language, beam_size, True)
         finally:
             try:
                 os.unlink(tmp_path)
@@ -324,11 +405,11 @@ class Handler(BaseHTTPRequestHandler):
             info.duration,
             time.time() - t0,
         )
-        self._send_json(HTTPStatus.OK, payload)
+        return payload
 
     # ---------- subtitle cache ----------
 
-    def _resolve_cache_path(self, bvid, cid, cache_dir=None):
+    def _resolve_cache_path(self, bvid, cid, cache_dir=None, video_title=None, channel_name=None, pub_date=None):
         from urllib.parse import unquote
         if not bvid or not cid:
             raise ValueError("bvid and cid are required")
@@ -358,11 +439,40 @@ class Handler(BaseHTTPRequestHandler):
             if target is None:
                 target = ALLOWED_AUDIO_DIRS[0]
         target.mkdir(parents=True, exist_ok=True)
-        return target / f"{safe_bvid}_{safe_cid}.json"
+        # Prefer the same {date}_{title}_{UP}.json convention that
+        # loadLocalSubtitleFile uses, so the bilidown-written cache
+        # appears in the same human-friendly namespace as .md/.txt
+        # exports. Falls back to the legacy bvid_cid.json name if any
+        # of the metadata fields is missing.
+        filename = self._subtitle_cache_filename(
+            safe_bvid, safe_cid, video_title, channel_name, pub_date, "json",
+        )
+        return target / filename
 
-    def _handle_cache_get(self, bvid, cid, cache_dir=None):
+    @staticmethod
+    def _subtitle_cache_filename(safe_bvid, safe_cid, video_title, channel_name, pub_date, ext):
+        """Mirror of `subtitleCacheFilename` in settings.js. Stays in
+        lockstep so the read + write paths agree on the same filename
+        for any given video — the bilidown cache is otherwise invisible
+        to `loadLocalSubtitleFile`, which only matches human-friendly
+        names.
+        """
+        if pub_date and video_title and channel_name:
+            # Match the JS-side cleaner: drop Windows-forbidden filename
+            # chars, trim, and clamp to settings.js' substring limits
+            # (100 for title, 50 for channel).
+            clean_title = re.sub(r'[<>:"/\\|?*]', "_", str(video_title)).strip()[:100]
+            clean_channel = re.sub(r'[<>:"/\\|?*]', "_", str(channel_name)).strip()[:50]
+            if clean_title and clean_channel:
+                return f"{pub_date}_{clean_title}_{clean_channel}.{ext}"
+        # Legacy / metadata-less fallback.
+        if not safe_bvid or not safe_cid:
+            return None
+        return f"{safe_bvid}_{safe_cid}.{ext}"
+
+    def _handle_cache_get(self, bvid, cid, cache_dir=None, video_title=None, channel_name=None, pub_date=None):
         try:
-            path = self._resolve_cache_path(bvid, cid, cache_dir)
+            path = self._resolve_cache_path(bvid, cid, cache_dir, video_title, channel_name, pub_date)
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
@@ -426,15 +536,28 @@ class Handler(BaseHTTPRequestHandler):
         if bvid:
             target_bvid = bvid.strip()
             if target_bvid:
-                bvid_pattern = re.compile(
+                # Format-aware patterns: txt/md/srt/lrc write `# Source: <bvid>`
+                # at the top (up-master-report), JSON caches write
+                # `"bvid": "<bvid>"`. Both are precise header-level matches, so
+                # we don't fall back to a generic substring search — a 12-char
+                # BV id is rare enough but a substring match would be more
+                # brittle and could match random 靳卫萍 speech that happens
+                # to contain a BV-looking sequence.
+                text_pattern = re.compile(
                     r"^#\s*source\s*[:=]\s*(" + re.escape(target_bvid) + r")\s*$",
                     re.IGNORECASE | re.MULTILINE,
                 )
+                json_pattern = re.compile(
+                    r'"bvid"\s*:\s*"' + re.escape(target_bvid) + r'"',
+                )
                 # Only consider text-ish files; skip the .m4a/.obsolete cruft
-                # up-master-report drops alongside the real subtitles.
+                # up-master-report drops alongside the real subtitles. .json
+                # caches (saved by the Whisper trigger flow) live here too.
                 for root, dirs, files in os.walk(cache_path):
                     for filename in files:
-                        if not filename.lower().endswith((".txt", ".md", ".srt", ".lrc")):
+                        lower = filename.lower()
+                        is_json = lower.endswith(".json")
+                        if not is_json and not lower.endswith((".txt", ".md", ".srt", ".lrc")):
                             continue
                         file_path = Path(root) / filename
                         try:
@@ -445,7 +568,8 @@ class Handler(BaseHTTPRequestHandler):
                                 head = f.read(2048)
                         except OSError:
                             continue
-                        if bvid_pattern.search(head):
+                        pattern = json_pattern if is_json else text_pattern
+                        if pattern.search(head):
                             # Confirmed — re-read the whole file for the actual content.
                             result = self._read_subtitle_file(file_path)
                             if result is not None:
@@ -540,10 +664,18 @@ class Handler(BaseHTTPRequestHandler):
         cid = (body or {}).get("cid")
         payload = (body or {}).get("payload")
         cache_dir = (body or {}).get("cache_dir")
+        # Optional metadata for {date}_{title}_{UP}.json naming. Stays
+        # in lockstep with `_handle_cache_get` so the read path can
+        # always find what the write path produced.
+        video_title = (body or {}).get("title")
+        channel_name = (body or {}).get("channel")
+        pub_date = (body or {}).get("pub_date")
         if payload is None:
             raise ValueError("payload is required")
         try:
-            path = self._resolve_cache_path(bvid, cid, cache_dir)
+            path = self._resolve_cache_path(
+                bvid, cid, cache_dir, video_title, channel_name, pub_date,
+            )
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         path.parent.mkdir(parents=True, exist_ok=True)

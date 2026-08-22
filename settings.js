@@ -270,19 +270,51 @@ var YTD_SETTINGS = (() => {
     return PROVIDER_PRESETS[normalizeProvider(provider)];
   }
 
+  // Resolve a deterministic, user-namespaced cache filename for a B-station
+  // video, in the same `{date}_{title}_{UP}.{ext}` convention the manual
+  // Markdown export + up-master-report use. This keeps the bilidown-written
+  // Whisper cache discoverable by the same lookup logic that finds .md /
+  // .txt / .srt files in `loadLocalSubtitleFile`, instead of being its
+  // own ad-hoc `bvid_cid.json` namespace.
+  //
+  // We prefer the human-friendly naming whenever videoTitle / channelName /
+  // pubDate are available. If any of those are missing (e.g. the cache
+  // was written before metadata was captured), fall back to the old
+  // `bvid_cid.{ext}` form so reads don't lose track of the file.
+  function subtitleCacheFilename(bvid, cid, videoTitle, channelName, pubDate, ext) {
+    const safeExt = String(ext || "json").replace(/[^a-z0-9]/gi, "");
+    if (pubDate && videoTitle && channelName) {
+      const cleanTitle = String(videoTitle)
+        .replace(/[<>:"/\\|?*]/g, "_")
+        .trim()
+        .substring(0, 100);
+      const cleanChannel = String(channelName)
+        .replace(/[<>:"/\\|?*]/g, "_")
+        .trim()
+        .substring(0, 50);
+      if (cleanTitle && cleanChannel) {
+        return `${pubDate}_${cleanTitle}_${cleanChannel}.${safeExt}`;
+      }
+    }
+    // Fallback: bvid_cid naming for legacy / metadata-less writes.
+    const safeBvid = String(bvid || "").replace(/[^A-Za-z0-9]/g, "");
+    const safeCid = String(cid || "").replace(/[^0-9]/g, "");
+    if (!safeBvid || !safeCid) return null;
+    return `${safeBvid}_${safeCid}.${safeExt}`;
+  }
+
   // Resolve a deterministic, user-namespaced cache path for a B-station
   // (bvid, cid) pair. Returns null if the configured directory is empty —
   // callers must treat that as "no cache available" rather than writing
   // somewhere we don't intend to.
-  function whisperCachePath(settings, bvid, cid) {
+  function whisperCachePath(settings, bvid, cid, videoTitle, channelName, pubDate) {
     const dir = settings && typeof settings.subtitlesDir === "string"
       ? settings.subtitlesDir.trim().replace(/[\\/]+$/, "")
       : "";
     if (!dir) return null;
-    const safeBvid = String(bvid || "").replace(/[^A-Za-z0-9]/g, "");
-    const safeCid = String(cid || "").replace(/[^0-9]/g, "");
-    if (!safeBvid || !safeCid) return null;
-    return `${dir}/${safeBvid}_${safeCid}.json`;
+    const filename = subtitleCacheFilename(bvid, cid, videoTitle, channelName, pubDate, "json");
+    if (!filename) return null;
+    return `${dir}/${filename}`;
   }
 
   // Expand a `~`-prefixed path using KNOWN_HOMES. Returns the input
