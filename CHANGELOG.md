@@ -4,6 +4,44 @@ bilidown 的所有可记录改动。按"用户能感知到的影响"维度写，
 
 ## Unreleased
 
+### 2026-08-22（夜）：CID 成为字幕查找的权威键
+
+**用户观察**："查找字幕应该优先 CID，不会重复。"——在 B 站里一个 bvid 下的多 P 视频共享标题、UP、日期，所以 `{date}_{title}_{UP}` 文件名和 bvid grep 在多 P 视频下会互相拿错分P的字幕。
+
+**修复**：
+
+- `loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, settings, cid)` 增加 `cid` 参数，调用方 (`handleFetchTranscript`) 传入 `page.cid`
+- `/local-file` 服务端新增 `cid` 查询参数；.json 命中需 doc 内 `bcid+cid` 双匹配（`bvid` 不命中或 `cid` 不命中 → 跳过该 .json，不再回退到 bvid-only）；text 格式（.md/.txt/.srt）保持 bvid-header 旧行为
+- `/cache` GET 在文件名解析失败时（标题清洗 JS/Python 漂移会触发）改用 `bvid+cid` 全目录扫描兜底，watchdog 恢复链路不再依赖标题
+- `_handle_cache_get` 标题拼出的文件必须 doc 内 `bcid+cid` 双匹配才认账，多 P 标题撞车不会误返另一分P内容
+
+**回归测试**：`test_server_cache_write.js` 新增两节（标题漂移仍命中 / 多 P cid 精确选 part / 错 cid 拒绝），全量 `run_all.js` 8/8 PASS。
+
+改动文件：`background.js` (+27) / `whisper_server.py` (+52)
+
+### 2026-08-22（晚）：切页面 / 开关 sidebar 不再切断 Whisper 转录
+
+**根因**：转录的 HTTP POST 跑在扩展 Service Worker 里。MV3 的 SW 空闲 ~30 秒就被 Chrome 回收；切到别的页面时 `updatePanelForTab` 对非 B 站 tab 调 `setOptions({enabled:false})` 关掉面板，消息流量随之中断，SW 很快被杀，长 POST 被掐断。旧的 `bootstrapWhisperJob` 明确不恢复中断任务，用户切回来只能从头再来。
+
+**修复：三层防线**
+
+1. **保活（防死）**：非终态 whisper job 存在期间，`chrome.alarms` 每 30 秒唤醒一次 SW（`WHISPER_KEEPALIVE_ALARM`）——切页面、关 sidebar 都不再触发 SW 回收
+2. **服务端落地（防丢）**：`/transcribe` 原始音频模式新增 `X-Bvid/X-Cid/X-Title/X-Channel/X-Pubdate/X-Cache-Dir` 头；服务端转写完成**立即**把结果写进字幕缓存（与扩展自己写的缓存同形状、同 `{date}_{title}_{UP}.json` 命名）——即使客户端彻底死了，结果也在磁盘上
+3. **看门狗恢复（防卡）**：alarm tick 检查非终态 job——pipeline 还活着仅保温；SW 死过则用 job 里持久化的 `recoveryMeta` 轮询 `/cache`，命中即标记成功并广播带 videoId 的完成消息，sidepanel 收到后自动 ack + 渲染字幕；超 30 分钟未恢复判 FAILED 提示手动重试
+
+**配套修复**：
+
+- 同一时间只允许一个非终态转写任务（同视频→提示已在跑；异视频→中文报错"同一时间只能跑一个"，避免 CPU int8 并行互相拖慢）
+- 转录进度广播带 `videoId`，面板按视频过滤，不再串台；完成广播由面板自行消费，不依赖当初触发它的页面还在
+- `showWhisperPrompt` 先查进行中任务再弹提示，避免切回页面重复弹"点 Whisper 转录"
+- "请保持视频页面打开"文案改为"转录在后台进行，可随意切换页面"（百炼路径同步）
+
+**已知局限**：若 SW 死在音轨下载阶段（转写 POST 尚未发出），该次无法恢复，等 30 分钟超时后手动重试。恢复能力依赖转写请求已到达服务端。
+
+**用户操作**：manifest 新增了 `"alarms"` 权限——**必须 reload 扩展一次**才生效。
+
+**回归测试**：新增 `test_server_cache_write.js`（TTS 合成真实语音 → 验证服务端缓存落盘 + `/cache` 恢复路径 + 负例 404；朗读文本带随机编号防 LRU 撞缓存）。套件现 8 个文件，`node C:\Users\username\bilidown-tests\run_all.js` 全绿。
+
 ### 2026-08-22：两个紧急 bug 修复 + 回归测试套件
 
 **1. 「识别到字幕但面板空白」——缓存投毒自愈（BV1H88n6ME5w）**

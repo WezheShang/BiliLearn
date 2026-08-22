@@ -8,6 +8,7 @@
   "permissions": [
     "sidePanel",
     "storage",
+    "alarms",
     "tabs",
     "cookies",
     "declarativeNetRequestWithHostAccess",

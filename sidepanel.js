@@ -291,7 +291,7 @@ async function maybeResumeWhisperJob() {
   showState("loading");
   updateLoading(
     job.title || "Whisper 转录中",
-    job.subtitle || "请保持视频页面打开",
+    job.subtitle || "转录在后台进行，可随意切换页面；回到本页会显示进度",
   );
 
   if (job.stage === "succeeded") {
@@ -357,14 +357,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // / transcribing / correcting) so the UI can pick more polished copy
     // than the background's title/subtitle pair — but the SW-provided
     // strings are always safe to render.
-    updateLoading(message.title || "Whisper 转录中", message.subtitle || "");
-    if (message.stage === "succeeded") {
-      // Server has signalled completion. The normal handler (the
-      // triggerWhisperTranscription caller's `result.success` branch)
-      // will re-enter startBilidown to render the new transcript. We
-      // acknowledge the terminal state here as a safety net for paths
-      // that don't go through the explicit success path.
-      try { chrome.runtime.sendMessage({ action: "ackWhisperJobDone" }); } catch {}
+    const progressVideoId = message.videoId
+      ? String(message.videoId).split("@p")[0]
+      : null;
+    const currentPlainId = currentVideoId
+      ? String(currentVideoId).split("@p")[0]
+      : null;
+    const forThisVideo = !progressVideoId || progressVideoId === currentPlainId;
+    if (forThisVideo) {
+      updateLoading(message.title || "Whisper 转录中", message.subtitle || "");
+    }
+    if (message.stage === "succeeded" && forThisVideo && currentPlainId) {
+      // The transcription finished (either the live pipeline returned or
+      // the watchdog recovered it from the server-side cache). If this
+      // panel is attached to the job's video — e.g. it re-attached via
+      // maybeResumeWhisperJob and there is no trigger caller around to
+      // re-enter startBilidown — do the re-entry ourselves so the
+      // subtitles actually render instead of the loading screen sitting
+      // there forever. (Async IIFE: this listener is not async and we
+      // must not block sendResponse.)
+      (async () => {
+        try { await chrome.runtime.sendMessage({ action: "ackWhisperJobDone" }); } catch {}
+        const vid = currentVideoId;
+        if (!vid) return;
+        // Drop any stale poisoned entry first, then refetch from the
+        // (now-written) server cache.
+        try { await chrome.storage.local.remove(`bilidown_${vid}`); } catch {}
+        startBilidown(vid, currentVideoUrl).catch(() => {});
+      })();
     }
     sendResponse({ success: true });
   }
@@ -1347,6 +1367,19 @@ function showWhisperError(input) {
 }
 
 function showWhisperPrompt(videoId, videoUrl, cacheDir) {
+  // A whisper job may already be running for THIS video (user switched
+  // to another page mid-transcription, then came back — the panel stayed
+  // open through Bilibili's SPA navigation, so only checkCurrentTab→
+  // startBilidown→fetchTranscript ran, NOT the panel-init resume path).
+  // In that case attach to the job's loading UI instead of showing the
+  // "no cache" prompt again, which would invite a duplicate trigger.
+  maybeResumeWhisperJob().then((resumed) => {
+    if (resumed) return;
+    actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir);
+  });
+}
+
+function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
   showState("error");
   document.getElementById("errorTitle").textContent =
     "本地没有缓存这个视频的字幕";

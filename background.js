@@ -721,12 +721,190 @@ const WHISPER_STAGES = Object.freeze({
   FAILED: "failed",
 });
 
+// Keepalive/watchdog alarm. MV3 service workers are evicted after ~30s
+// idle and an in-flight fetch does NOT reliably keep one alive — observed
+// live: user starts Whisper, switches to another page (the sidepanel is
+// force-closed per-tab), all message traffic stops, Chrome kills the SW,
+// and the /transcribe POST dies with it. A repeating alarm both resets
+// the idle timer while the pipeline is alive AND wakes the SW after an
+// eviction so the watchdog below can recover the job from the server-
+// side cache. periodInMinutes 0.5 is the Chrome 120+ floor; older
+// builds clamp to 1min, which only slows recovery, never breaks it.
+const WHISPER_KEEPALIVE_ALARM = "bilidown-whisper-keepalive";
+
+function ensureWhisperKeepalive() {
+  try {
+    chrome.alarms.create(WHISPER_KEEPALIVE_ALARM, {
+      delayInMinutes: 0.5,
+      periodInMinutes: 0.5,
+    });
+  } catch (e) {
+    debugLog("[dk-bilidown BG] keepalive alarm create failed:", e);
+  }
+}
+
+function clearWhisperKeepalive() {
+  try {
+    chrome.alarms.clear(WHISPER_KEEPALIVE_ALARM);
+  } catch (e) {
+    // alarms API unavailable — nothing to clear.
+  }
+}
+
+// True while this SW incarnation is executing the whisper pipeline
+// (view fetch → audio download → /transcribe → correction → cache write).
+let whisperPipelineActive = false;
+
+chrome.alarms?.onAlarm?.addListener?.((alarm) => {
+  if (alarm?.name !== WHISPER_KEEPALIVE_ALARM) return;
+  whisperWatchdogTick().catch((e) =>
+    debugLog("[dk-bilidown BG] whisper watchdog tick failed:", e),
+  );
+});
+
+/**
+ * Runs every 30s while a whisper job exists. Two jobs in one:
+ *  1. Keepalive — the alarm firing resets the SW idle timer, so a live
+ *     pipeline survives page switches / closed sidepanels.
+ *  2. Recovery — if the SW was evicted mid-job (pipeline flag false but
+ *     the persisted job is non-terminal), poll the whisper server's own
+ *     cache: the server finishes inference and writes the transcript
+ *     server-side even when the client POST died, so the result is
+ *     usually already there. Mark SUCCEEDED when found; keep waiting
+ *     until the 30-minute cap, then FAIL.
+ */
+async function whisperWatchdogTick() {
+  let job = null;
+  try {
+    job = await loadWhisperJob();
+  } catch {
+    return;
+  }
+  if (!job || !job.videoId) {
+    clearWhisperKeepalive();
+    return;
+  }
+  const terminal =
+    job.stage === WHISPER_STAGES.SUCCEEDED ||
+    job.stage === WHISPER_STAGES.FAILED;
+  if (terminal) {
+    // Leave terminal records alone — the sidepanel acks them on view.
+    clearWhisperKeepalive();
+    return;
+  }
+  if (whisperPipelineActive) {
+    // Pipeline alive in THIS worker; the alarm just kept us warm.
+    return;
+  }
+  await recoverOrphanedWhisperJob(job);
+}
+
+async function recoverOrphanedWhisperJob(job) {
+  const startedAt = Number(job.startedAt) || 0;
+  const ageMs = startedAt ? Date.now() - startedAt : 0;
+  if (ageMs > 30 * 60 * 1000) {
+    await setWhisperJob({
+      ...job,
+      type: "whisper-job",
+      stage: WHISPER_STAGES.FAILED,
+      title: "Whisper 转录失败",
+      subtitle:
+        "后台任务中断且超过 30 分钟未能恢复。请重新点击转录（已完成的转写不受影响）。",
+      stageStartedAt: Date.now(),
+      finishedAt: Date.now(),
+      error: "whisper watchdog: stale non-terminal job",
+    });
+    clearWhisperKeepalive();
+    return;
+  }
+  // Poll the server-side cache for the finished result.
+  const meta = job.recoveryMeta || {};
+  const settings = await getSettings();
+  const url = (settings.whisperUrl || "").replace(/\/+$/, "");
+  if (!url || !meta.bvid || !meta.cid) {
+    // No recovery info (pre-fix job record) — nothing we can do but wait
+    // for the age cap above.
+    return;
+  }
+  try {
+    const qs = new URLSearchParams({
+      bvid: meta.bvid,
+      cid: String(meta.cid),
+      title: meta.title || "",
+      channel: meta.channel || "",
+      pub_date: meta.pubDate || "",
+      cache_dir: meta.cacheDir || settings.subtitlesDir || "",
+    });
+    const response = await fetch(`${url}/cache?${qs}`);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.ok && data.payload && Array.isArray(data.payload.transcript)) {
+        await setWhisperJob({
+          ...job,
+          type: "whisper-job",
+          stage: WHISPER_STAGES.SUCCEEDED,
+          title: "Whisper 转录完成",
+          subtitle: "正在加载字幕…",
+          stageStartedAt: Date.now(),
+          finishedAt: Date.now(),
+          result: {
+            success: true,
+            source: data.payload.source || "local-whisper",
+            language: data.payload.language || "unknown",
+            transcriptLength: data.payload.transcript.length,
+            cachePath: data.cache_path || "",
+            recovered: true,
+          },
+        });
+        // Tell any open panel so it re-renders from the cache.
+        chrome.runtime
+          .sendMessage({
+            action: "transcriptProgress",
+            stage: "succeeded",
+            videoId: meta.bvid,
+            title: "Whisper 转录完成",
+            subtitle: "正在加载字幕…",
+          })
+          .catch(() => {});
+        clearWhisperKeepalive();
+        return;
+      }
+    }
+    // Not there yet — the server may still be transcribing. Stay in a
+    // "recovered watcher" state so the panel shows an honest subtitle.
+    if (job.stage !== WHISPER_STAGES.TRANSCRIBING) {
+      await setWhisperJob({
+        ...job,
+        type: "whisper-job",
+        stage: WHISPER_STAGES.TRANSCRIBING,
+        title: "Whisper 转录中",
+        subtitle: "后台恢复模式：等待服务器完成转写",
+        stageStartedAt: Date.now(),
+        recovered: true,
+      });
+    }
+  } catch (e) {
+    debugLog("[dk-bilidown BG] watchdog cache poll failed:", e);
+  }
+}
+
 let activeWhisperJob = null; // in-memory mirror; source of truth is storage
 
 function setWhisperJob(job) {
   activeWhisperJob = job;
   if (job === null) {
+    clearWhisperKeepalive();
     return chrome.storage.session.remove(WHISPER_JOB_KEY);
+  }
+  const terminal =
+    job.stage === WHISPER_STAGES.SUCCEEDED ||
+    job.stage === WHISPER_STAGES.FAILED;
+  // Keep the SW alive (and the watchdog armed) for the whole life of a
+  // non-terminal job, regardless of which code path wrote the record.
+  if (terminal) {
+    clearWhisperKeepalive();
+  } else {
+    ensureWhisperKeepalive();
   }
   return chrome.storage.session.set({ [WHISPER_JOB_KEY]: job });
 }
@@ -788,6 +966,10 @@ function sendWhisperProgress(stage, title, subtitle, extras = {}) {
     .sendMessage({
       action: "transcriptProgress",
       stage,
+      // The panel needs to know WHICH video this progress belongs to so
+      // it can ignore broadcasts for other videos when the user has
+      // navigated elsewhere mid-transcription.
+      videoId: activeWhisperJob?.videoId || extras.videoId || null,
       title,
       subtitle,
       ...extras,
@@ -1121,7 +1303,7 @@ function normalizeBailianTranscript(data) {
 }
 
 async function transcribeWithBailian(videoId, cid, apiKey, viewPayload) {
-  chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在下载B站音轨", subtitle: "请保持视频页面打开" }).catch(() => {});
+  chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在下载B站音轨", subtitle: "转录在后台进行，可随意切换页面" }).catch(() => {});
   const blob = await fetchBilibiliAudioBlob(videoId, cid, viewPayload);
   chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在上传音轨", subtitle: "上传至阿里云百炼临时空间" }).catch(() => {});
   const fileUrl = await uploadAudioToBailian(blob, apiKey, videoId);
@@ -1165,7 +1347,7 @@ async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
   sendWhisperProgress(
     WHISPER_STAGES.DOWNLOADING,
     "正在下载B站音轨",
-    "请保持视频页面打开",
+    "转录在后台进行，可随意切换页面",
   );
   const audioBlob = await fetchBilibiliAudioBlob(videoId, cid, viewPayload);
   const contentType = audioBlob.type || "audio/mp4";
@@ -1176,9 +1358,27 @@ async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
     "音频下载完成，准备调用 Whisper",
     `模型 ${settings.whisperModel || "base"} · ${url}`,
   );
+  // Metadata headers: whisper_server persists the transcript to its own
+  // cache the moment inference finishes (X-Bvid/X-Cid/X-Title/X-Channel/
+  // X-Pubdate/X-Cache-Dir). If this SW is evicted before the POST
+  // returns — page switch, extension reload, browser restart — the
+  // watchdog recovers the finished result from that cache instead of
+  // losing it. Values are encodeURIComponent'd to stay header-safe
+  // (latin-1) with CJK titles; the server unquotes them.
+  const metaTitle = encodeURIComponent(viewPayload?.data?.title || "");
+  const metaChannel = encodeURIComponent(viewPayload?.data?.owner?.name || "");
+  const metaPubDate = viewPayload?.data?.pubdate
+    ? new Date(viewPayload.data.pubdate * 1000).toISOString().split("T")[0]
+    : "";
   const headers = {
     "Content-Type": contentType,
     "X-Whisper-Model": settings.whisperModel || "base",
+    "X-Bvid": videoId,
+    "X-Cid": String(cid),
+    "X-Title": metaTitle,
+    "X-Channel": metaChannel,
+    "X-Pubdate": metaPubDate,
+    "X-Cache-Dir": encodeURIComponent(settings.subtitlesDir || ""),
   };
   if (settings.whisperLanguage) {
     headers["X-Whisper-Language"] = settings.whisperLanguage;
@@ -1287,7 +1487,7 @@ async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
  * Look for local subtitle files by filename pattern: YYYY-MM-DD_videoTitle_upName.{txt,srt,md}
  * Parse the file content into transcript format.
  */
-async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, settings) {
+async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, settings, cid) {
   const dir = settings && typeof settings.subtitlesDir === "string"
     ? settings.subtitlesDir.trim().replace(/[\\/]+$/, "")
     : "";
@@ -1337,6 +1537,11 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
     const qs = new URLSearchParams({
       filenames: possibleFilenames.join(","),
       bvid: bvid || "",
+      // CID is the authoritative lookup key (unique per video part,
+      // never repeats) — the server pins .json matches to the exact
+      // part with it. Title-based filename matching stays as the
+      // human-readable layer.
+      cid: cid != null ? String(cid) : "",
       cache_dir: dir,
     });
     const response = await fetch(
@@ -1731,30 +1936,49 @@ async function handleTriggerWhisperTranscription(
   // running). Each duplicate ran a full parallel CPU inference on
   // whisper_server — observed live: 3 concurrent transcribes of the same
   // 5.5-minute audio, each slowing the others to a crawl and none
-  // finishing. If a non-terminal job for THIS video+page started <15 min
-  // ago, report alreadyRunning instead and let the sidepanel attach to
-  // the in-flight job's progress UI.
+  // finishing. While ANY non-terminal job is <15 min old we either attach
+  // to it (same video+page) or refuse (different video — parallel int8
+  // CPU inference starves both jobs and the shared job record can only
+  // track one pipeline).
   try {
     const existing = await loadWhisperJob();
-    if (
+    const existingFresh =
       existing &&
-      existing.videoId === videoId &&
-      Number(existing.pageNumber || 1) === requestedPageNumber &&
+      existing.videoId &&
       existing.stage !== WHISPER_STAGES.SUCCEEDED &&
       existing.stage !== WHISPER_STAGES.FAILED &&
       existing.startedAt &&
-      Date.now() - existing.startedAt < 15 * 60 * 1000
-    ) {
-      debugLog("[dk-bilidown BG] trigger blocked: job already running for", videoId);
-      return { success: true, alreadyRunning: true };
+      Date.now() - existing.startedAt < 15 * 60 * 1000;
+    if (existingFresh) {
+      const sameVideo =
+        existing.videoId === videoId &&
+        Number(existing.pageNumber || 1) === requestedPageNumber;
+      if (sameVideo) {
+        debugLog("[dk-bilidown BG] trigger blocked: job already running for", videoId);
+        return { success: true, alreadyRunning: true };
+      }
+      const busyTitle =
+        (existing.recoveryMeta && existing.recoveryMeta.title) ||
+        existing.videoId;
+      debugLog("[dk-bilidown BG] trigger blocked: another job running for", existing.videoId);
+      return {
+        success: false,
+        error: `已有另一个视频的转录正在进行中（${busyTitle}）。Whisper 同一时间只能跑一个任务，请等它完成后再试——期间可以随意切换页面，转录在后台不受影响。`,
+      };
     }
   } catch {
     // storage.session unavailable — fall through and start normally.
   }
 
+  // From here on the pipeline owns this worker. The flag tells the
+  // keepalive watchdog "a live pipeline exists — just keep me warm"
+  // instead of trying to recover an orphaned job record.
+  whisperPipelineActive = true;
+
   // Persist a fresh job record BEFORE we touch the network, so a SW
   // eviction or extension reload during the next 5+ minutes still leaves
   // a job the sidepanel can resume from.
+  const startedAt = Date.now();
   await setWhisperJob({
     type: "whisper-job",
     videoId,
@@ -1763,8 +1987,8 @@ async function handleTriggerWhisperTranscription(
     stage: WHISPER_STAGES.STARTED,
     title: "启动 Whisper 转录",
     subtitle: "正在连接 B 站接口…",
-    startedAt: Date.now(),
-    stageStartedAt: Date.now(),
+    startedAt,
+    stageStartedAt: startedAt,
   });
 
   let view;
@@ -1793,9 +2017,26 @@ async function handleTriggerWhisperTranscription(
     }
     // 把 view 里的付费/合作标记存到 job，方便事后 audit log 一眼看出
     // 这个视频到底卡在哪个分类上。空对象时也写一个空对象，避免
-    // 后续逻辑误以为还没拉过 view。
+    // 后续逻辑误以为还没拉过 view。recoveryMeta 给 watchdog 用：
+    // SW 被杀后恢复时按这些参数查服务端缓存。
+    const part = requestedPageNumber;
+    const page = view.data.pages?.[part - 1] || view.data.pages?.[0];
+    if (!page?.cid) throw new Error("无法识别当前分 P 的 CID。");
+    const recoveryTitle = view.data.title || "";
+    const recoveryChannel = view.data.owner?.name || "";
+    const recoveryPubDate = view.data.pubdate
+      ? new Date(view.data.pubdate * 1000).toISOString().split("T")[0]
+      : "";
     await setWhisperJob({
       ...(activeWhisperJob || {}),
+      recoveryMeta: {
+        bvid: videoId,
+        cid: page.cid,
+        title: recoveryTitle,
+        channel: recoveryChannel,
+        pubDate: recoveryPubDate,
+        cacheDir: settings.subtitlesDir || "",
+      },
       videoMeta: {
         is_upower_expert: v0Header?.is_upower_expert ?? 0,
         is_ugc_pay: v0Header?.is_ugc_pay ?? 0,
@@ -1805,9 +2046,6 @@ async function handleTriggerWhisperTranscription(
         title: view.data.title || null,
       },
     });
-    const part = requestedPageNumber;
-    const page = view.data.pages?.[part - 1] || view.data.pages?.[0];
-    if (!page?.cid) throw new Error("无法识别当前分 P 的 CID。");
 
     const result = await transcribeWithLocalWhisper(videoId, page.cid, settings, view);
     // Persist to cache so the next visit is instant. We always save the
@@ -1904,6 +2142,11 @@ async function handleTriggerWhisperTranscription(
       bilibiliErrorType: classified?.type || null,
     });
     throw err;
+  } finally {
+    // Pipeline done (success or failure) — the keepalive watchdog no
+    // longer has a live pipeline to protect. Non-terminal records keep
+    // the alarm armed so recovery can still kick in after an eviction.
+    whisperPipelineActive = false;
   }
 }
 
@@ -2033,7 +2276,8 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         videoTitle,
         channelName,
         pubDate,
-        settings
+        settings,
+        page.cid
       );
       if (localFile) {
         return {

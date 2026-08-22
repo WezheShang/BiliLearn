@@ -238,8 +238,9 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             filenames_str = (qs.get("filenames") or [""])[0]
             bvid = (qs.get("bvid") or [""])[0]
+            cid = (qs.get("cid") or [""])[0]
             cache_dir = (qs.get("cache_dir") or [None])[0]
-            self._handle_local_file_get(filenames_str, cache_dir, bvid)
+            self._handle_local_file_get(filenames_str, cache_dir, bvid, cid)
             return
         if self.path.startswith("/verify-path?"):
             from urllib.parse import urlparse, parse_qs
@@ -293,13 +294,39 @@ class Handler(BaseHTTPRequestHandler):
                 beam_size = int(self.headers.get("X-Whisper-Beam-Size") or "5")
                 audio_bytes = self.rfile.read(length)
                 audio_key = hashlib.sha256(audio_bytes).hexdigest()
-                self._transcribe_dedup(
-                    audio_key,
-                    lambda: self._transcribe_bytes(
+                # Optional metadata headers (all URL-encoded by the client
+                # so CJK values survive the latin-1 header transport).
+                # When present, the SERVER writes the transcript to its own
+                # subtitle cache the moment inference finishes — so even if
+                # the extension's service worker is evicted mid-POST (page
+                # switch, extension reload), the finished result is on disk
+                # and the client-side watchdog can recover it via /cache.
+                from urllib.parse import unquote as _unquote_header
+                cache_meta = {
+                    "bvid": _unquote_header(self.headers.get("X-Bvid") or ""),
+                    "cid": _unquote_header(self.headers.get("X-Cid") or ""),
+                    "title": _unquote_header(self.headers.get("X-Title") or ""),
+                    "channel": _unquote_header(self.headers.get("X-Channel") or ""),
+                    "pub_date": _unquote_header(self.headers.get("X-Pubdate") or ""),
+                    "cache_dir": _unquote_header(self.headers.get("X-Cache-Dir") or ""),
+                }
+
+                def _run_and_cache():
+                    payload = self._transcribe_bytes(
                         audio_bytes, model_name, language, beam_size,
                         content_type.split(";", 1)[0].strip(),
-                    ),
-                )
+                    )
+                    if cache_meta["bvid"] and cache_meta["cid"]:
+                        try:
+                            cache_path = self._write_server_side_cache(payload, cache_meta)
+                            payload["cache_path"] = str(cache_path)
+                        except Exception as cache_exc:  # noqa: BLE001
+                            # Cache write failure must never fail the
+                            # transcription itself.
+                            LOG.warning("server-side cache write failed: %s", cache_exc)
+                    return payload
+
+                self._transcribe_dedup(audio_key, _run_and_cache)
                 return
 
             # JSON mode: caller passes a path to an audio file under an
@@ -407,6 +434,58 @@ class Handler(BaseHTTPRequestHandler):
         )
         return payload
 
+    def _write_server_side_cache(self, payload, meta):
+        """Persist a finished transcription to the subtitle cache.
+
+        Called in the /transcribe raw-audio owner path when the client
+        supplied X-Bvid/X-Cid (+ optional friendly-name metadata). The
+        file shape mirrors what the extension's own saveCachedTranscript
+        writes — {bvid, cid, source, language, savedAt, transcript:
+        [{from, to, content}]} — so every read path (/cache GET,
+        /local-file bvid-grep) treats it identically. The extension
+        later overwrites this with the AI-corrected transcript when the
+        correction step completes; until then this raw version already
+        renders fine.
+        """
+        import datetime
+        import json as _json
+        segments = payload.get("segments") or []
+        transcript = [
+            {
+                "from": float(seg.get("start") or 0),
+                "to": float(seg.get("end") or 0),
+                "content": str(seg.get("text") or "").strip(),
+            }
+            for seg in segments
+            if str(seg.get("text") or "").strip()
+        ]
+        if not transcript:
+            raise ValueError("no text segments to cache")
+        cache_path = self._resolve_cache_path(
+            meta["bvid"],
+            meta["cid"],
+            cache_dir=meta.get("cache_dir") or None,
+            video_title=meta.get("title") or None,
+            channel_name=meta.get("channel") or None,
+            pub_date=meta.get("pub_date") or None,
+        )
+        doc = {
+            "bvid": meta["bvid"],
+            "cid": meta["cid"],
+            "source": "local-whisper",
+            "language": payload.get("language"),
+            "savedAt": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "transcript": transcript,
+        }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(_json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+        LOG.info(
+            "server-side cache write: %s (%d segments)",
+            cache_path.name,
+            len(transcript),
+        )
+        return cache_path
+
     # ---------- subtitle cache ----------
 
     def _resolve_cache_path(self, bvid, cid, cache_dir=None, video_title=None, channel_name=None, pub_date=None):
@@ -472,14 +551,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_cache_get(self, bvid, cid, cache_dir=None, video_title=None, channel_name=None, pub_date=None):
         try:
-            path = self._resolve_cache_path(bvid, cid, cache_dir, video_title, channel_name, pub_date)
+            resolved = self._resolve_cache_path(bvid, cid, cache_dir, video_title, channel_name, pub_date)
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
-        if not path.is_file():
+        # CID is the authoritative key (2026-08-22): a title-resolved hit
+        # only counts when the doc pins the requested bvid+cid — titles are
+        # NOT unique (multi-part videos share date+title+UP; the JS and
+        # Python filename cleaners can drift on exotic characters), so a
+        # title collision must not serve another part's payload. When ids
+        # are pinned, a miss falls back to a directory scan by ids.
+        path = None
+        if resolved.is_file():
+            if not (bvid and cid) or self._json_head_pins(resolved, bvid, cid):
+                path = resolved
+        if path is None and bvid and cid:
+            path = self._scan_json_for_ids(bvid, cid, resolved.parent)
+        if path is None:
             self._send_json(HTTPStatus.NOT_FOUND, {
                 "ok": False,
-                "cache_path": str(path),
+                "cache_path": str(resolved),
                 "reason": "not found",
             })
             return
@@ -499,7 +590,28 @@ class Handler(BaseHTTPRequestHandler):
             "payload": payload,
         })
 
-    def _handle_local_file_get(self, filenames_str=None, cache_dir=None, bvid=None):
+    def _scan_json_for_ids(self, bvid, cid, root_dir):
+        """Find a .json subtitle doc under root_dir pinning BOTH bvid+cid.
+
+        Reads only file heads (bilidown docs start with bvid/cid), so
+        scanning even a few hundred cache files stays cheap. Returns the
+        winning Path or None.
+        """
+        if not bvid or cid is None:
+            return None
+        try:
+            for dirpath, _dirs, files in os.walk(root_dir):
+                for filename in files:
+                    if not filename.lower().endswith(".json"):
+                        continue
+                    candidate = Path(dirpath) / filename
+                    if self._json_head_pins(candidate, bvid, cid):
+                        return candidate
+        except OSError:
+            return None
+        return None
+
+    def _handle_local_file_get(self, filenames_str=None, cache_dir=None, bvid=None, cid=None):
         """Look for local subtitle files by name pattern (recursive).
 
         If `bvid` is supplied, scans every .txt/.md under cache_dir and
@@ -508,6 +620,13 @@ class Handler(BaseHTTPRequestHandler):
         lets bilidown find subtitles even when the filename pattern
         (YYYY-MM-DD_Title_UP) doesn't match (different date format, no
         UP name, different folder layout, etc.).
+
+        If `cid` is ALSO supplied (preferred since 2026-08-22), every
+        .json candidate must pin BOTH bvid and cid in its doc — titles
+        and bvids are shared across the parts of a multi-part video, so
+        cid is the only key that identifies the exact part. Text exports
+        (.md/.txt/.srt/.lrc, usually written by external pipelines) have
+        no cid embedded, so they keep the bvid-header behavior.
         """
         if not cache_dir:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "cache_dir required"})
@@ -522,12 +641,18 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # --- Pass 1: filename match (original behavior) ---
+        # When `cid` is pinned, a .json hit must ALSO pin the same cid in
+        # its doc — filenames are title-based and the parts of a
+        # multi-part video share date+title+UP; only cid tells them apart.
         if filenames_str:
             target_filenames = [f.strip().lower() for f in filenames_str.split(",") if f.strip()]
             for root, dirs, files in os.walk(cache_path):
                 for filename in files:
                     if filename.lower() in target_filenames:
-                        result = self._read_subtitle_file(Path(root) / filename)
+                        candidate = Path(root) / filename
+                        if cid and filename.lower().endswith(".json") and not self._json_head_pins(candidate, bvid, cid):
+                            continue
+                        result = self._read_subtitle_file(candidate)
                         if result is not None:
                             self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
                             return
@@ -560,27 +685,64 @@ class Handler(BaseHTTPRequestHandler):
                         if not is_json and not lower.endswith((".txt", ".md", ".srt", ".lrc")):
                             continue
                         file_path = Path(root) / filename
-                        try:
-                            # Read the first ~2KB only — headers live at the top.
-                            # A full read of every .txt would be slow on
-                            # directories that also hold gigabytes of m4a.
-                            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                                head = f.read(2048)
-                        except OSError:
-                            continue
-                        pattern = json_pattern if is_json else text_pattern
-                        if pattern.search(head):
-                            # Confirmed — re-read the whole file for the actual content.
-                            result = self._read_subtitle_file(file_path)
-                            if result is not None:
-                                self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
-                                return
+                        if is_json and cid:
+                            # CID pinned: require the doc to pin BOTH bvid
+                            # and cid (part-exact). No bvid-only fallback —
+                            # a sibling part's cached subtitles would
+                            # silently be the wrong content; a miss lets
+                            # the panel offer a fresh transcription.
+                            if not self._json_head_pins(file_path, bvid, cid):
+                                continue
+                        else:
+                            try:
+                                # Read the first ~2KB only — headers live at the top.
+                                # A full read of every .txt would be slow on
+                                # directories that also hold gigabytes of m4a.
+                                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                                    head = f.read(2048)
+                            except OSError:
+                                continue
+                            pattern = json_pattern if is_json else text_pattern
+                            if not pattern.search(head):
+                                continue
+                        # Confirmed — re-read the whole file for the actual content.
+                        result = self._read_subtitle_file(file_path)
+                        if result is not None:
+                            self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
+                            return
 
         # None found
         self._send_json(HTTPStatus.NOT_FOUND, {
             "ok": False,
             "reason": "no matching file found",
         })
+
+    @staticmethod
+    def _json_head_pins(file_path, bvid, cid):
+        """True if the JSON subtitle doc at file_path pins BOTH `bvid` and `cid`.
+
+        Reads only the head of the file — bilidown-written docs always
+        start with {"bvid": ..., "cid": ...}. The cid comparison is
+        string-based because the extension writes cid as a JSON number
+        while this server writes it as a string. A doc that lacks either
+        field counts as NOT pinned (callers use this for exact-part
+        matching, so "unknown" must not pass).
+        """
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read(2048)
+        except OSError:
+            return False
+        m_bvid = re.search(r'"bvid"\s*:\s*"([^"]+)"', head)
+        if not m_bvid:
+            return False
+        if bvid and m_bvid.group(1) != bvid:
+            return False
+        m_cid = re.search(r'"cid"\s*:\s*"?(\d+)"?', head)
+        if not m_cid:
+            return False
+        want_cid = re.sub(r"\D", "", str(cid or ""))
+        return bool(want_cid) and m_cid.group(1) == want_cid
 
     def _read_subtitle_file(self, file_path):
         """Read a subtitle file and return (content, filename, path) tuple.
