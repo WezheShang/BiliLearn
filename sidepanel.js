@@ -418,6 +418,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 let navigationRefreshTimer = null;
 let panelWindowId = null;
+// Set when a new video's content has just been rendered into the panels.
+// The first `switchTab` after this resets the side panel's scroll position
+// to the top — so the user always sees the new video's Overview / Summary
+// from the beginning, not from wherever the previous video was scrolled
+// to. After firing once, it clears itself: subsequent tab switches within
+// the same video don't yank the scroll (transcript auto-scroll would
+// fight us otherwise). Starts true so the cold-start first switch also
+// scrolls to top.
+let tabScrollTopArmed = true;
 chrome.windows.getCurrent().then((w) => {
   panelWindowId = w.id;
 });
@@ -750,6 +759,12 @@ async function startBilidown(videoId, videoUrl) {
     showState("results");
     document.getElementById("tabsNav").style.display = "flex";
 
+    // Arm the "next tab switch scrolls to top" flag — this branch has
+    // already rendered transcript/analysis/summary into the panels, so
+    // the next switchTab the user makes should land them at the top
+    // of the new tab instead of wherever the OLD video's scroll lived.
+    tabScrollTopArmed = true;
+
     // Load notes for this video
     loadNotes(videoId);
 
@@ -832,6 +847,12 @@ async function startBilidown(videoId, videoUrl) {
   renderTranscript();
   showState("results");
   document.getElementById("tabsNav").style.display = "flex";
+
+  // Arm the "next tab switch scrolls to top" flag — the transcript
+  // has been rendered, so the next switchTab the user makes should
+  // land them at the top of the new tab instead of wherever the OLD
+  // video's scroll lived.
+  tabScrollTopArmed = true;
 
   // Load notes for this video
   loadNotes(videoId);
@@ -1482,6 +1503,17 @@ function switchTab(tabName) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.panel === tabName);
   });
+
+  // If a new video just rendered, the first switchTab should land the
+  // user at the top of the new tab — not where the previous video's
+  // scroll position was (which would put the user somewhere in the
+  // middle of e.g. the chapter list, with no idea how far down they
+  // are). Fires once per new video, then disarms. (2026-08-23)
+  if (tabScrollTopArmed) {
+    const scroller = document.querySelector(".content");
+    if (scroller) scroller.scrollTop = 0;
+    tabScrollTopArmed = false;
+  }
 
   // Start/stop playback tracking based on which tab is active
   if (tabName === "transcript") {

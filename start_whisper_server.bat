@@ -21,7 +21,11 @@ echo.
 echo Keep this window open. Close it to stop the server.
 echo.
 
-"%PYTHON_EXE%" "%SERVER_SCRIPT%"
+REM -B disables .pyc generation so the server never creates a
+REM __pycache__/ next to whisper_server.py (Chrome would refuse
+REM to load the extension if that directory appeared in the
+REM extension tree).
+"%PYTHON_EXE%" -B "%SERVER_SCRIPT%"
 
 if errorlevel 1 (
   echo.
