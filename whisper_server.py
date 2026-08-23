@@ -106,6 +106,44 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+
+# Traditional → Simplified Chinese conversion for whisper output.
+# whisper-tiny/base on Mandarin audio often produces Traditional
+# characters (輸/別/體 instead of 输/别/体) — issue surfaced
+# 2026-08-23. We normalize at the server so every downstream
+# consumer (watchdog recovery, /cache, /local-file, client cache,
+# future export) sees the same simplified form.
+#
+# `zhconv` is preferred (pure Python, no C extension, ~200KB).
+# It is optional: if not installed we log a warning and write the
+# raw text. Transcription must NEVER fail because of a missing
+# normalization dep.
+_T2S_WARN_ONCE = False
+
+
+def _get_t2s_converter():
+    """Return a callable that converts Traditional → Simplified Chinese.
+    Falls back to identity if `zhconv` is not available.
+    """
+    global _T2S_WARN_ONCE
+    try:
+        from zhconv import convert as _zhc
+
+        def _t2s(text):
+            if not text:
+                return text
+            return _zhc(text, "zh-cn")
+
+        return _t2s
+    except ImportError:
+        if not _T2S_WARN_ONCE:
+            LOG.warning(
+                "zhconv not installed — Traditional Chinese characters "
+                "from whisper will NOT be normalized. Run: pip install zhconv"
+            )
+            _T2S_WARN_ONCE = True
+        return lambda text: text
+
 # Lazy model cache: keeps one model in memory and reloads only when size
 # changes. Concurrent requests for the same model share the lock; a request
 # for a different model waits for the swap.
@@ -446,15 +484,27 @@ class Handler(BaseHTTPRequestHandler):
         later overwrites this with the AI-corrected transcript when the
         correction step completes; until then this raw version already
         renders fine.
+
+        Transcribed text is converted from Traditional to Simplified
+        Chinese before write (whisper-tiny/base bias toward Traditional
+        on Mandarin input — see issue 2026-08-23). Conversion runs only
+        on the segment text; metadata fields (title, channel, pub_date)
+        and the doc structure are untouched. Done at the server so
+        every downstream consumer (watchdog recovery, client in-memory
+        cache, /cache GET, /local-file bvid-grep, future export) sees
+        the same simplified form. If `zhconv` is not installed we
+        log a warning and write the original text — transcription
+        must never fail because of a missing t2s dependency.
         """
         import datetime
         import json as _json
         segments = payload.get("segments") or []
+        t2s = _get_t2s_converter()
         transcript = [
             {
                 "from": float(seg.get("start") or 0),
                 "to": float(seg.get("end") or 0),
-                "content": str(seg.get("text") or "").strip(),
+                "content": t2s(str(seg.get("text") or "").strip()),
             }
             for seg in segments
             if str(seg.get("text") or "").strip()

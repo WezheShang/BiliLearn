@@ -671,6 +671,22 @@ function extractVideoId(url) {
 // BILIDOWN PIPELINE
 // ============================================================
 
+/**
+ * Wipe the previous video's DOM from every panel container (2026-08-23).
+ * Called at the top of `startBilidown` (cache-miss branch) right after the
+ * in-memory state is cleared. Without this, the panel keeps showing the
+ * OLD video's chapter list / quotes / summary text until the user clicks
+ * the Overview or Summary tab — at which point lazy load overwrites it.
+ * Extracted as a named function so the regression test can verify the
+ * four containers in isolation, without standing up the full pipeline.
+ */
+function clearTabDomForNewVideo() {
+  for (const id of ["transcriptList", "chapterList", "quotesList", "summaryContent"]) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = "";
+  }
+}
+
 async function startBilidown(videoId, videoUrl) {
   const gen = ++generation;
   // Check if we already have this video loaded in memory
@@ -753,6 +769,16 @@ async function startBilidown(videoId, videoUrl) {
   currentTranscriptLanguage = null;
   currentTranscriptSource = null;
   isAnalysisLoading = false;
+
+  // Wipe stale DOM from the previous video on every panel (2026-08-23).
+  // renderTranscript() bails early when currentTranscript is null,
+  // and renderAnalysisResults / renderSummaryResults aren't called at
+  // all when their backing state is null — so without this explicit
+  // clear, switching to a new B站 video leaves the *previous* video's
+  // chapter list / quotes list / summary content sitting in the
+  // Overview and Summary tabs until the user clicks one of those tabs
+  // (which then triggers the lazy load + DOM overwrite).
+  clearTabDomForNewVideo();
 
   if (currentVideoTitle || currentChannelName) {
     const videoInfo = document.getElementById("videoInfo");
