@@ -1,0 +1,18 @@
+{
+  "appName": {
+    "message": "Suikan 随看",
+    "description": "The display name of the extension. Shown in the Chrome toolbar, the extensions page, and the Chrome Web Store listing."
+  },
+  "appShortName": {
+    "message": "Suikan",
+    "description": "A short form of the app name, used in places like the Chrome Web Store when the full name does not fit."
+  },
+  "appTagline": {
+    "message": "随时看，随手记。",
+    "description": "Short tagline shown in the extension's promo surfaces and the side panel home view."
+  },
+  "appDescription": {
+    "message": "Suikan（随看）是由 WezheShang 基于 youtube-digest（Zara Zhang）二次开发的 Chrome / Edge 浏览器扩展。它把长视频变成一份可学习、可检索、可保存的资料：自动读取视频字幕或本地音轨转写结果，由 AI 生成中文概览、章节时间线、关键观点和时间戳笔记，支持导出为 Markdown、HTML 或一键复制到飞书。当前支持 B 站，未来会扩展到 YouTube、抖音、知乎视频课等学习视频平台。",
+    "description": "Long description shown in the Chrome Web Store listing and the extensions page."
+  }
+}

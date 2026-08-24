@@ -237,7 +237,7 @@ function createBilidownButton() {
   const bilidownButton = document.createElement("button");
   bilidownButton.id = "ytd-bilidown-button";
   bilidownButton.type = "button";
-  bilidownButton.setAttribute("aria-label", "打开 bilidown");
+  bilidownButton.setAttribute("aria-label", "打开 Suikan 随看");
   bilidownButton.innerHTML = `
     <span class="ytd-bilidown-icon" style="font-size: 11px;">▶</span>
     <span class="ytd-bilidown-label">AI 总结</span>

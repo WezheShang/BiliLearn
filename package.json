@@ -1,0 +1,44 @@
+{
+  "name": "suikan",
+  "version": "1.0.0",
+  "description": "Suikan（随看）：WezheShang 基于 youtube-digest 二次开发的 Chrome 扩展，把长视频变成带字幕、AI 概览/总结、章节、关键观点、时间戳笔记、飞书/HTML/Markdown 导出的可学习资料。Watch less. Learn more.",
+  "main": "background.js",
+  "scripts": {
+    "test": "node ../bilidown-tests/run_all.js",
+    "test:fast": "node ../bilidown-tests/test_t2s_conversion.js && node ../bilidown-tests/test_clear_tab_dom.js && node ../bilidown-tests/test_switch_tab_scroll.js",
+    "test:server": "node ../bilidown-tests/test_server_cache_write.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WezheShang/suikan.git"
+  },
+  "keywords": [
+    "suikan",
+    "video-learning",
+    "chrome-extension",
+    "manifest-v3",
+    "ai-summary",
+    "transcript",
+    "bili",
+    "bilibili",
+    "youtube",
+    "forked-from-youtube-digest"
+  ],
+  "author": {
+    "name": "WezheShang",
+    "email": "",
+    "url": "https://github.com/WezheShang"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "bugs": {
+    "url": "https://github.com/WezheShang/suikan/issues"
+  },
+  "homepage": "https://github.com/WezheShang/suikan#readme",
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

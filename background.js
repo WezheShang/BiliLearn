@@ -97,7 +97,7 @@ async function requestAiCompletion({
   const activeKey = YTD_SETTINGS.activeApiKey(settings);
   if (!activeKey) {
     const error = new Error(
-      "AI provider API key not configured. Open bilidown Settings.",
+      "AI provider API key not configured. Open Suikan 随看 Settings.",
     );
     error.code = "NO_AI_KEY";
     throw error;
@@ -2507,7 +2507,7 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "AI provider API key not configured. Open bilidown Settings.",
+        message: "AI provider API key not configured. Open Suikan 随看 Settings.",
       };
     }
 
@@ -2626,7 +2626,7 @@ async function handleSummarizeTranscript(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "AI provider API key not configured. Open bilidown Settings.",
+        message: "AI provider API key not configured. Open Suikan 随看 Settings.",
       };
     }
 
