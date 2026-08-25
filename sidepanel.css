@@ -119,6 +119,7 @@ body {
   display: flex;
   align-items: center;
   gap: 9px;
+  justify-content: space-between;
   margin-bottom: 14px;
 }
 
@@ -149,7 +150,6 @@ body {
 .header-top {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
   gap: 12px;
 }
 
