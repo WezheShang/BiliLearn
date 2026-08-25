@@ -24,9 +24,8 @@ echo.
 REM -B disables .pyc generation so the server never creates a
 REM __pycache__/ next to whisper_server.py (Chrome would refuse
 REM to load the extension if that directory appeared in the
-REM extension tree). -I is isolated mode (no .pyc, no user-site,
-REM no PYTHONPATH) — same goal, slightly stronger.
-"%PYTHON_EXE%" -B -I "%SERVER_SCRIPT%"
+REM extension tree).
+"%PYTHON_EXE%" -B "%SERVER_SCRIPT%"
 
 if errorlevel 1 (
   echo.

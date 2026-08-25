@@ -114,19 +114,35 @@ logging.basicConfig(
 # consumer (watchdog recovery, /cache, /local-file, client cache,
 # future export) sees the same simplified form.
 #
-# Implementation moved out of this file to `bilidown-tests/t2s_converter.py`
-# (sibling test directory, OUTSIDE the Chrome extension tree) so that
-# the regression test can import it without Python writing
-# `__pycache__/whisper_server.cpython-313.pyc` next to this file —
-# which Chrome MV3 refuses to load. See CHANGELOG.md and dev-clean.ps1.
-# The t2s_converter module owns its own logger; we import its public
-# function `get_t2s_converter` and use it as-is.
-import os as _os
-import sys as _sys
-_T2S_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "bilidown-tests")
-if _T2S_DIR not in _sys.path:
-    _sys.path.insert(0, _T2S_DIR)
-from t2s_converter import get_t2s_converter as _get_t2s_converter  # noqa: E402
+# `zhconv` is preferred (pure Python, no C extension, ~200KB).
+# It is optional: if not installed we log a warning and write the
+# raw text. Transcription must NEVER fail because of a missing
+# normalization dep.
+_T2S_WARN_ONCE = False
+
+
+def _get_t2s_converter():
+    """Return a callable that converts Traditional → Simplified Chinese.
+    Falls back to identity if `zhconv` is not available.
+    """
+    global _T2S_WARN_ONCE
+    try:
+        from zhconv import convert as _zhc
+
+        def _t2s(text):
+            if not text:
+                return text
+            return _zhc(text, "zh-cn")
+
+        return _t2s
+    except ImportError:
+        if not _T2S_WARN_ONCE:
+            LOG.warning(
+                "zhconv not installed — Traditional Chinese characters "
+                "from whisper will NOT be normalized. Run: pip install zhconv"
+            )
+            _T2S_WARN_ONCE = True
+        return lambda text: text
 
 # Lazy model cache: keeps one model in memory and reloads only when size
 # changes. Concurrent requests for the same model share the lock; a request

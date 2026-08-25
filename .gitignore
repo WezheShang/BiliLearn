@@ -24,10 +24,3 @@ package-lock.json
 *.bak
 *.tmp
 *.log
-tmp/
-tests/debug-*.js
-tests/stop-*.js
-
-# Whisper server runtime logs (regenerated every server start)
-whisper_server.out
-whisper_server.err

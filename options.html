@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Suikan 随看 设置</title>
+    <title>bilidown 设置</title>
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
     <main class="settings-shell">
       <header>
         <div class="settings-heading-row">
-          <div class="eyebrow">Suikan 随看</div>
+          <div class="eyebrow">bilidown</div>
           <div
             class="language-switch"
             role="group"
@@ -35,7 +35,7 @@
             </button>
           </div>
         </div>
-        <h1 data-i18n="heading">Suikan 随看 设置</h1>
+        <h1 data-i18n="heading">bilidown 设置</h1>
         <p class="lede" data-i18n="lede">
           密钥保存在当前 Chrome 配置中，只在使用 AI 功能时发送给 minimax。
           本扩展没有开发者服务器或数据分析。
@@ -49,7 +49,7 @@
         <section class="card">
           <h2>语音识别</h2>
           <p class="help">
-            B 站没有原生字幕时，Suikan 随看 会用下面选择的引擎给视频生成带时间戳的字幕。
+            B 站没有原生字幕时，bilidown 会用下面选择的引擎给视频生成带时间戳的字幕。
           </p>
 
           <label for="asrProvider">语音识别服务</label>
@@ -70,7 +70,7 @@
               placeholder="sk-..."
             />
             <p class="help">
-              Suikan 随看 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。
+              bilidown 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。
               <a
                 href="https://bailian.console.aliyun.com/?apiKey=1"
                 target="_blank"
@@ -81,7 +81,7 @@
 
           <div data-asr-field="whisper" class="is-hidden">
             <p class="help" data-i18n="whisperHelp">
-              启动 <code>start_whisper_server.bat</code> 后，Suikan 随看 会下载音轨
+              启动 <code>start_whisper_server.bat</code> 后，bilidown 会下载音轨
               交给本地 Whisper 转写，再调用 AI 校正专有名词。
             </p>
 
@@ -191,7 +191,7 @@
             />
             <p class="help">
               <span data-i18n="minimaxHelp"
-                >Suikan 随看 uses minimax for overviews, explanations,
+                >bilidown uses minimax for overviews, explanations,
                 translation, and note polishing.</span
               >
               <a
@@ -218,7 +218,7 @@
             />
             <p class="help">
               <span data-i18n="deepseekHelp"
-                >Suikan 随看 uses DeepSeek for overviews, explanations,
+                >bilidown uses DeepSeek for overviews, explanations,
                 translation, and note polishing.</span
               >
               <a
@@ -256,7 +256,7 @@
             </select>
             <p class="help">
               <span data-i18n="glmHelp"
-                >Suikan 随看 uses GLM (Zhipu / Z.AI) for overviews, explanations,
+                >bilidown uses GLM (Zhipu / Z.AI) for overviews, explanations,
                 translation, and note polishing. Default model: glm-4.6.
                 Pick the API type that matches your key — the two endpoints
                 have different keys that are NOT interchangeable.</span
@@ -294,7 +294,7 @@
             </p>
             <ol class="customization-steps">
               <li data-i18n="customizationStepFolder">
-                Open the extracted Suikan 随看 project folder in your coding
+                Open the extracted bilidown project folder in your coding
                 agent.
               </li>
               <li data-i18n="customizationStepReplace">
@@ -327,7 +327,7 @@
               id="customizationPrompt"
               rows="12"
               aria-describedby="customizationPromptReminder"
-            >Customize this local Suikan 随看 workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is Suikan 随看. If verification fails, stop and ask me to open the extracted Suikan 随看 project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.</textarea>
+            >Customize this local bilidown workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is bilidown. If verification fails, stop and ask me to open the extracted bilidown project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.</textarea>
             <div class="copy-actions">
               <button
                 id="copyCustomizationPromptBtn"

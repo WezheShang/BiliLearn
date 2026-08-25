@@ -5,7 +5,7 @@ const YTD_OPTIONS = (() => {
 
   const COPY = {
     en: {
-      pageTitle: "Suikan 随看 Settings",
+      pageTitle: "bilidown Settings",
       languageGroupLabel: "Interface language",
       heading: "Bring your own API keys",
       lede:
@@ -29,11 +29,11 @@ const YTD_OPTIONS = (() => {
       glmApiTypeCoding: "Coding Plan (subscription)",
       glmApiTypeStandard: "Standard API (pay-as-you-go)",
       minimaxHelp:
-        "Suikan 随看 uses minimax for overviews, explanations, translation, and note polishing. ",
+        "bilidown uses minimax for overviews, explanations, translation, and note polishing. ",
       deepseekHelp:
-        "Suikan 随看 uses DeepSeek for overviews, explanations, translation, and note polishing. ",
+        "bilidown uses DeepSeek for overviews, explanations, translation, and note polishing. ",
       glmHelp:
-        "Suikan 随看 uses GLM (Zhipu / Z.AI) for overviews, explanations, translation, and note polishing. Default model: glm-4.6. ",
+        "bilidown uses GLM (Zhipu / Z.AI) for overviews, explanations, translation, and note polishing. Default model: glm-4.6. ",
       minimaxLink: "Create a minimax API key",
       deepseekLink: "Create a DeepSeek API key",
       glmLink: "Create a Zhipu API key",
@@ -44,7 +44,7 @@ const YTD_OPTIONS = (() => {
         "When you use AI features, the selected provider receives the video transcript and relevant video context. Review the active provider's terms and pricing before saving.",
       whisperHeading: "Local Whisper (optional)",
       whisperHelp:
-        "After starting start_whisper_server.bat, Suikan 随看 downloads the audio when B-station has no usable subtitles, transcribes it locally, and then asks the AI to fix proper-noun errors.",
+        "After starting start_whisper_server.bat, bilidown downloads the audio when B-station has no usable subtitles, transcribes it locally, and then asks the AI to fix proper-noun errors.",
       whisperEnabledLabel: "Enable local Whisper fallback",
       whisperUrlLabel: "Whisper server URL",
       whisperModelLabel: "Whisper model",
@@ -66,7 +66,7 @@ const YTD_OPTIONS = (() => {
       customizationIntro:
         "You can edit the prompt directly. Complete these three steps before copying:",
       customizationStepFolder:
-        "Open the extracted Suikan 随看 project folder in your coding agent.",
+        "Open the extracted bilidown project folder in your coding agent.",
       customizationStepReplace:
         "Replace [PROVIDER] and [MODEL] with the service and model you want to use.",
       customizationStepKeys:
@@ -76,7 +76,7 @@ const YTD_OPTIONS = (() => {
       customizationReminder:
         "Before copying, replace [PROVIDER] and [MODEL] with the provider and model you want to use.",
       customizationPrompt:
-        "Customize this local Suikan 随看 workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is Suikan 随看. If verification fails, stop and ask me to open the extracted Suikan 随看 project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.",
+        "Customize this local bilidown workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is bilidown. If verification fails, stop and ask me to open the extracted bilidown project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.",
       copyCustomizationPrompt: "Copy edited prompt",
       localData: "Local data",
       localDataHelp:
@@ -91,7 +91,7 @@ const YTD_OPTIONS = (() => {
       saving: "Saving…",
       addSupadataKey: "Add a Supadata API key.",
       addMiniMaxKey: "Add a minimax API key.",
-      saved: "Settings saved and verified. Suikan 随看 will use them immediately.",
+      saved: "Settings saved and verified. bilidown will use them immediately.",
       saveFailed: "Could not save settings. Please try again.",
       copying: "Copying…",
       promptCopied: "Edited prompt copied.",
@@ -108,9 +108,9 @@ const YTD_OPTIONS = (() => {
         "Could not load saved settings. You can still preview this page.",
     },
     "zh-CN": {
-      pageTitle: "Suikan 随看 设置",
+      pageTitle: "bilidown 设置",
       languageGroupLabel: "界面语言",
-      heading: "Suikan 随看 设置",
+      heading: "bilidown 设置",
       lede:
         "密钥仅保存在当前 Chrome 个人资料中。音频会发送给阿里云百炼进行语音识别，字幕和视频上下文会发送给 minimax 生成概览等内容。",
       transcriptProvider: "字幕服务",
@@ -131,11 +131,11 @@ const YTD_OPTIONS = (() => {
       glmApiTypeCoding: "Coding Plan（订阅）",
       glmApiTypeStandard: "Standard API（按量计费）",
       minimaxHelp:
-        "Suikan 随看 使用 minimax 生成概览、解释内容、翻译字幕和润色笔记。",
+        "bilidown 使用 minimax 生成概览、解释内容、翻译字幕和润色笔记。",
       deepseekHelp:
-        "Suikan 随看 使用 DeepSeek 生成概览、解释内容、翻译字幕和润色笔记。",
+        "bilidown 使用 DeepSeek 生成概览、解释内容、翻译字幕和润色笔记。",
       glmHelp:
-        "Suikan 随看 使用 GLM（智谱 / Z.AI）生成概览、解释内容、翻译字幕和润色笔记。默认模型 glm-4.6。",
+        "bilidown 使用 GLM（智谱 / Z.AI）生成概览、解释内容、翻译字幕和润色笔记。默认模型 glm-4.6。",
       minimaxLink: "创建 minimax API 密钥",
       deepseekLink: "创建 DeepSeek API 密钥",
       glmLink: "创建智谱 API 密钥",
@@ -167,7 +167,7 @@ const YTD_OPTIONS = (() => {
       agentBadge: "可交给编程 Agent",
       customizationIntro: "你可以直接编辑提示词。复制前完成以下三步：",
       customizationStepFolder:
-        "在编程 Agent 中打开 Suikan 随看 解压后的项目文件夹。",
+        "在编程 Agent 中打开 bilidown 解压后的项目文件夹。",
       customizationStepReplace:
         "把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。",
       customizationStepKeys:
@@ -177,7 +177,7 @@ const YTD_OPTIONS = (() => {
       customizationReminder:
         "复制前，请先把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。",
       customizationPrompt:
-        "请把当前本地 Suikan 随看 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 Suikan 随看。如果验证失败，请停止，并让我在编程 Agent 中打开 Suikan 随看 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。minimax 专用的请求参数和重试逻辑继续只用于 minimax。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 Bilibili 视频上测试。",
+        "请把当前本地 bilidown 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 bilidown。如果验证失败，请停止，并让我在编程 Agent 中打开 bilidown 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。minimax 专用的请求参数和重试逻辑继续只用于 minimax。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 Bilibili 视频上测试。",
       copyCustomizationPrompt: "复制编辑后的提示词",
       localData: "本地数据",
       localDataHelp:
@@ -192,7 +192,7 @@ const YTD_OPTIONS = (() => {
       saving: "正在保存…",
       addSupadataKey: "请添加 Supadata API 密钥。",
       addMiniMaxKey: "请添加所选 AI 服务的 API 密钥。",
-      saved: "设置已保存并验证成功，Suikan 随看 将立即使用新配置。",
+      saved: "设置已保存并验证成功，bilidown 将立即使用新配置。",
       saveFailed: "无法保存设置，请重试。",
       copying: "正在复制…",
       promptCopied: "已复制编辑后的提示词。",

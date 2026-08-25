@@ -1,4 +1,4 @@
-# Suikan 随看
+# bilidown
 
 把 B 站视频变成一份可学习、可检索、可保存的资料。扩展会读取视频已有字幕，并在 Chrome 侧边栏中提供字幕浏览、minimax AI 概览、完整演讲总结笔记、章节、关键观点、选中文本解释、时间戳跳转和本地笔记。
 
@@ -27,7 +27,7 @@
 2. Chrome 地址栏打开 `chrome://extensions`。
 3. 开启右上角“开发者模式”。
 4. 点击“加载已解压的扩展程序”。
-5. 选择包含 `manifest.json` 的 `Suikan 随看` 文件夹。
+5. 选择包含 `manifest.json` 的 `bilidown` 文件夹。
 6. 在设置页填写自己的 minimax API Key 并保存。
 7. 打开一条带字幕的 B 站视频，点击右上角“AI 总结”。
 
@@ -45,7 +45,7 @@ npm run check
 npm run package
 ```
 
-打包结果位于 `dist/suikan-v1.0.0.zip`。
+打包结果位于 `dist/bilidown-v1.2.2.zip`。
 
 ## 许可证
 

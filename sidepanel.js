@@ -612,7 +612,7 @@ async function checkCurrentTab() {
     if (!/^https:\/\/www\.bilibili\.com\/video\//.test(url)) {
       showWelcome(
         "当前页面不是 B 站视频。\n当前页面: " + url +
-        "\n提示：Suikan 随看 只会显示 B 站视频的字幕。请打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
+        "\n提示：bilidown 只会显示 B 站视频的字幕。请打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
       );
       return;
     }
@@ -1187,7 +1187,7 @@ function buildMarkdownExport() {
   }
   lines.push("## 完整字幕", "");
   exportTranscriptEntries().forEach((entry) => lines.push(`- [${entry.timestamp}](${entry.url}) ${entry.text}`));
-  lines.push("", "---", "由 Suikan 随看 · WezheShang 二次开发版导出");
+  lines.push("", "---", "由 bilidown · dk 二次开发版导出");
   return lines.join("\n");
 }
 
@@ -1199,7 +1199,7 @@ function buildHtmlExport() {
     <blockquote><b>${escapeHtml(quote.timestamp)}</b>${escapeHtml(quote.quote)}</blockquote>`).join("");
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</title><style>
   :root{--pink:#fb7299;--blue:#00aeec;--ink:#18191c;--muted:#61666d;--line:#e3e5e7}*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:var(--ink);font:15px/1.75 system-ui,-apple-system,"Segoe UI",sans-serif}.page{width:min(900px,calc(100% - 28px));margin:32px auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:clamp(22px,5vw,54px);box-shadow:0 12px 36px rgba(24,25,28,.07)}h1{line-height:1.3;margin:0 0 14px}h2{margin-top:38px;padding-bottom:10px;border-bottom:2px solid rgba(251,114,153,.18)}.meta{color:var(--muted)}a{color:var(--pink);text-decoration:none}.chapter{display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--line)}.chapter a{flex:0 0 54px;font-weight:700}.chapter p{margin:4px 0;color:var(--muted)}blockquote{margin:12px 0;padding:14px 18px;border-left:4px solid var(--pink);background:rgba(251,114,153,.06);border-radius:0 10px 10px 0}blockquote b{margin-right:12px;color:var(--pink)}.line{display:grid;grid-template-columns:62px 1fr;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}.time{font-family:ui-monospace,monospace;font-weight:700}.footer{margin-top:38px;color:#9499a0;font-size:12px}@media(max-width:560px){.line{grid-template-columns:52px 1fr}.page{margin:12px auto}}
-  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}${chapters ? `<h2>AI 章节</h2>${chapters}` : ""}${quotes ? `<h2>关键观点</h2>${quotes}` : ""}<h2>完整字幕</h2>${entries.map((entry) => `<div class="line"><a class="time" href="${escapeHtml(entry.url)}">${escapeHtml(entry.timestamp)}</a><div>${escapeHtml(entry.text)}</div></div>`).join("")}<div class="footer">由 Suikan 随看 · WezheShang 二次开发版导出</div></main></body></html>`;
+  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}${chapters ? `<h2>AI 章节</h2>${chapters}` : ""}${quotes ? `<h2>关键观点</h2>${quotes}` : ""}<h2>完整字幕</h2>${entries.map((entry) => `<div class="line"><a class="time" href="${escapeHtml(entry.url)}">${escapeHtml(entry.timestamp)}</a><div>${escapeHtml(entry.text)}</div></div>`).join("")}<div class="footer">由 bilidown · dk 二次开发版导出</div></main></body></html>`;
 }
 
 async function copyForFeishu() {
@@ -1247,7 +1247,7 @@ function buildSummaryMarkdownExport() {
     `- **视频链接：** ${currentCanonicalVideoUrl()}`,
   ];
   if (currentVideoDescription) lines.push("", "## 视频简介", "", currentVideoDescription);
-  lines.push("", currentSummary || "（暂无总结内容）", "", "---", "由 Suikan 随看 · WezheShang 二次开发版导出");
+  lines.push("", currentSummary || "（暂无总结内容）", "", "---", "由 bilidown · dk 二次开发版导出");
   return lines.join("\n");
 }
 
@@ -1259,7 +1259,7 @@ function buildSummaryHtmlExport() {
   const body = currentSummary ? renderMarkdown(currentSummary) : "<p>（暂无总结内容）</p>";
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</title><style>
   :root{--pink:#fb7299;--blue:#00aeec;--ink:#18191c;--muted:#61666d;--line:#e3e5e7}*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:var(--ink);font:15px/1.75 system-ui,-apple-system,"Segoe UI",sans-serif}.page{width:min(900px,calc(100% - 28px));margin:32px auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:clamp(22px,5vw,54px);box-shadow:0 12px 36px rgba(24,25,28,.07)}h1{line-height:1.3;margin:0 0 14px}.meta{color:var(--muted)}a{color:var(--pink);text-decoration:none}.note h1,.note h2,.note h3,.note h4{line-height:1.35;margin:22px 0 8px}.note h1{font-size:22px}.note h2{font-size:19px;padding-bottom:8px;border-bottom:2px solid rgba(251,114,153,.18)}.note h3{font-size:16px}.note p{margin:8px 0}.note ul,.note ol{margin:8px 0;padding-left:22px}.note li{margin:3px 0}.note blockquote{margin:12px 0;padding:14px 18px;border-left:4px solid var(--pink);background:rgba(251,114,153,.06);border-radius:0 10px 10px 0;color:var(--muted)}.note code{font-family:ui-monospace,monospace;font-size:.9em;background:rgba(24,25,28,.05);border-radius:4px;padding:1px 5px}.note pre{margin:12px 0;padding:14px 16px;background:rgba(24,25,28,.04);border:1px solid var(--line);border-radius:10px;overflow-x:auto}.note pre code{background:none;padding:0}.note hr{border:none;border-top:1px solid var(--line);margin:20px 0}.note strong{color:var(--ink)}.footer{margin-top:38px;color:#9499a0;font-size:12px}@media(max-width:560px){.page{margin:12px auto}}
-  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}<div class="note">${body}</div><div class="footer">由 Suikan 随看 · WezheShang 二次开发版导出</div></main></body></html>`;
+  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}<div class="note">${body}</div><div class="footer">由 bilidown · dk 二次开发版导出</div></main></body></html>`;
 }
 
 /**
@@ -1486,7 +1486,7 @@ function showConfigError(configStatus) {
   showState("error");
   document.getElementById("errorTitle").textContent = "还没有配置 API 密钥";
   document.getElementById("errorMessage").textContent =
-    `请先在 Suikan 随看 设置中填写${missingKeys.join("和")}。`;
+    `请先在 bilidown 设置中填写${missingKeys.join("和")}。`;
   document.getElementById("errorBtn").textContent = "打开设置";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
 }
