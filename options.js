@@ -771,6 +771,276 @@ const YTD_OPTIONS = (() => {
       });
     }
 
+    // ------------------------------------------------------------
+    // First-run setup wizard
+    // Shows at the top of the page until the user dismisses it or
+    // marks setup as done. Reads `bilidown_setup_completed` from
+    // chrome.storage.local. The wizard never blocks saving settings.
+    // ------------------------------------------------------------
+    const SETUP_COMPLETED_KEY = "bilidown_setup_completed";
+    const setupWizard = doc.getElementById("setupWizard");
+    const setupWizardDismiss = doc.getElementById("setupWizardDismiss");
+    const setupWizardGo = doc.getElementById("setupWizardGo");
+    const aiProviderCard = doc.getElementById("aiProviderCard");
+
+    function hideSetupWizard() {
+      if (setupWizard) setupWizard.hidden = true;
+    }
+
+    function showSetupWizard() {
+      if (setupWizard) setupWizard.hidden = false;
+    }
+
+    function initSetupWizard() {
+      if (!setupWizard) return;
+      try {
+        const stored = getSafeLocalStorage(root) || {};
+        // Show wizard if user has never dismissed it AND doesn't have
+        // at least one AI provider key configured.
+        const hasAnyKey = Boolean(
+          (stored.minimaxApiKey || stored.deepseekApiKey || stored.glmApiKey) &&
+            (stored.minimaxApiKey || stored.deepseekApiKey || stored.glmApiKey).length,
+        );
+        const dismissed = stored[SETUP_COMPLETED_KEY] === true;
+        if (!dismissed && !hasAnyKey) {
+          showSetupWizard();
+        } else {
+          hideSetupWizard();
+        }
+      } catch (e) {
+        // If we can't read storage, default to hiding the wizard rather
+        // than blocking the user from configuring anything.
+        hideSetupWizard();
+      }
+    }
+
+    if (setupWizardDismiss) {
+      setupWizardDismiss.addEventListener("click", async () => {
+        try {
+          await storage.set({ [SETUP_COMPLETED_KEY]: true });
+        } catch (e) {
+          // Even if persist fails, hide the wizard locally so the user
+          // can move on.
+        }
+        hideSetupWizard();
+      });
+    }
+
+    if (setupWizardGo && aiProviderCard) {
+      setupWizardGo.addEventListener("click", () => {
+        aiProviderCard.scrollIntoView({ behavior: "smooth", block: "start" });
+        try {
+          aiProviderCard.focus({ preventScroll: true });
+        } catch (e) {
+          // some browsers don't support focus on <section>
+        }
+        // Briefly outline the card so the user sees where they landed.
+        aiProviderCard.classList.add("setup-wizard-highlight");
+        setTimeout(
+          () => aiProviderCard.classList.remove("setup-wizard-highlight"),
+          1800,
+        );
+      });
+    }
+
+    initSetupWizard();
+
+    // ------------------------------------------------------------
+    // Diagnostics panel: run health checks on the configured
+    // whisper server, B 站 API, and other dependencies. Results
+    // rendered as a list of ✓/✗ items.
+    // ------------------------------------------------------------
+    const runDiagnosticsBtn = doc.getElementById("runDiagnosticsBtn");
+    const diagnosticsStatus = doc.getElementById("diagnosticsStatus");
+    const diagnosticsResults = doc.getElementById("diagnosticsResults");
+
+    function renderDiagnosticsItem(label, ok, detail) {
+      if (!diagnosticsResults) return;
+      const li = doc.createElement("li");
+      li.className = "diagnostics-item " + (ok ? "ok" : "fail");
+      const mark = doc.createElement("span");
+      mark.className = "diagnostics-mark";
+      mark.textContent = ok ? "✓" : "✗";
+      const text = doc.createElement("span");
+      text.className = "diagnostics-text";
+      const strong = doc.createElement("strong");
+      strong.textContent = label;
+      text.appendChild(strong);
+      if (detail) {
+        const small = doc.createElement("span");
+        small.className = "diagnostics-detail";
+        small.textContent = " — " + detail;
+        text.appendChild(small);
+      }
+      li.appendChild(mark);
+      li.appendChild(text);
+      diagnosticsResults.appendChild(li);
+    }
+
+    async function pingWhisper(url) {
+      const target = (url || "").replace(/\/+$/, "") + "/health";
+      const ctl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+      const timer = ctl ? setTimeout(() => ctl.abort(), 5000) : null;
+      try {
+        const res = await fetch(target, {
+          method: "GET",
+          signal: ctl ? ctl.signal : undefined,
+        });
+        if (!res.ok) {
+          return { ok: false, detail: "HTTP " + res.status };
+        }
+        const body = await res.json().catch(() => ({}));
+        return {
+          ok: body && body.ok === true,
+          detail: body && body.version
+            ? "version " + body.version + " · models: " + (body.available_models || []).join(", ")
+            : "no JSON body",
+        };
+      } catch (e) {
+        const msg = e && e.name === "AbortError" ? "5s timeout" : (e && e.message ? e.message : "fetch failed");
+        return { ok: false, detail: msg };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    async function runDiagnostics() {
+      if (!diagnosticsResults || !runDiagnosticsBtn) return;
+      diagnosticsResults.innerHTML = "";
+      diagnosticsResults.hidden = false;
+      runDiagnosticsBtn.disabled = true;
+      if (diagnosticsStatus) diagnosticsStatus.textContent = "检查中…";
+
+      // 1. Extension version
+      const manifest = root.chrome && root.chrome.runtime && root.chrome.runtime.getManifest
+        ? root.chrome.runtime.getManifest()
+        : null;
+      renderDiagnosticsItem(
+        "扩展版本",
+        Boolean(manifest && manifest.version),
+        manifest ? "v" + manifest.version : "无法读取 manifest",
+      );
+
+      // 2. Local storage reachable
+      try {
+        const stored = getSafeLocalStorage(root) || {};
+        const keyCount = Object.keys(stored).length;
+        renderDiagnosticsItem("扩展本地存储", true, keyCount + " keys");
+      } catch (e) {
+        renderDiagnosticsItem("扩展本地存储", false, e && e.message ? e.message : "未知错误");
+      }
+
+      // 3. Whisper server (if URL configured)
+      const stored = getSafeLocalStorage(root) || {};
+      const whisperUrl = (stored.whisperUrl || "").replace(/\/+$/, "");
+      if (whisperUrl) {
+        const r = await pingWhisper(whisperUrl);
+        renderDiagnosticsItem(
+          "本地 Whisper server",
+          r.ok,
+          whisperUrl + (r.detail ? " — " + r.detail : ""),
+        );
+      } else {
+        renderDiagnosticsItem(
+          "本地 Whisper server",
+          null,
+          "未配置 URL（如果你选 '本地 Whisper' 但留空，会跑不通）",
+        );
+      }
+
+      // 4. ASR provider awareness
+      const asr = stored.asrProvider || "none";
+      const asrLabel = { none: "不使用 / 仅 B 站原生字幕", bailian: "阿里云百炼 Fun-ASR", whisper: "本地 Whisper" }[asr] || asr;
+      renderDiagnosticsItem("ASR 提供方", true, asrLabel);
+
+      // 5. AI provider key presence (without showing the key itself)
+      const aiKey = (stored.aiProvider === "minimax" && stored.minimaxApiKey) ||
+        (stored.aiProvider === "deepseek" && stored.deepseekApiKey) ||
+        (stored.aiProvider === "glm" && stored.glmApiKey);
+      renderDiagnosticsItem(
+        "AI 提供方 Key",
+        Boolean(aiKey),
+        aiKey ? "已配置" : "未配置（扩展打开就会卡在"等配置"，无法生成概览）",
+      );
+
+      if (diagnosticsStatus) diagnosticsStatus.textContent = "完成";
+      runDiagnosticsBtn.disabled = false;
+    }
+
+    if (runDiagnosticsBtn) {
+      runDiagnosticsBtn.addEventListener("click", () => {
+        void runDiagnostics();
+      });
+    }
+
+    // ------------------------------------------------------------
+    // "Install Whisper deps" button: Chrome MV3 can't start
+    // arbitrary processes, so we just hand the user a copy-paste
+    // command and tell them where the script lives.
+    // ------------------------------------------------------------
+    const installDepsBtn = doc.getElementById("installDepsBtn");
+    if (installDepsBtn) {
+      installDepsBtn.addEventListener("click", async () => {
+        const scriptDir = (function () {
+          try {
+            const url = root.chrome && root.chrome.runtime
+              ? root.chrome.runtime.getURL("")
+              : "";
+            // chrome-extension://<id>/  -> strip the file:// part
+            // Actually getURL("") returns the extension root URL.
+            // We don't know the on-disk path from inside the
+            // extension; the user has to know it. Default to a
+            // generic "next to the manifest" hint.
+            return "the bilidown extension folder (same folder as manifest.json)";
+          } catch (e) {
+            return "the bilidown extension folder";
+          }
+        })();
+        const command = 'powershell -ExecutionPolicy Bypass -File ".\\install_whisper_deps.ps1"';
+        let copied = false;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(command);
+            copied = true;
+          } else {
+            // Fallback for older browsers / non-https context
+            const ta = doc.createElement("textarea");
+            ta.value = command;
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            doc.body.appendChild(ta);
+            ta.select();
+            try {
+              doc.execCommand("copy");
+              copied = true;
+            } catch (e) {
+            }
+            doc.body.removeChild(ta);
+          }
+        } catch (e) {
+          // ignore
+        }
+        if (diagnosticsStatus) {
+          if (copied) {
+            diagnosticsStatus.textContent =
+              "已复制。在 PowerShell 里 cd 到 " + scriptDir + " 然后粘贴运行。";
+          } else {
+            diagnosticsStatus.textContent =
+              "复制失败。请手动在 PowerShell 里跑：powershell -ExecutionPolicy Bypass -File .\\install_whisper_deps.ps1";
+          }
+        }
+        if (diagnosticsResults) {
+          diagnosticsResults.hidden = false;
+          diagnosticsResults.innerHTML = "";
+          renderDiagnosticsItem(
+            "安装 Whisper 依赖",
+            null,
+            "在 PowerShell 里跑 install_whisper_deps.ps1（脚本会检测 Python、跑 pip install、再验证导入）",
+          );
+        }
+      });
+    }
+
     if (doc.readyState === "loading") {
       doc.addEventListener("DOMContentLoaded", loadOptions, { once: true });
     } else {

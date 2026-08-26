@@ -212,6 +212,71 @@ cd bilidown
 
 密钥只保存在当前浏览器的扩展本地存储中。重新安装扩展或清除扩展数据后，需要重新配置。
 
+### 🎙️ 可选：本地 Whisper 离线 ASR
+
+> **新用户可以跳过这一节。** 默认情况下扩展会读取 B 站原生字幕或调用阿里云 Fun-ASR（需配百炼 Key）。本地 Whisper 是第三条字幕来源，适合不想把音轨发给第三方、不在意本机 CPU/磁盘占用的用户。
+
+本地 Whisper 让你**完全离线**完成 ASR：
+
+- 音轨**不**上传到阿里云百炼，留在本机
+- 模型可选用更准的 `medium` / `large-v3`（前提是内存/CPU 够）
+- 中文识别走 `faster-whisper` + `zhconv`（繁→简）
+
+#### 什么时候选本地 Whisper？
+
+| 场景 | 推荐 ASR |
+| --- | --- |
+| 视频有 B 站官方中文字幕 | 默认 WBI 字幕（**不需要 ASR**） |
+| 视频无字幕，但愿意付阿里云钱 | 阿里云百炼 Fun-ASR |
+| 视频无字幕 + 不想花钱 + 不在意本机 CPU | **本地 Whisper** |
+| 隐私敏感（音轨不能出本机） | **本地 Whisper** |
+
+#### 系统依赖
+
+- **Python 3.10+**（任意安装方式：python.org、miniconda、anaconda 都行）
+- **`faster-whisper`** Python 包
+- **`zhconv`** Python 包（繁→简转换）
+- **足够的磁盘空间**：tiny 模型 ~75 MB，base ~150 MB，small ~500 MB，medium ~1.5 GB，large-v3 ~3 GB
+- **7860 端口空闲**（本机 server 用）
+
+#### 安装步骤
+
+1. **装 Python**（如果还没装）：https://www.python.org/downloads/ ，勾选 "Add Python to PATH"
+2. **装依赖**：
+
+   ```bash
+   pip install faster-whisper zhconv
+   ```
+
+3. **启 server**：
+
+   - 双击 `start_whisper_server.bat`（开窗口的版本）
+   - 或双击 `start_whisper_server_silent.vbs`（无窗口）
+   - 第一次跑会下载默认模型（`base` 约 150 MB）
+
+4. **在扩展设置里选 "本地 Whisper"**：
+   - "测试连接" → 应该看到 `{"ok": true, ...}` 表示通了
+
+#### 常见坑
+
+- **bat 里写死了 Python 路径？** v2.0+ 已修复——bat 会按以下顺序找 Python：`BILIDOWN_PYTHON` 环境变量 → `where python` → 常见安装位置。找不到会**给出明确报错**告诉你装哪
+- **启了 server 但连不上？** 浏览器扩展需要 `http://127.0.0.1:7860` 权限（manifest 已声明），防火墙可能会拦——第一次测试连接 Windows 会弹窗问是否放行
+- **server 不会自启？** v2.0+ 推荐做法见 [§ 服务器自启](#-服务器自启-windows)，创建开机任务计划
+- **音轨下载报 403？** 跟 ASR 路径无关，B 站临时鉴权过期，刷新页面重试
+
+#### 推荐模型
+
+| 模型 | 磁盘 | 速度 | 准确度 |
+| --- | ---: | --- | --- |
+| `tiny` | 75 MB | ⚡⚡⚡⚡⚡ | ⭐⭐ |
+| `base` | 150 MB | ⚡⚡⚡⚡ | ⭐⭐⭐ |
+| `small` | 500 MB | ⚡⚡⚡ | ⭐⭐⭐⭐ |
+| `medium` | 1.5 GB | ⚡⚡ | ⭐⭐⭐⭐⭐ |
+| `large-v3` | 3 GB | ⚡ | ⭐⭐⭐⭐⭐+ |
+| `turbo` | 1.5 GB | ⚡⚡⚡ | ⭐⭐⭐⭐⭐ |
+
+中文推荐 `small` 或更高。CPU-only 机器用 `medium` 就到顶了，再大会卡。
+
 ### 更新时保留 API Key
 
 **不要先删除旧扩展。** Chrome 官方说明，扩展被移除时会清除它的 `chrome.storage.local`；即使稍后装回相同扩展 ID，已经删除的本地 Key 也不会自动回来。
