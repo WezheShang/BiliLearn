@@ -201,6 +201,7 @@ def _validate_audio_path(audio_path: str) -> Path:
 
 
 def _serialize_segments(segments, info) -> dict:
+    t2s = _get_t2s_converter()
     return {
         "language": info.language,
         "language_probability": float(info.language_probability),
@@ -210,7 +211,7 @@ def _serialize_segments(segments, info) -> dict:
                 "id": seg.id,
                 "start": float(seg.start),
                 "end": float(seg.end),
-                "text": seg.text.strip(),
+                "text": t2s(seg.text.strip()),
             }
             for seg in segments
         ],
