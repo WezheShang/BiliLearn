@@ -251,10 +251,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     action: "checkConfig",
   });
 
-  if (!configStatus.hasSupadataKey || !configStatus.hasAiKey) {
-    showConfigError(configStatus);
-    return;
-  }
+  // Contextual-wizard flow (2026-08-28): a missing AI key no longer
+  // blocks the whole panel. The transcript tab needs no key at all;
+  // the Overview/Summary tabs show the AI-key wizard instead of firing
+  // a doomed LLM request (see updateAiKeyWizard / switchTab).
+  aiKeyMissing = !(configStatus && configStatus.hasAiKey);
+  setupWizardButtons();
 
   await checkCurrentTab();
 });
@@ -709,6 +711,8 @@ async function startBilidown(videoId, videoUrl) {
     translationGeneration += 1;
     if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
     transcriptScrollObserver = null;
+    // Stale transcript-tab wizards belong to the previous video's state.
+    hideTranscriptWizards();
   }
 
   // Check cache for this video
@@ -819,7 +823,24 @@ async function startBilidown(videoId, videoUrl) {
   if (!transcriptResult.success) {
     const detail = transcriptResult.message || transcriptResult.error;
     if (transcriptResult.error === "WHISPER_NEEDED") {
+      // Whisper is selected but this video has no subtitles. If the
+      // local server is unreachable, the full-screen prompt's button
+      // would just fail — show the setup wizard with a live ping
+      // instead (2026-08-28).
+      const serverUp = await pingWhisperServer();
+      if (!serverUp) {
+        if (gen !== generation) return;
+        showWhisperSetupWizardState();
+        return;
+      }
       showWhisperPrompt(videoId, videoUrl, transcriptResult.cacheDir);
+      return;
+    }
+    if (transcriptResult.error === "NO_TRANSCRIPT") {
+      // No subtitles anywhere and no ASR path will auto-run: guide the
+      // user to pick an ASR source instead of a dead-end error (2026-08-28).
+      if (gen !== generation) return;
+      showAsrWizardState();
       return;
     }
     showError(
@@ -1479,16 +1500,122 @@ function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
   };
 }
 
-function showConfigError(configStatus) {
-  const missingKeys = [];
-  if (!configStatus.hasAiKey) missingKeys.push("minimax API 密钥");
+// ============================================================
+// CONTEXTUAL WIZARDS (2026-08-28)
+// ============================================================
+// Three non-blocking setup guides. No dismiss button and nothing is
+// persisted: each wizard simply re-appears wherever its underlying
+// config problem is still unfixed, and it never blocks other tabs.
+//   #aiKeyWizard        — Overview/Summary tab + AI key missing
+//   #asrWizard          — Transcript tab + video has no subtitles
+//   #whisperSetupWizard — Transcript tab + Whisper selected + server down
 
-  showState("error");
-  document.getElementById("errorTitle").textContent = "还没有配置 API 密钥";
-  document.getElementById("errorMessage").textContent =
-    `请先在 bilidown 设置中填写${missingKeys.join("和")}。`;
-  document.getElementById("errorBtn").textContent = "打开设置";
-  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+let aiKeyMissing = false;
+let whisperPingTimer = null;
+
+function setupWizardButtons() {
+  for (const id of ["openOptionsForAsr", "openOptionsForWhisper", "openOptionsForAiKey"]) {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.addEventListener("click", () => {
+        chrome.runtime.sendMessage({ action: "openOptions" });
+      });
+    }
+  }
+}
+
+async function pingWhisperServer() {
+  let base = "http://127.0.0.1:7860";
+  try {
+    const stored = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
+    const settings = YTD_SETTINGS.normalize(stored[YTD_SETTINGS.STORAGE_KEY] || {});
+    if (settings.whisperUrl) base = settings.whisperUrl;
+  } catch {
+    // fall back to the default URL
+  }
+  try {
+    const res = await fetch(`${base}/health`, { cache: "no-store" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function stopWhisperPing() {
+  if (whisperPingTimer) {
+    clearInterval(whisperPingTimer);
+    whisperPingTimer = null;
+  }
+}
+
+function hideTranscriptWizards() {
+  const asr = document.getElementById("asrWizard");
+  const wsp = document.getElementById("whisperSetupWizard");
+  if (asr) asr.hidden = true;
+  if (wsp) wsp.hidden = true;
+  stopWhisperPing();
+}
+
+/**
+ * Moves the single #aiKeyWizard node into the active Overview/Summary
+ * panel and toggles visibility. One element, two panels: the wizard
+ * always renders at the top of whichever LLM tab the user opened.
+ */
+function updateAiKeyWizard(tabName) {
+  const wiz = document.getElementById("aiKeyWizard");
+  if (!wiz) return;
+  if (!aiKeyMissing || (tabName !== "overview" && tabName !== "summary")) {
+    wiz.hidden = true;
+    return;
+  }
+  const panel = document.querySelector(`.tab-panel[data-panel="${tabName}"]`);
+  if (panel && wiz.parentElement !== panel) {
+    panel.insertBefore(wiz, panel.firstChild);
+  }
+  wiz.hidden = false;
+}
+
+/** Results state with an empty transcript tab and the ASR picker wizard. */
+function showAsrWizardState() {
+  hideTranscriptWizards();
+  showState("results");
+  document.getElementById("tabsNav").style.display = "flex";
+  const asr = document.getElementById("asrWizard");
+  if (asr) asr.hidden = false;
+  switchTab("transcript");
+}
+
+/**
+ * Results state with the Whisper setup wizard, plus a 5s ping loop.
+ * When the server comes back online the loop re-enters the normal
+ * flow so the user lands on the regular "用 Whisper 转录" prompt.
+ */
+function showWhisperSetupWizardState() {
+  hideTranscriptWizards();
+  showState("results");
+  document.getElementById("tabsNav").style.display = "flex";
+  const wsp = document.getElementById("whisperSetupWizard");
+  if (wsp) wsp.hidden = false;
+  const statusEl = document.getElementById("whisperSetupStatus");
+  if (statusEl) statusEl.textContent = "检查中…";
+  switchTab("transcript");
+  stopWhisperPing();
+  whisperPingTimer = setInterval(async () => {
+    const stillVisible = document.getElementById("whisperSetupWizard");
+    if (!stillVisible || stillVisible.hidden) {
+      stopWhisperPing();
+      return;
+    }
+    const up = await pingWhisperServer();
+    if (up) {
+      stopWhisperPing();
+      if (currentVideoId && currentVideoUrl) {
+        await startBilidown(currentVideoId, currentVideoUrl);
+      }
+    } else if (statusEl) {
+      statusEl.textContent = "仍未连上（每 5 秒自动重试）— 启动 server 后会自动继续";
+    }
+  }, 5000);
 }
 
 // ============================================================
@@ -1522,15 +1649,36 @@ function switchTab(tabName) {
     stopPlaybackTracking();
   }
 
+  // Contextual AI-key wizard: the Overview/Summary panels show the
+  // wizard at their top when no key is configured, and the lazy LLM
+  // loads below are skipped so we never fire a doomed request.
+  updateAiKeyWizard(tabName);
+
   // Lazy-load LLM analysis when user switches to Overview tab
-  if (tabName === "overview" && !currentAnalysis && !isAnalysisLoading) {
+  if (tabName === "overview" && !currentAnalysis && !isAnalysisLoading && !aiKeyMissing) {
     triggerAnalysis();
   }
 
   // Lazy-load LLM summary when user switches to Summary tab
-  if (tabName === "summary" && !currentSummary && !isSummaryLoading) {
+  if (tabName === "summary" && !currentSummary && !isSummaryLoading && !aiKeyMissing) {
     triggerSummary();
   }
+}
+
+/**
+ * Renders an error message with an inline 重试 (retry) button into `container`
+ * and wires the button to `retryFn`. Safe to re-invoke the trigger functions:
+ * on failure `currentAnalysis` / `currentSummary` stay unset and the loading
+ * flags are already reset, so the retry call starts a fresh request.
+ */
+function renderErrorWithRetry(container, message, retryFn, asListItem) {
+  if (!container) return;
+  const box = `<div class="summary-error">${escapeHtml(message)}<button class="error-retry-btn" type="button">重试</button></div>`;
+  container.innerHTML = asListItem
+    ? `<li class="chapter-item" style="border: none; padding: 0;">${box}</li>`
+    : box;
+  const btn = container.querySelector(".error-retry-btn");
+  if (btn) btn.addEventListener("click", retryFn);
 }
 
 /**
@@ -1565,8 +1713,7 @@ async function triggerAnalysis() {
     });
 
     if (!analysisResult.success) {
-      if (chapterList)
-        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Analysis failed: ${escapeHtml(analysisResult.error || "Unknown error")}</li>`;
+      renderErrorWithRetry(chapterList, `Analysis failed: ${analysisResult.error || "Unknown error"}`, triggerAnalysis, true);
       isAnalysisLoading = false;
       return;
     }
@@ -1579,8 +1726,7 @@ async function triggerAnalysis() {
     await saveToCache(currentVideoId);
   } catch (error) {
     console.error("[dk-bilidown Panel] Analysis error:", error);
-    if (chapterList)
-      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Error: ${escapeHtml(error.message)}</li>`;
+    renderErrorWithRetry(chapterList, `Error: ${error.message}`, triggerAnalysis, true);
   }
 
   isAnalysisLoading = false;
@@ -1611,9 +1757,7 @@ async function triggerSummary() {
     });
 
     if (!summaryResult.success) {
-      if (summaryContent) {
-        summaryContent.innerHTML = `<div class="summary-error">Summary failed: ${escapeHtml(summaryResult.error || "Unknown error")}</div>`;
-      }
+      renderErrorWithRetry(summaryContent, `Summary failed: ${summaryResult.error || "Unknown error"}`, triggerSummary);
       isSummaryLoading = false;
       return;
     }
@@ -1625,9 +1769,7 @@ async function triggerSummary() {
     await saveToCache(currentVideoId);
   } catch (error) {
     console.error("[dk-bilidown Panel] Summary error:", error);
-    if (summaryContent) {
-      summaryContent.innerHTML = `<div class="summary-error">Error: ${escapeHtml(error.message)}</div>`;
-    }
+    renderErrorWithRetry(summaryContent, `Error: ${error.message}`, triggerSummary);
   }
 
   isSummaryLoading = false;
@@ -1654,7 +1796,8 @@ function renderSummaryResults(markdown) {
  *
  * Supported: #..###### headings, ordered/unordered lists, blockquotes,
  * code fences, inline code, **bold**, *italic*, [text](url), --- rule,
- * line breaks and paragraphs.
+ * GFM pipe tables (with :---/---:/:---: alignment), line breaks and
+ * paragraphs.
  */
 function renderMarkdown(markdown) {
   if (!markdown) return "";
@@ -1677,6 +1820,61 @@ function renderMarkdown(markdown) {
         '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
       );
 
+  // ---- GFM table helpers ----
+  // Split "| a | b |" into ["a","b"]; strips the outer pipes and honors
+  // the escaped-pipe form "a \| b" so cell content may contain a literal |.
+  const splitRow = (text) => {
+    let t = text.trim();
+    if (t.startsWith("|")) t = t.slice(1);
+    if (t.endsWith("|") && !t.endsWith("\\|")) t = t.slice(0, -1);
+    return t
+      .split(/(?<!\\)\|/)
+      .map((c) => c.replace(/\\\|/g, "|").trim());
+  };
+  const isSeparatorCell = (c) => /^:?-{2,}:?$/.test(c);
+  // A table header candidate needs a separator row right below it.
+  const tableAt = (idx) => {
+    if (idx + 1 >= lines.length) return null;
+    const headerCells = splitRow(lines[idx]);
+    const sepCells = splitRow(lines[idx + 1]);
+    if (
+      headerCells.length < 1 ||
+      sepCells.length !== headerCells.length ||
+      !sepCells.every(isSeparatorCell)
+    ) {
+      return null;
+    }
+    const aligns = sepCells.map((c) =>
+      c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : "left",
+    );
+    const bodyRows = [];
+    let j = idx + 2;
+    while (j < lines.length) {
+      const t = lines[j].trim();
+      if (!t || !t.includes("|")) break;
+      bodyRows.push(splitRow(t));
+      j++;
+    }
+    const th = headerCells
+      .map(
+        (c, k) =>
+          `<th style="text-align:${aligns[k]}">${inline(escapeHtml(c))}</th>`,
+      )
+      .join("");
+    const trs = bodyRows
+      .map(
+        (r) =>
+          `<tr>${headerCells
+            .map(
+              (_h, k) =>
+                `<td style="text-align:${aligns[k]}">${inline(escapeHtml(r[k] ?? ""))}</td>`,
+            )
+            .join("")}</tr>`,
+      )
+      .join("");
+    return { html: `<table><thead><tr>${th}</tr></thead><tbody>${trs}</tbody></table>`, nextIndex: j };
+  };
+
   const html = [];
   let inFence = false;
   let fenceBuf = [];
@@ -1689,8 +1887,8 @@ function renderMarkdown(markdown) {
     }
   };
 
-  for (let raw of lines) {
-    const line = raw;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
     // Code fence
     if (/^```/.test(line)) {
@@ -1714,6 +1912,19 @@ function renderMarkdown(markdown) {
       closeList();
       html.push("");
       continue;
+    }
+
+    // GFM pipe table (header | separator | body rows). Requires a valid
+    // separator row below the candidate header, otherwise falls through
+    // to the normal paragraph handling.
+    if (trimmed.includes("|")) {
+      const table = tableAt(i);
+      if (table) {
+        closeList();
+        html.push(table.html);
+        i = table.nextIndex - 1;
+        continue;
+      }
     }
 
     // Headings

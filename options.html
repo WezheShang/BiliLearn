@@ -47,53 +47,6 @@
           请点击保存设置，否则您的修改将不被保存。
         </p>
 
-        <!-- First-run setup wizard. Hidden once bilidown_setup_completed is true. -->
-        <section class="card setup-wizard" id="setupWizard" hidden>
-          <div class="setup-wizard-header">
-            <div>
-              <span class="setup-wizard-badge">首次使用</span>
-              <h2>欢迎使用 bilidown</h2>
-            </div>
-            <button
-              type="button"
-              class="setup-wizard-dismiss"
-              id="setupWizardDismiss"
-              title="以后不再显示"
-            >
-              跳过
-            </button>
-          </div>
-          <p class="help">
-            跟着 3 步快速配好。<strong>minimax / DeepSeek / GLM 任选一个填好就够用了</strong>——B 站原生字幕会作为默认字幕来源。
-          </p>
-          <ol class="setup-wizard-steps">
-            <li>
-              <strong>AI 服务：</strong>填一个 API Key（minimax / DeepSeek / GLM 三选一），
-              点击"保存设置"
-            </li>
-            <li>
-              <strong>字幕来源：</strong>默认用 B 站原生字幕；想用音轨识别，再配"阿里云百炼"或选"本地 Whisper"
-            </li>
-            <li>
-              <strong>打开视频试试：</strong>去任意 B 站视频页 → 点"AI 总结"按钮
-            </li>
-          </ol>
-          <div class="setup-wizard-actions">
-            <button type="button" class="primary" id="setupWizardGo">
-              带我去看 AI 服务设置
-            </button>
-            <a
-              href="https://github.com/WezheShang/bilidown#-可选本地-whisper-离线-asr"
-              target="_blank"
-              rel="noreferrer"
-              class="setup-wizard-link"
-              id="setupWizardLocalHelp"
-            >
-              我想用本地 Whisper → 装 Python 依赖
-            </a>
-          </div>
-        </section>
-
         <section class="card">
           <h2>语音识别</h2>
           <p class="help">

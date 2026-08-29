@@ -1450,6 +1450,94 @@ body {
   white-space: pre-wrap;
 }
 
+.error-retry-btn {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 5px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: 600 12px/1.4 var(--font-body);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.error-retry-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.error-retry-btn:active {
+  transform: translateY(1px);
+}
+
+/* Contextual setup wizards (2026-08-28) — non-blocking, no dismiss.
+   Shown inside whichever tab has the missing config. */
+.wizard {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-md, 10px);
+  background: var(--surface-raised);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.wizard[hidden] {
+  display: none;
+}
+
+.wizard h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.wizard p {
+  margin: 0 0 8px;
+}
+
+.wizard ul,
+.wizard ol {
+  margin: 0 0 10px;
+  padding-left: 18px;
+}
+
+.wizard li {
+  margin: 4px 0;
+}
+
+.wizard code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.14);
+  font-size: 12px;
+}
+
+.wizard-status {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.wizard-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: 600 12px/1.4 var(--font-body);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.wizard-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* Markdown blocks inside the summary panel */
 .summary-content h1,
 .summary-content h2,
@@ -1533,6 +1621,34 @@ body {
   color: var(--text-primary);
 }
 
+.summary-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 12.5px;
+  display: block;
+  overflow-x: auto;
+}
+
+.summary-content th,
+.summary-content td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.summary-content th {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.summary-content tbody tr:nth-child(even) td {
+  background: var(--accent-dim);
+}
+
 /* ============================================================
    FULL-NOTE ENTRIES (saved from the Summary tab)
    ============================================================ */
@@ -1559,6 +1675,34 @@ body {
 }
 
 /* Markdown blocks inside a full note (mirrors .summary-content) */
+.note-text-full table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 12px;
+  display: block;
+  overflow-x: auto;
+}
+
+.note-text-full th,
+.note-text-full td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.note-text-full th {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.note-text-full tbody tr:nth-child(even) td {
+  background: var(--accent-dim);
+}
+
 .note-text-full h1,
 .note-text-full h2,
 .note-text-full h3,

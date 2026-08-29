@@ -80,6 +80,35 @@
       <div id="resultsState" style="display: none">
         <!-- TAB: Transcript (default - no LLM required) -->
         <div class="tab-panel active" data-panel="transcript">
+          <!-- Contextual wizard: no subtitles + no ASR configured -->
+          <aside class="wizard asr-wizard" id="asrWizard" hidden>
+            <h3>这视频没有原生字幕</h3>
+            <p>默认走 B 站原生字幕，遇到没有字幕的视频就拿不到文字。</p>
+            <p>想让这视频也有字幕？去设置里选一个 ASR 来源：</p>
+            <ul>
+              <li><strong>阿里云百炼 Fun-ASR</strong>：上传音轨到阿里云，免费额度内可用</li>
+              <li><strong>本地 Whisper</strong>：本机跑，不上传，资源占用大但更隐私</li>
+            </ul>
+            <button class="wizard-btn" id="openOptionsForAsr" type="button">
+              去设置选 ASR
+            </button>
+          </aside>
+
+          <!-- Contextual wizard: whisper selected but server not reachable -->
+          <aside class="wizard whisper-setup-wizard" id="whisperSetupWizard" hidden>
+            <h3>本地 Whisper server 没在跑</h3>
+            <p>设置里选了"本地 Whisper"，但 127.0.0.1:7860 连不上。</p>
+            <ol>
+              <li>确认 <code>faster-whisper</code> 和 <code>zhconv</code> 已经 <code>pip install</code></li>
+              <li>双击 <code>start_whisper_server.bat</code> 启动 server</li>
+              <li>等 server 在终端显示 "listening on http://127.0.0.1:7860"</li>
+            </ol>
+            <p class="wizard-status" id="whisperSetupStatus">检查中…</p>
+            <button class="wizard-btn" id="openOptionsForWhisper" type="button">
+              打开 ASR 设置
+            </button>
+          </aside>
+
           <div class="section">
             <div class="section-header transcript-section-header">
               <div class="transcript-header-main">
@@ -132,6 +161,20 @@
 
         <!-- TAB: Overview (chapters + key quotes) - requires LLM -->
         <div class="tab-panel" data-panel="overview">
+          <!-- Contextual wizard: AI key missing (moved into the active
+               Overview/Summary panel by updateAiKeyWizard in sidepanel.js) -->
+          <aside class="wizard ai-key-wizard" id="aiKeyWizard" hidden>
+            <h3>还没配置 AI 密钥</h3>
+            <p>字幕（transcript）不需要密钥，现在就能用。但概览和总结要调用大模型，得先填一个 API key。</p>
+            <ol>
+              <li>打开设置，选一个 AI 提供方（minimax / DeepSeek / GLM）</li>
+              <li>粘贴对应的 API key 并保存</li>
+            </ol>
+            <button class="wizard-btn" id="openOptionsForAiKey" type="button">
+              去设置填 Key
+            </button>
+          </aside>
+
           <!-- Chapters -->
           <div class="section">
             <div class="section-title">章节时间线</div>
