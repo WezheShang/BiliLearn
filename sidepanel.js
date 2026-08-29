@@ -257,6 +257,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // a doomed LLM request (see updateAiKeyWizard / switchTab).
   aiKeyMissing = !(configStatus && configStatus.hasAiKey);
   setupWizardButtons();
+  setupLongTranscribeConfirm();
 
   await checkCurrentTab();
 });
@@ -386,6 +387,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // (now-written) server cache.
         try { await chrome.storage.local.remove(`bilidown_${vid}`); } catch {}
         startBilidown(vid, currentVideoUrl).catch(() => {});
+      })();
+    }
+    if (message.stage === "failed" && forThisVideo) {
+      // Fire-and-ack 转录启动后，失败改由广播驱动：面板挂上错误并 ack 掉
+      // terminal 记录（与 maybeResumeWhisperJob 的 failed 分支行为一致）。
+      (async () => {
+        try { await chrome.runtime.sendMessage({ action: "ackWhisperJobDone" }); } catch {}
+        showError(
+          message.title || "Whisper 转录失败",
+          message.subtitle || "转录中断，请重试。",
+        );
       })();
     }
     sendResponse({ success: true });
@@ -1101,7 +1113,7 @@ function renderTranscript() {
   // Attach event listener to regenerate button
   const regenerateBtn = document.getElementById("regenerateWhisperBtn");
   if (regenerateBtn) {
-    regenerateBtn.addEventListener("click", async () => {
+    regenerateBtn.addEventListener("click", () => gateLongVideoTranscribe(async () => {
       regenerateBtn.disabled = true;
       regenerateBtn.textContent = "正在启动…";
       updateLoading("启动 Whisper 转录", "重新转写当前视频");
@@ -1117,9 +1129,10 @@ function renderTranscript() {
           videoUrl: currentVideoUrl || "",
         });
         if (result && result.success) {
-          if (result.alreadyRunning) {
-            // Same rationale as the showWhisperPrompt trigger: don't start
-            // a parallel inference when one is already running.
+          if (result.alreadyRunning || result.started) {
+            // Already running, OR fire-and-ack started (pipeline detached
+            // on the background side): attach to the progress UI; terminal
+            // state arrives via transcriptProgress broadcast.
             const resumed = await maybeResumeWhisperJob();
             if (resumed) return;
           }
@@ -1134,7 +1147,7 @@ function renderTranscript() {
       } catch (err) {
         showWhisperError(err);
       }
-    });
+    }));
   }
 
   // Group entries using smart sentence-boundary + time-guardrail logic
@@ -1458,7 +1471,7 @@ function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
   const btn = document.getElementById("errorBtn");
   btn.textContent = "🎙️ 用 Whisper 转录";
   btn.disabled = false;
-  errorAction = async () => {
+  errorAction = () => gateLongVideoTranscribe(async () => {
     btn.disabled = true;
     btn.textContent = "正在启动…";
     updateLoading("启动 Whisper 转录", "下载音轨并发送至本地 server");
@@ -1474,11 +1487,12 @@ function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
         videoUrl,
       });
       if (result && result.success) {
-        if (result.alreadyRunning) {
-          // A transcription for this video is already in flight
-          // (double-click / reopened panel / regenerate race). Attach to
-          // the running job's progress UI instead of starting a parallel
-          // CPU inference — see whisper_server dedup notes.
+        if (result.alreadyRunning || result.started) {
+          // Already running, OR fire-and-ack started (pipeline detached on
+          // the background side): attach to the running job's progress UI
+          // instead of waiting on the sendMessage promise — the terminal
+          // state arrives via transcriptProgress broadcast. Falls through
+          // to startBilidown only if the job record is somehow unreadable.
           const resumed = await maybeResumeWhisperJob();
           if (resumed) return;
         }
@@ -1497,7 +1511,7 @@ function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
       btn.disabled = false;
       btn.textContent = "🎙️ 用 Whisper 转录";
     }
-  };
+  });
 }
 
 // ============================================================
@@ -1616,6 +1630,87 @@ function showWhisperSetupWizardState() {
       statusEl.textContent = "仍未连上（每 5 秒自动重试）— 启动 server 后会自动继续";
     }
   }, 5000);
+}
+
+// ============================================================
+// LONG-VIDEO WHISPER GATE (2026-08-29)
+// ============================================================
+// Local Whisper inference on a long video pegs the CPU/GPU for the
+// whole playback duration (often tens of minutes) and noticeably
+// degrades the machine. Past the 20-minute threshold the user must
+// explicitly confirm before a transcription job is allowed to start.
+// The gate wraps the two UI trigger points (the error-state "用
+// Whisper 转录" button and the local-file "重新生成" button); resume
+// paths (maybeResumeWhisperJob) attach to an already-running job and
+// must never be gated.
+
+const LONG_TRANSCRIBE_THRESHOLD_SEC = 20 * 60;
+let pendingLongTranscribeAction = null;
+
+function isLongVideoForTranscribe() {
+  // Duration comes from the player via getVideoInfo (seconds). Unknown
+  // (0 — metadata not loaded / live page) fails open: blocking the only
+  // transcription button on missing metadata would dead-end the flow.
+  return (Number(currentVideoDuration) || 0) > LONG_TRANSCRIBE_THRESHOLD_SEC;
+}
+
+function hideLongTranscribeConfirm() {
+  const overlay = document.getElementById("longTranscribeConfirm");
+  if (overlay) overlay.hidden = true;
+  pendingLongTranscribeAction = null;
+}
+
+function showLongTranscribeConfirm(run) {
+  const overlay = document.getElementById("longTranscribeConfirm");
+  if (!overlay) {
+    // Overlay markup missing (stale panel HTML): fail open.
+    run();
+    return;
+  }
+  pendingLongTranscribeAction = run;
+  const minutes = Math.max(
+    1,
+    Math.round((Number(currentVideoDuration) || 0) / 60),
+  );
+  const msg = document.getElementById("longTranscribeMessage");
+  if (msg) {
+    msg.textContent =
+      `当前视频约 ${minutes} 分钟。用本地 Whisper 转录长视频会长时间占用 ` +
+      "CPU/GPU，电脑性能会明显下降，转录可能持续几十分钟。确定要继续吗？";
+  }
+  overlay.hidden = false;
+}
+
+function setupLongTranscribeConfirm() {
+  const okBtn = document.getElementById("longTranscribeOk");
+  const cancelBtn = document.getElementById("longTranscribeCancel");
+  if (okBtn) {
+    okBtn.addEventListener("click", () => {
+      const run = pendingLongTranscribeAction;
+      hideLongTranscribeConfirm();
+      if (run) run();
+    });
+  }
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", hideLongTranscribeConfirm);
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    const overlay = document.getElementById("longTranscribeConfirm");
+    if (overlay && !overlay.hidden) hideLongTranscribeConfirm();
+  });
+}
+
+/**
+ * Wraps a transcription trigger: short videos run immediately, videos
+ * past the 20-minute threshold ask for explicit confirmation first.
+ */
+function gateLongVideoTranscribe(run) {
+  if (isLongVideoForTranscribe()) {
+    showLongTranscribeConfirm(run);
+  } else {
+    run();
+  }
 }
 
 // ============================================================

@@ -815,6 +815,12 @@ async function recoverOrphanedWhisperJob(job) {
       error: "whisper watchdog: stale non-terminal job",
     });
     clearWhisperKeepalive();
+    // Fire-and-ack：watchdog 判死也广播给开着的面板，别让它永远转圈。
+    sendWhisperProgress(
+      WHISPER_STAGES.FAILED,
+      "Whisper 转录失败",
+      "后台任务中断且超过 30 分钟未能恢复。请重新点击转录（已完成的转写不受影响）。",
+    );
     return;
   }
   // Poll the server-side cache for the finished result.
@@ -888,6 +894,80 @@ async function recoverOrphanedWhisperJob(job) {
   }
 }
 
+// ============================================================
+// TRANSCRIPTION-COMPLETE NOTIFICATION (2026-08-29)
+// ============================================================
+// A whisper transcription can run for tens of minutes while the user
+// browses elsewhere (or closes the panel entirely). When the job
+// reaches SUCCEEDED, pop a Chrome notification so they know the
+// transcript is ready. Fired from setWhisperJob — the single funnel
+// both completion paths go through (live pipeline finish + watchdog
+// cache recovery). Clicking the notification focuses an already-open
+// tab on the video, or opens one, so the panel renders the cached
+// transcript right away.
+
+const WHISPER_DONE_NOTIF_PREFIX = "whisper-done-";
+let lastNotifiedWhisperKey = null;
+const whisperDoneLinks = new Map(); // notifId -> { videoId, videoUrl }
+
+function notifyWhisperDone(job) {
+  if (!job || job.stage !== WHISPER_STAGES.SUCCEEDED) return;
+  const key = `${job.videoId || "?"}@p${job.pageNumber || 1}:${job.finishedAt || 0}`;
+  if (key === lastNotifiedWhisperKey) return; // same terminal write, no repeat
+  lastNotifiedWhisperKey = key;
+  const meta = job.recoveryMeta || {};
+  const videoTitle = meta.title || job.videoId || "视频";
+  const channel = meta.channel ? ` · UP: ${meta.channel}` : "";
+  const message = `《${videoTitle}》字幕已就绪${channel}，打开视频即可查看字幕与总结。`;
+  const notifId = `${WHISPER_DONE_NOTIF_PREFIX}${job.videoId || "unknown"}-${key}`;
+  whisperDoneLinks.set(notifId, {
+    videoId: job.videoId || "",
+    videoUrl: job.videoUrl || "",
+  });
+  if (whisperDoneLinks.size > 10) {
+    // Bound the map — older notifications are long gone from the tray.
+    whisperDoneLinks.delete(whisperDoneLinks.keys().next().value);
+  }
+  try {
+    chrome.notifications.create(notifId, {
+      type: "basic",
+      iconUrl: "icons/icon128.png",
+      title: "bilidown · 转录完成",
+      message,
+      priority: 2,
+    }, () => {
+      // Swallow runtime.lastError noise (notification already closed…).
+      void chrome.runtime.lastError;
+    });
+  } catch (e) {
+    debugLog("[dk-bilidown BG] transcription-done notification failed:", e);
+  }
+}
+
+chrome.notifications.onClicked.addListener((notifId) => {
+  if (!notifId || !notifId.startsWith(WHISPER_DONE_NOTIF_PREFIX)) return;
+  const link = whisperDoneLinks.get(notifId);
+  whisperDoneLinks.delete(notifId);
+  if (!link) return; // SW was evicted since — nothing to open
+  (async () => {
+    try {
+      // Prefer focusing an already-open tab on this video.
+      const tabs = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
+      const hit = tabs.find((t) => link.videoId && (t.url || "").includes(link.videoId));
+      if (hit) {
+        await chrome.tabs.update(hit.id, { active: true });
+        if (hit.windowId != null) {
+          await chrome.windows.update(hit.windowId, { focused: true });
+        }
+      } else if (link.videoUrl) {
+        await chrome.tabs.create({ url: link.videoUrl });
+      }
+    } catch (e) {
+      debugLog("[dk-bilidown BG] notification click open failed:", e);
+    }
+  })();
+});
+
 let activeWhisperJob = null; // in-memory mirror; source of truth is storage
 
 function setWhisperJob(job) {
@@ -903,6 +983,9 @@ function setWhisperJob(job) {
   // non-terminal job, regardless of which code path wrote the record.
   if (terminal) {
     clearWhisperKeepalive();
+    // Transcription just finished (live pipeline or watchdog-recovered)
+    // — tell the user even if the sidepanel is closed.
+    notifyWhisperDone(job);
   } else {
     ensureWhisperKeepalive();
   }
@@ -1991,6 +2074,22 @@ async function handleTriggerWhisperTranscription(
     stageStartedAt: startedAt,
   });
 
+  // --- FIRE-AND-ACK (2026-08-29) ---
+  // 转录 pipeline 从这里拆成 detached 后台任务：消息处理立即返回
+  // {success:true, started:true}，进度与成败完全走 transcriptProgress
+  // 广播 + storage job 恢复链。旧实现里 sendResponse 要等全程转录完成
+  // （长视频 10 分钟+），窗口期内 SW 一旦被杀（扩展 reload / eviction），
+  // sidepanel 只能收到 Chrome 原生 "A listener indicated an asynchronous
+  // response... message channel closed" 错误。注意顺序：STARTED job 必须先
+  // 落 storage 再 sendResponse，sidepanel 收到 started 后会立即
+  // maybeResumeWhisperJob，两者颠倒了会resume到旧记录。
+  runWhisperPipeline(videoId, videoUrl, requestedPageNumber, settings).catch(
+    (e) => debugLog("[dk-bilidown BG] whisper pipeline detached error:", e?.message || e),
+  );
+  return { success: true, started: true };
+}
+
+async function runWhisperPipeline(videoId, videoUrl, requestedPageNumber, settings) {
   let view;
   try {
     // Look up the cid first so the cache file name is stable.
@@ -2117,6 +2216,11 @@ async function handleTriggerWhisperTranscription(
         cachePath: YTD_SETTINGS.whisperCachePath(settings, videoId, page.cid, metaTitle, metaChannel, metaPubDate),
       },
     });
+    // Fire-and-ack：live pipeline 完成也广播 succeeded —— 旧实现在这里
+    // 依赖 sendMessage 的最终 sendResponse 驱动 sidepanel 重渲染，拆成
+    // detached 后这条线没了，改走与 watchdog 恢复完全相同的广播路径。
+    // （sendWhisperProgress 对 terminal job 不再覆写 storage，只广播。）
+    sendWhisperProgress(WHISPER_STAGES.SUCCEEDED, "Whisper 转录完成", "正在加载字幕…");
     return {
       ...result,
       transcript: canonicalTranscript,
@@ -2141,6 +2245,13 @@ async function handleTriggerWhisperTranscription(
       error: err?.message || String(err),
       bilibiliErrorType: classified?.type || null,
     });
+    // Fire-and-ack：失败也广播，开着的面板立刻看到错误而不是永远转圈。
+    // sendWhisperProgress 此时不覆写 terminal job（见其内部 guard），只广播。
+    sendWhisperProgress(
+      WHISPER_STAGES.FAILED,
+      classified?.title || "Whisper 转录失败",
+      classified?.userMessage || err?.message || String(err),
+    );
     throw err;
   } finally {
     // Pipeline done (success or failure) — the keepalive watchdog no

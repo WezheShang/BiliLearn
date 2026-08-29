@@ -1794,3 +1794,78 @@ body {
   margin: 0 0 10px;
   flex-wrap: wrap;
 }
+
+/* ============================================================
+   LONG-VIDEO TRANSCRIPTION CONFIRM (2026-08-29)
+   Modal overlay shown when a >20min video is about to be sent to
+   local Whisper — see LONG_TRANSCRIBE_THRESHOLD_SEC in sidepanel.js.
+   ============================================================ */
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(24, 25, 28, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+.confirm-overlay[hidden] {
+  display: none;
+}
+
+.confirm-card {
+  max-width: 320px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.confirm-title {
+  margin: 0 0 10px;
+  font: 600 15px/1.4 var(--font-body);
+  color: var(--text);
+}
+
+.confirm-message {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.confirm-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  font: 600 12px/1.4 var(--font-body);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.confirm-btn:hover {
+  color: var(--text);
+}
+
+.confirm-btn--danger {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.confirm-btn--danger:hover {
+  background: var(--accent);
+  color: #fff;
+}

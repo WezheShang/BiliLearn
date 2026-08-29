@@ -11,6 +11,7 @@
     "alarms",
     "tabs",
     "cookies",
+    "notifications",
     "declarativeNetRequestWithHostAccess",
     "downloads"
   ],
