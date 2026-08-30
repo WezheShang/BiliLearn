@@ -402,9 +402,9 @@ body {
 }
 
 .transcript-mode-btn.active {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
+  background: var(--accent-dim);
+  color: var(--accent);
+  box-shadow: none;
 }
 
 .translation-spinner {
@@ -450,17 +450,17 @@ body {
   font-size: 11.5px;
   padding: 6px 13px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(251, 114, 153, 0.45);
   border-radius: var(--r-pill);
-  color: var(--text-secondary);
+  color: var(--accent);
   cursor: pointer;
   transition: all 0.18s ease;
 }
 
 .enhance-btn:hover:not(:disabled) {
+  background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
+  color: #fff;
 }
 
 .enhance-btn:disabled {
@@ -478,10 +478,10 @@ body {
 .export-format {
   min-width: 104px;
   padding: 6px 9px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(251, 114, 153, 0.45);
   border-radius: var(--r-pill);
   background: var(--surface);
-  color: var(--text-secondary);
+  color: var(--accent);
   font: 600 11.5px/1.4 var(--font-body);
   cursor: pointer;
 }
@@ -571,13 +571,16 @@ body {
   padding: 16px 18px;
   margin-bottom: 14px;
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  /* 2026-08-30 (DESIGN.md): flat at rest — cards that sit directly on the
+     panel background don't stack a static drop shadow under themselves
+     (same treatment as .chapter-item); elevation appears only on hover. */
+  box-shadow: none;
   cursor: pointer;
   transition: all 0.18s ease;
 }
 
 .quote-item:hover {
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-sm);
   transform: translateY(-1px);
 }
 
@@ -621,18 +624,18 @@ body {
   font-size: 11px;
   padding: 4px 11px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(251, 114, 153, 0.45);
   border-radius: var(--r-pill);
-  color: var(--text-secondary);
+  color: var(--accent);
   cursor: pointer;
   transition: all 0.18s ease;
 }
 
 .quote-copy-btn:hover,
 .quote-save-note-btn:hover {
+  background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
+  color: #fff;
 }
 
 .quote-save-note-btn:disabled {
@@ -1088,19 +1091,21 @@ body {
   font-size: 12.5px;
   letter-spacing: 0.2px;
   padding: 11px 12px;
+  /* 2026-08-30: ghost-pill accent style — the flat grey-outline look
+     read as a different design language next to the hero panels. */
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(251, 114, 153, 0.45);
   border-radius: var(--r-pill);
-  color: var(--text-secondary);
+  color: var(--accent);
   cursor: pointer;
   transition: all 0.18s ease;
   text-align: center;
 }
 
 .action-btn:hover {
+  background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
+  color: #fff;
 }
 
 /* ============================================================
@@ -1406,18 +1411,18 @@ body {
   font-weight: 600;
   font-size: 11.5px;
   padding: 6px 12px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
+  background: var(--surface);
+  border: 1px solid rgba(251, 114, 153, 0.45);
   border-radius: var(--r-pill);
-  color: var(--text-secondary);
+  color: var(--accent);
   cursor: pointer;
   transition: all 0.18s ease;
 }
 
 .note-action-btn:hover {
+  background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
+  color: #fff;
 }
 
 /* ============================================================
@@ -1439,49 +1444,104 @@ body {
   font-size: 13px;
 }
 
-.summary-error {
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--r-md, 10px);
-  background: var(--surface-raised);
-  color: var(--text-secondary);
-  font-size: 13px;
-  white-space: pre-wrap;
-}
+/* 2026-08-30 restyle: errors used to render as a left-pink-bar grey
+   alert card (flat SaaS look). The panel's design language is the
+   centered hero look (see .error-container / .wizard), so retryable
+   errors render icon + headline + message + accent pill button. The
+   wrapper layout lives on .error-hero-page (full-panel variant, below);
+   these rules style its children. */
 
-.error-retry-btn {
-  display: inline-block;
-  margin-top: 10px;
-  padding: 5px 16px;
-  border: 1px solid var(--accent);
-  border-radius: var(--r-pill);
-  background: transparent;
+.error-hero-icon {
+  font-size: 38px;
+  line-height: 1;
   color: var(--accent);
-  cursor: pointer;
-  font: 600 12px/1.4 var(--font-body);
-  transition: background 0.15s ease, color 0.15s ease;
+  margin-bottom: 4px;
 }
 
-.error-retry-btn:hover {
+.error-hero-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 17px;
+  letter-spacing: -0.3px;
+  color: var(--text);
+}
+
+.error-hero-message {
+  margin: 0;
+  max-width: 280px;
+  font-family: var(--font-reading);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.error-hero-btn {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: 0.2px;
+  padding: 10px 26px;
+  margin-top: 8px;
   background: var(--accent);
-  color: #fff;
+  color: white;
+  border: none;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  box-shadow: 0 4px 14px rgba(251, 114, 153, 0.26);
 }
 
-.error-retry-btn:active {
-  transform: translateY(1px);
+.error-hero-btn:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.error-hero-btn:active {
+  transform: translateY(0);
+}
+
+/* Full-panel standard error page (DESIGN.md, 2026-08-30 user request): when
+   an LLM request fails, the whole tab becomes the centered hero error page.
+   The content sections are hidden via JS, so this is the only visible thing —
+   centered like the wizard pages, min-height keeps the vertical rhythm even
+   with all sections hidden. `[hidden]` must be explicit because display:flex
+   on the class would override the UA default. */
+.error-hero-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  min-height: 300px;
+  padding: 32px 16px 28px;
+}
+
+.error-hero-page[hidden] {
+  display: none;
 }
 
 /* Contextual setup wizards (2026-08-28) — non-blocking, no dismiss.
-   Shown inside whichever tab has the missing config. */
+   Shown inside whichever tab has the missing config.
+   2026-08-29 restyle: match the no-subtitle Whisper prompt page
+   (.error-container hero look) — centered content, icon, display title,
+   solid accent pill button. Follow-up same day: no card box at all —
+   the whisper prompt page sits directly on the page background. */
 .wizard {
-  margin: 0 0 16px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--r-md, 10px);
-  background: var(--surface-raised);
-  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 300px;
+  max-width: 340px;
+  margin: 0 auto 16px;
+  padding: 26px 24px;
+  text-align: center;
+  font-size: 13.5px;
   color: var(--text-secondary);
 }
 
@@ -1489,20 +1549,45 @@ body {
   display: none;
 }
 
+.wizard::before {
+  font-size: 40px;
+  line-height: 1;
+}
+
+.asr-wizard::before {
+  content: "🔇";
+}
+
+.whisper-setup-wizard::before {
+  content: "🎙️";
+}
+
+.ai-key-wizard::before {
+  content: "🔑";
+}
+
+.wizard > * {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
 .wizard h3 {
-  margin: 0 0 8px;
-  font-size: 14px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 20px;
+  letter-spacing: -0.3px;
   color: var(--text);
 }
 
 .wizard p {
-  margin: 0 0 8px;
+  font-family: var(--font-reading);
+  line-height: 1.6;
 }
 
 .wizard ul,
 .wizard ol {
-  margin: 0 0 10px;
   padding-left: 18px;
+  text-align: left;
 }
 
 .wizard li {
@@ -1517,25 +1602,28 @@ body {
 }
 
 .wizard-status {
-  margin: 0 0 10px;
   color: var(--text-muted);
   font-size: 12px;
 }
 
 .wizard-btn {
-  padding: 6px 16px;
-  border: 1px solid var(--accent);
+  padding: 12px 28px;
+  border: none;
   border-radius: var(--r-pill);
-  background: transparent;
-  color: var(--accent);
+  background: var(--accent);
+  color: #fff;
   cursor: pointer;
-  font: 600 12px/1.4 var(--font-body);
-  transition: background 0.15s ease, color 0.15s ease;
+  font: 600 13px/1.4 var(--font-body);
+  letter-spacing: 0.2px;
+  box-shadow: 0 4px 14px rgba(251, 114, 153, 0.26);
+  transition: all 0.18s ease;
+  margin-top: 8px;
 }
 
 .wizard-btn:hover {
-  background: var(--accent);
+  background: var(--accent-hover);
   color: #fff;
+  transform: translateY(-1px);
 }
 
 /* Markdown blocks inside the summary panel */
@@ -1868,4 +1956,148 @@ body {
 .confirm-btn--danger:hover {
   background: var(--accent);
   color: #fff;
+}
+
+/* ===== Whisper transcribe queue panel (2026-08-29) ===== */
+/* Expandable section at the bottom of the 字幕 tab: the running job plus
+   everything queued behind it. */
+
+.queue-panel {
+  margin: 14px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 10px);
+  background: #fff;
+  overflow: hidden;
+}
+
+.queue-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: 600 13px/1.4 var(--font-body);
+  cursor: pointer;
+}
+
+.queue-header:hover {
+  background: var(--accent-dim);
+}
+
+.queue-chevron {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.queue-chevron--open {
+  transform: rotate(90deg);
+}
+
+.queue-header-label {
+  flex: 1;
+  text-align: left;
+}
+
+.queue-count-badge {
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font: 700 11px/1.5 var(--font-body);
+  text-align: center;
+}
+
+.queue-body {
+  padding: 2px 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 6px;
+  border-radius: var(--r-sm, 8px);
+}
+
+.queue-row + .queue-row {
+  border-top: 1px dashed var(--border);
+}
+
+.queue-row--running {
+  background: var(--accent-dim);
+}
+
+.queue-pos {
+  width: 18px;
+  flex: none;
+  text-align: center;
+  font: 700 12px/1.4 var(--font-body);
+  color: var(--text-muted);
+}
+
+.queue-row--running .queue-pos {
+  color: var(--accent);
+}
+
+.queue-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.queue-row-title {
+  font: 600 12px/1.4 var(--font-body);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue-row-sub {
+  font: 400 11px/1.4 var(--font-body);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue-tag {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  font: 600 10px/1.6 var(--font-body);
+}
+
+.queue-tag--running {
+  background: var(--accent);
+  color: #fff;
+}
+
+.queue-remove {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: none;
+  color: var(--text-muted);
+  font: 400 12px/1 var(--font-body);
+  cursor: pointer;
+}
+
+.queue-remove:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.queue-empty-hint {
+  margin: 6px 6px 2px;
+  font: 400 11px/1.5 var(--font-body);
+  color: var(--text-muted);
 }

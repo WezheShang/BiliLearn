@@ -38,6 +38,14 @@ var YTD_SETTINGS = (() => {
       model: "",
       displayName: "Other model",
     }),
+    // "none" = the user explicitly disabled AI features (2026-08-29).
+    // No endpoint, no model; activeApiKey() returns "" so the sidepanel
+    // keeps showing the configure-AI wizard until a real provider is picked.
+    none: Object.freeze({
+      baseUrl: "",
+      model: "",
+      displayName: "No AI model",
+    }),
     glm: Object.freeze({
       // Zhipu AI / Z.AI (智谱清言). The provider ships two OpenAI-
       // compatible endpoints and the API keys are NOT interchangeable:
@@ -75,6 +83,31 @@ var YTD_SETTINGS = (() => {
   }
   const PROVIDER_IDS = Object.freeze(Object.keys(PROVIDER_PRESETS));
   const DEFAULT_PROVIDER = "minimax";
+
+  // Known preset values, used to detect provider-switch residue in a
+  // stored aiBaseUrl / aiModel (see normalize). A stored value that
+  // exactly matches SOME provider's preset is residue from before the
+  // switch, not a hand edit, so it follows the newly selected provider.
+  // 2026-08-30 follow-up (user report, storage forensics): the set must
+  // cover EVERY official base URL, not just the preset ones — after
+  // deepseek → glm → deepseek the stored aiBaseUrl was the GLM CODING
+  // endpoint (which lives only in GLM_ENDPOINTS, never in
+  // PROVIDER_PRESETS), so it dodged the residue rule, a DeepSeek key was
+  // sent to open.bigmodel.cn, and every summary failed with 401
+  // INVALID_AI_KEY. DeepSeek documents two official base URLs (with and
+  // without /v1); both count as known-official, so both are residue.
+  const PRESET_BASE_URLS = new Set(
+    [
+      ...Object.values(PROVIDER_PRESETS).map((preset) => preset.baseUrl),
+      ...Object.values(GLM_ENDPOINTS),
+      "https://api.deepseek.com/v1",
+    ].filter(Boolean),
+  );
+  const PRESET_MODELS = new Set(
+    Object.values(PROVIDER_PRESETS)
+      .map((preset) => preset.model)
+      .filter(Boolean),
+  );
 
   // Chrome extensions cannot read $HOME / %USERPROFILE% directly, so we
   // keep a small lookup of the common homes for `~`-prefixed paths.
@@ -164,13 +197,20 @@ var YTD_SETTINGS = (() => {
       // GLM has two OpenAI-compatible endpoints whose API keys are NOT
       // interchangeable. The apiType dropdown is the source of truth;
       // we honor a hand-edited aiBaseUrl only if the user actually
-      // diverged from the preset default.
+      // diverged from every known preset (a stored base equal to some
+      // provider's preset is switch residue, not a hand edit).
       const glmUrl = resolveGlmBaseUrl(glmApiType);
-      if (!rawBase || rawBase === preset.baseUrl) {
-        resolvedBase = glmUrl;
-      } else {
-        resolvedBase = rawBase;
-      }
+      resolvedBase = !rawBase || PRESET_BASE_URLS.has(rawBase) ? glmUrl : rawBase;
+    } else if (PRESET_BASE_URLS.has(rawBase)) {
+      // Provider-switch residue (user report 2026-08-30): after switching
+      // to DeepSeek the stored minimax base URL kept serving the request,
+      // so the brand-new deepseek key hit the minimax endpoint and got a
+      // 401 INVALID_AI_KEY. A stored base that exactly equals some
+      // provider's preset is just the previous provider's residue — it
+      // follows the newly selected provider's preset. Truly custom bases
+      // (e.g. MiniMax international) are not in the preset set and
+      // survive the switch untouched.
+      resolvedBase = preset.baseUrl;
     }
     return {
       provider,
@@ -186,8 +226,14 @@ var YTD_SETTINGS = (() => {
         typeof input.glmApiKey === "string" ? input.glmApiKey.trim() : "",
       glmApiType,
       aiBaseUrl: resolvedBase,
+      // Same residue rule as aiBaseUrl: a stored model matching some
+      // provider's preset follows the current preset (otherwise minimax's
+      // MiniMax-M3 would be sent to the DeepSeek endpoint right after a
+      // switch); a genuinely custom model name survives the switch.
       aiModel:
-        typeof input.aiModel === "string" && input.aiModel.trim()
+        typeof input.aiModel === "string" &&
+        input.aiModel.trim() &&
+        !PRESET_MODELS.has(input.aiModel.trim())
           ? input.aiModel.trim()
           : preset.model,
       asrProvider: ["bailian", "whisper", "none"].includes(input.asrProvider)

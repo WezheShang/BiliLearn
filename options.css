@@ -447,9 +447,22 @@ footer {
 
 .diagnostics-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   margin: 8px 0 12px;
+}
+
+/* Long status text must wrap to its own line, never squeeze the
+   buttons to min-content (2026-08-29 report: a long one-line status
+   collapsed 运行诊断 into vertical text and 一键装 into a circle). */
+.diagnostics-actions button {
+  flex-shrink: 0;
+}
+
+.diagnostics-actions #diagnosticsStatus {
+  flex: 1 1 240px;
+  max-width: 100%;
 }
 
 .diagnostics-list {
@@ -506,4 +519,79 @@ footer {
 .diagnostics-detail {
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+
+/* ------------------------------------------------------------
+   Anchor landing (2026-08-29): deep links like
+   options.html#aiProviderCard scroll to and highlight the target
+   section. Paired with scrollToAnchorTarget() in options.js.
+   ------------------------------------------------------------ */
+section[id],
+div[data-asr-field] {
+  scroll-margin-top: 24px;
+}
+
+section.card:target,
+div[data-asr-field]:target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(251, 114, 153, 0.25);
+}
+
+
+/* Fixed server address rendered as read-only text (2026-08-29): the
+   Whisper server always binds 127.0.0.1:7860 via start_whisper_server.bat,
+   so the URL is information, not a setting. */
+.static-field {
+  margin: 6px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 13px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* Switch-model key dialog (2026-08-29): switching away from a provider
+   with a saved key asks Keep / Clear. Keep auto-restores the key when the
+   user switches back; Clear wipes it from field + storage immediately. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 60;
+}
+
+.modal-overlay.is-hidden {
+  display: none;
+}
+
+.modal-card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.25);
+  margin: 0;
+  max-width: 430px;
+  padding: 20px 22px;
+}
+
+.modal-card h3 {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+
+.modal-card p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.65;
+  margin: 0 0 18px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
 }

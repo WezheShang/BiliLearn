@@ -60,6 +60,32 @@ if not defined PYTHON_EXE (
   exit /b 1
 )
 
+REM Pre-flight (2026-08-29): if faster_whisper / zhconv are missing,
+REM pip-install them automatically so a fresh clone just works - no
+REM separate install step, no PowerShell window, no cd needed.
+"%PYTHON_EXE%" -c "import faster_whisper, zhconv" >nul 2>&1
+if errorlevel 1 (
+  echo [SETUP] First run: installing Python dependencies...
+  echo [SETUP]   pip install faster-whisper zhconv
+  echo.
+  "%PYTHON_EXE%" -m pip install --upgrade faster-whisper zhconv
+  if errorlevel 1 (
+    echo.
+    echo [ERROR] pip install failed. Check the messages above, then re-run.
+    pause
+    exit /b 1
+  )
+  "%PYTHON_EXE%" -c "import faster_whisper, zhconv" >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] Dependencies installed but still not importable.
+    echo         Run install_whisper_deps.ps1 for a detailed report.
+    pause
+    exit /b 1
+  )
+  echo [SETUP] Dependencies ready.
+  echo.
+)
+
 echo Starting bilidown Whisper server...
 echo   python : %PYTHON_EXE%
 echo   script : %SERVER_SCRIPT%

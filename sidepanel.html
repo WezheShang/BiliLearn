@@ -13,7 +13,7 @@
         <div class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 18 18"><path fill-rule="evenodd" clip-rule="evenodd" d="M3.73252 2.67094C3.33229 2.28484 3.33229 1.64373 3.73252 1.25764C4.11291 0.890684 4.71552 0.890684 5.09591 1.25764L7.21723 3.30403C7.27749 3.36218 7.32869 3.4261 7.37081 3.49407H10.5789C10.6211 3.4261 10.6723 3.36218 10.7325 3.30403L12.8538 1.25764C13.2342 0.890684 13.8368 0.890684 14.2172 1.25764C14.6175 1.64373 14.6175 2.28484 14.2172 2.67094L13.364 3.49407H14C16.2091 3.49407 18 5.28493 18 7.49407V12.9996C18 15.2087 16.2091 16.9996 14 16.9996H4C1.79086 16.9996 0 15.2087 0 12.9996V7.49406C0 5.28492 1.79086 3.49407 4 3.49407H4.58579L3.73252 2.67094ZM4 5.42343C2.89543 5.42343 2 6.31886 2 7.42343V13.0702C2 14.1748 2.89543 15.0702 4 15.0702H14C15.1046 15.0702 16 14.1748 16 13.0702V7.42343C16 6.31886 15.1046 5.42343 14 5.42343H4ZM5 9.31747C5 8.76519 5.44772 8.31747 6 8.31747C6.55228 8.31747 7 8.76519 7 9.31747V10.2115C7 10.7638 6.55228 11.2115 6 11.2115C5.44772 11.2115 5 10.7638 5 10.2115V9.31747ZM12 8.31747C11.4477 8.31747 11 8.76519 11 9.31747V10.2115C11 10.7638 11.4477 11.2115 12 11.2115C12.5523 11.2115 13 10.7638 13 10.2115V9.31747C13 8.76519 12.5523 8.31747 12 8.31747Z" fill="currentColor"/></svg>
         </div>
-        <div class="brand-name" title="bilidown · dk 二次开发版">bilidown</div>
+        <div class="brand-name" title="bilidown · WezeShang二次开发版">bilidown</div>
         <button
           class="settings-btn"
           id="settingsBtn"
@@ -83,14 +83,10 @@
           <!-- Contextual wizard: no subtitles + no ASR configured -->
           <aside class="wizard asr-wizard" id="asrWizard" hidden>
             <h3>这视频没有原生字幕</h3>
-            <p>默认走 B 站原生字幕，遇到没有字幕的视频就拿不到文字。</p>
-            <p>想让这视频也有字幕？去设置里选一个 ASR 来源：</p>
-            <ul>
-              <li><strong>阿里云百炼 Fun-ASR</strong>：上传音轨到阿里云，免费额度内可用</li>
-              <li><strong>本地 Whisper</strong>：本机跑，不上传，资源占用大但更隐私</li>
-            </ul>
+            <p>您可以选择设置一个语音识别的模型进行字幕提取，我们现在支持本地 Whisper 模型，本机运行一分钱不花。您可以到设置页去进行设置。</p>
+            <p>将来我们也会支持云端 ASR，敬请期待。</p>
             <button class="wizard-btn" id="openOptionsForAsr" type="button">
-              去设置选 ASR
+              语音识别设置
             </button>
           </aside>
 
@@ -109,7 +105,12 @@
             </button>
           </aside>
 
-          <div class="section">
+          <!-- 完整字幕 section gets #transcriptSection so the wizards can hide
+               it entirely (2026-08-29): while a transcript-tab wizard is up,
+               the action row (语言切换/复制到飞书/导出) is dead weight with no
+               transcript to act on — the page should be the clean single
+               wizard card, like the whisper prompt page. -->
+          <div class="section" id="transcriptSection">
             <div class="section-header transcript-section-header">
               <div class="transcript-header-main">
                 <div class="section-title-wrap">
@@ -157,6 +158,30 @@
             </div>
             <div id="transcriptList"></div>
           </div>
+
+          <!-- WHISPER TRANSCRIBE QUEUE (2026-08-29): expandable section at
+               the bottom of the transcript tab. Shows the single running
+               job plus everything queued behind it. Hidden entirely when
+               nothing is running and nothing is queued. -->
+          <aside class="queue-panel" id="whisperQueuePanel" hidden>
+            <button
+              class="queue-header"
+              id="whisperQueueToggle"
+              type="button"
+              aria-expanded="false"
+            >
+              <span class="queue-chevron" id="whisperQueueChevron" aria-hidden="true">▸</span>
+              <span class="queue-header-label">转录队列</span>
+              <span class="queue-count-badge" id="whisperQueueCount">0</span>
+            </button>
+            <div class="queue-body" id="whisperQueueBody" hidden>
+              <div class="queue-running" id="whisperQueueRunning"></div>
+              <ul class="queue-list" id="whisperQueueList"></ul>
+              <p class="queue-empty-hint" id="whisperQueueEmpty" hidden>
+                队列是空的——正在转录时对其他视频点“用 Whisper 转录”，就会自动排到这里。
+              </p>
+            </div>
+          </aside>
         </div>
 
         <!-- TAB: Overview (chapters + key quotes) - requires LLM -->
@@ -164,14 +189,22 @@
           <!-- Contextual wizard: AI key missing (moved into the active
                Overview/Summary panel by updateAiKeyWizard in sidepanel.js) -->
           <aside class="wizard ai-key-wizard" id="aiKeyWizard" hidden>
-            <h3>还没配置 AI 密钥</h3>
-            <p>字幕（transcript）不需要密钥，现在就能用。但概览和总结要调用大模型，得先填一个 API key。</p>
-            <ol>
-              <li>打开设置，选一个 AI 提供方（minimax / DeepSeek / GLM）</li>
-              <li>粘贴对应的 API key 并保存</li>
-            </ol>
+            <h3>配置AI模型和密钥</h3>
+            <p>您需要设置一个 AI 模型和 API Key 以获得概览和总结的功能。</p>
             <button class="wizard-btn" id="openOptionsForAiKey" type="button">
-              去设置填 Key
+              去设置
+            </button>
+          </aside>
+
+          <!-- Full-panel standard error page (DESIGN.md): when analysis fails
+               the whole Overview tab becomes this hero page — content
+               sections are hidden, no half-broken loading mix. -->
+          <aside class="error-hero-page" id="overviewError" hidden>
+            <div class="error-hero-icon">&#9888;</div>
+            <h3 class="error-hero-title">分析失败</h3>
+            <p class="error-hero-message" id="overviewErrorMessage"></p>
+            <button class="error-hero-btn" id="overviewErrorRetry" type="button">
+              重试
             </button>
           </aside>
 
@@ -214,6 +247,18 @@
 
         <!-- TAB: Summary (full notes from transcript) - requires LLM -->
         <div class="tab-panel" data-panel="summary">
+          <!-- Full-panel standard error page (DESIGN.md): when the summary
+               fails the whole Summary tab becomes this hero page — content
+               sections (incl. dead 复制/导出/保存 buttons) are hidden. -->
+          <aside class="error-hero-page" id="summaryError" hidden>
+            <div class="error-hero-icon">&#9888;</div>
+            <h3 class="error-hero-title">总结失败</h3>
+            <p class="error-hero-message" id="summaryErrorMessage"></p>
+            <button class="error-hero-btn" id="summaryErrorRetry" type="button">
+              重试
+            </button>
+          </aside>
+
           <div class="section">
             <div class="section-header summary-section-header">
               <div class="section-title">总结</div>

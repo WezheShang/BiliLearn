@@ -237,6 +237,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   setupEventListeners();
+  initWhisperQueuePanel();
   await evictOldCacheEntries(20);
 
   // If a whisper job is in flight (or just finished) from before this
@@ -258,6 +259,37 @@ document.addEventListener("DOMContentLoaded", async () => {
   aiKeyMissing = !(configStatus && configStatus.hasAiKey);
   setupWizardButtons();
   setupLongTranscribeConfirm();
+  // Key state may have flipped (user saved / cleared a key in options):
+  // refresh the wizard + LLM section visibility for the active tab now,
+  // instead of waiting for the next switchTab.
+  updateAiKeyWizard(
+    (document.querySelector(".tab-panel.active") || { dataset: {} }).dataset
+      .panel || "transcript",
+  );
+
+  // 2026-08-29 user report: after saving a key in options and switching
+  // back, the wizard page never refreshed (even on tab switches) — the
+  // config check above ran exactly once at panel open. Re-check whenever
+  // this panel becomes visible or focused again.
+  async function refreshAiKeyState() {
+    let configStatus = null;
+    try {
+      configStatus = await chrome.runtime.sendMessage({ action: "checkConfig" });
+    } catch {
+      return; // service worker unreachable — keep the current state
+    }
+    const missing = !(configStatus && configStatus.hasAiKey);
+    if (missing === aiKeyMissing) return; // nothing changed, no re-render
+    aiKeyMissing = missing;
+    updateAiKeyWizard(
+      (document.querySelector(".tab-panel.active") || { dataset: {} }).dataset
+        .panel || "transcript",
+    );
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void refreshAiKeyState();
+  });
+  window.addEventListener("focus", () => void refreshAiKeyState());
 
   await checkCurrentTab();
 });
@@ -356,6 +388,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === "transcriptProgress") {
     // Background is telling us the transcript fetch status changed.
+    // Also refresh the queue panel's running row (stage subtitles move
+    // here), and on terminal stages the background may already have
+    // started the next queued job — pull fresh queue state.
+    refreshWhisperQueue();
     // We now carry an explicit `stage` (downloading / ready_to_transcribe
     // / transcribing / correcting) so the UI can pick more polished copy
     // than the background's title/subtitle pair — but the SW-provided
@@ -400,6 +436,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         );
       })();
     }
+    sendResponse({ success: true });
+  }
+  if (message.action === "whisperQueueUpdate") {
+    // Background says the transcribe queue changed (enqueue / remove /
+    // pump started the next entry). Re-render the queue panel.
+    renderWhisperQueue(
+      Array.isArray(message.queue) ? message.queue : [],
+      message.job || null,
+    );
     sendResponse({ success: true });
   }
   if (message.action === "noteSaved") {
@@ -725,6 +770,18 @@ async function startBilidown(videoId, videoUrl) {
     transcriptScrollObserver = null;
     // Stale transcript-tab wizards belong to the previous video's state.
     hideTranscriptWizards();
+    // So do stale full-panel error pages: the next video may load from
+    // cache (currentSummary set → the lazy trigger never fires to reset
+    // the panel) and its cached content must not sit behind the previous
+    // video's error page. updateAiKeyWizard re-applies the wizard state
+    // for the active tab when the key is still missing (wizard owns the
+    // panel, sections stay hidden).
+    hidePanelError("overview");
+    hidePanelError("summary");
+    updateAiKeyWizard(
+      (document.querySelector(".tab-panel.active") || { dataset: {} }).dataset
+        .panel || "transcript",
+    );
   }
 
   // Check cache for this video
@@ -1127,8 +1184,22 @@ function renderTranscript() {
             Number(String(currentVideoId?.split("@p")[1] || "1").replace(/^p/i, "")) || 1,
           ),
           videoUrl: currentVideoUrl || "",
+          videoTitle: currentVideoTitle || "",
         });
         if (result && result.success) {
+          if (result.queued || result.alreadyQueued) {
+            // Another video is transcribing — this one joined the queue.
+            // Stay on the loading screen; the pump's transcriptProgress
+            // broadcasts take over when this entry starts running.
+            updateLoading(
+              "已加入转录队列",
+              result.alreadyQueued
+                ? `该视频已在队列中（第 ${result.position} 位），前序任务完成后自动开始`
+                : `当前排在第 ${result.position} 位，前序任务完成后自动开始`,
+            );
+            refreshWhisperQueue();
+            return;
+          }
           if (result.alreadyRunning || result.started) {
             // Already running, OR fire-and-ack started (pipeline detached
             // on the background side): attach to the progress UI; terminal
@@ -1221,7 +1292,7 @@ function buildMarkdownExport() {
   }
   lines.push("## 完整字幕", "");
   exportTranscriptEntries().forEach((entry) => lines.push(`- [${entry.timestamp}](${entry.url}) ${entry.text}`));
-  lines.push("", "---", "由 bilidown · dk 二次开发版导出");
+  lines.push("", "---", "由 bilidown · WezeShang二次开发版导出");
   return lines.join("\n");
 }
 
@@ -1233,7 +1304,7 @@ function buildHtmlExport() {
     <blockquote><b>${escapeHtml(quote.timestamp)}</b>${escapeHtml(quote.quote)}</blockquote>`).join("");
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</title><style>
   :root{--pink:#fb7299;--blue:#00aeec;--ink:#18191c;--muted:#61666d;--line:#e3e5e7}*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:var(--ink);font:15px/1.75 system-ui,-apple-system,"Segoe UI",sans-serif}.page{width:min(900px,calc(100% - 28px));margin:32px auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:clamp(22px,5vw,54px);box-shadow:0 12px 36px rgba(24,25,28,.07)}h1{line-height:1.3;margin:0 0 14px}h2{margin-top:38px;padding-bottom:10px;border-bottom:2px solid rgba(251,114,153,.18)}.meta{color:var(--muted)}a{color:var(--pink);text-decoration:none}.chapter{display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--line)}.chapter a{flex:0 0 54px;font-weight:700}.chapter p{margin:4px 0;color:var(--muted)}blockquote{margin:12px 0;padding:14px 18px;border-left:4px solid var(--pink);background:rgba(251,114,153,.06);border-radius:0 10px 10px 0}blockquote b{margin-right:12px;color:var(--pink)}.line{display:grid;grid-template-columns:62px 1fr;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}.time{font-family:ui-monospace,monospace;font-weight:700}.footer{margin-top:38px;color:#9499a0;font-size:12px}@media(max-width:560px){.line{grid-template-columns:52px 1fr}.page{margin:12px auto}}
-  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}${chapters ? `<h2>AI 章节</h2>${chapters}` : ""}${quotes ? `<h2>关键观点</h2>${quotes}` : ""}<h2>完整字幕</h2>${entries.map((entry) => `<div class="line"><a class="time" href="${escapeHtml(entry.url)}">${escapeHtml(entry.timestamp)}</a><div>${escapeHtml(entry.text)}</div></div>`).join("")}<div class="footer">由 bilidown · dk 二次开发版导出</div></main></body></html>`;
+  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}${chapters ? `<h2>AI 章节</h2>${chapters}` : ""}${quotes ? `<h2>关键观点</h2>${quotes}` : ""}<h2>完整字幕</h2>${entries.map((entry) => `<div class="line"><a class="time" href="${escapeHtml(entry.url)}">${escapeHtml(entry.timestamp)}</a><div>${escapeHtml(entry.text)}</div></div>`).join("")}<div class="footer">由 bilidown · WezeShang二次开发版导出</div></main></body></html>`;
 }
 
 async function copyForFeishu() {
@@ -1281,7 +1352,7 @@ function buildSummaryMarkdownExport() {
     `- **视频链接：** ${currentCanonicalVideoUrl()}`,
   ];
   if (currentVideoDescription) lines.push("", "## 视频简介", "", currentVideoDescription);
-  lines.push("", currentSummary || "（暂无总结内容）", "", "---", "由 bilidown · dk 二次开发版导出");
+  lines.push("", currentSummary || "（暂无总结内容）", "", "---", "由 bilidown · WezeShang二次开发版导出");
   return lines.join("\n");
 }
 
@@ -1293,7 +1364,7 @@ function buildSummaryHtmlExport() {
   const body = currentSummary ? renderMarkdown(currentSummary) : "<p>（暂无总结内容）</p>";
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</title><style>
   :root{--pink:#fb7299;--blue:#00aeec;--ink:#18191c;--muted:#61666d;--line:#e3e5e7}*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:var(--ink);font:15px/1.75 system-ui,-apple-system,"Segoe UI",sans-serif}.page{width:min(900px,calc(100% - 28px));margin:32px auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:clamp(22px,5vw,54px);box-shadow:0 12px 36px rgba(24,25,28,.07)}h1{line-height:1.3;margin:0 0 14px}.meta{color:var(--muted)}a{color:var(--pink);text-decoration:none}.note h1,.note h2,.note h3,.note h4{line-height:1.35;margin:22px 0 8px}.note h1{font-size:22px}.note h2{font-size:19px;padding-bottom:8px;border-bottom:2px solid rgba(251,114,153,.18)}.note h3{font-size:16px}.note p{margin:8px 0}.note ul,.note ol{margin:8px 0;padding-left:22px}.note li{margin:3px 0}.note blockquote{margin:12px 0;padding:14px 18px;border-left:4px solid var(--pink);background:rgba(251,114,153,.06);border-radius:0 10px 10px 0;color:var(--muted)}.note code{font-family:ui-monospace,monospace;font-size:.9em;background:rgba(24,25,28,.05);border-radius:4px;padding:1px 5px}.note pre{margin:12px 0;padding:14px 16px;background:rgba(24,25,28,.04);border:1px solid var(--line);border-radius:10px;overflow-x:auto}.note pre code{background:none;padding:0}.note hr{border:none;border-top:1px solid var(--line);margin:20px 0}.note strong{color:var(--ink)}.footer{margin-top:38px;color:#9499a0;font-size:12px}@media(max-width:560px){.page{margin:12px auto}}
-  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}<div class="note">${body}</div><div class="footer">由 bilidown · dk 二次开发版导出</div></main></body></html>`;
+  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}<div class="note">${body}</div><div class="footer">由 bilidown · WezeShang二次开发版导出</div></main></body></html>`;
 }
 
 /**
@@ -1447,6 +1518,104 @@ function showWhisperError(input) {
   showError(title, message);
 }
 
+// ============================================================
+// WHISPER TRANSCRIBE QUEUE PANEL (2026-08-29)
+// ============================================================
+// Expandable section at the bottom of the 字幕 tab. Shows the single
+// running whisper job plus everything queued behind it (background keeps
+// whisper strictly single-job and auto-starts the next queued entry when
+// the current one finishes). State arrives via whisperQueueUpdate
+// broadcasts; getWhisperQueue is the pull used on init / after actions.
+
+let whisperQueueExpanded = false;
+
+async function refreshWhisperQueue() {
+  try {
+    const res = await chrome.runtime.sendMessage({ action: "getWhisperQueue" });
+    if (res && typeof res === "object") {
+      renderWhisperQueue(Array.isArray(res.queue) ? res.queue : [], res.job || null);
+    }
+  } catch {}
+}
+
+function renderWhisperQueue(queue, job) {
+  const panel = document.getElementById("whisperQueuePanel");
+  if (!panel) return;
+  const list = document.getElementById("whisperQueueList");
+  const running = document.getElementById("whisperQueueRunning");
+  const count = document.getElementById("whisperQueueCount");
+  const emptyHint = document.getElementById("whisperQueueEmpty");
+  if (!list || !running || !count) return;
+
+  // Whole panel hides when nothing runs and nothing is queued.
+  panel.hidden = !job && queue.length === 0;
+  // Badge counts the running job + queued entries (total workload).
+  count.textContent = String(queue.length + (job ? 1 : 0));
+
+  if (job) {
+    running.innerHTML = `
+      <div class="queue-row queue-row--running">
+        <span class="queue-pos">▶</span>
+        <div class="queue-row-main">
+          <div class="queue-row-title"></div>
+          <div class="queue-row-sub"></div>
+        </div>
+        <span class="queue-tag queue-tag--running">进行中</span>
+      </div>`;
+    running.querySelector(".queue-row-title").textContent =
+      job.title || job.videoId || "当前任务";
+    running.querySelector(".queue-row-sub").textContent =
+      job.stageSubtitle || job.stageTitle || "转录进行中";
+  } else {
+    running.innerHTML = "";
+  }
+
+  list.innerHTML = "";
+  queue.forEach((entry, idx) => {
+    const li = document.createElement("li");
+    li.className = "queue-row";
+    li.innerHTML = `
+      <span class="queue-pos"></span>
+      <div class="queue-row-main">
+        <div class="queue-row-title"></div>
+        <div class="queue-row-sub"></div>
+      </div>
+      <button class="queue-remove" title="从队列移除" aria-label="从队列移除">✕</button>`;
+    li.querySelector(".queue-pos").textContent = String(idx + 1);
+    li.querySelector(".queue-row-title").textContent =
+      entry.title || entry.videoId || "未命名视频";
+    li.querySelector(".queue-row-sub").textContent =
+      `${entry.videoId}${Number(entry.pageNumber) > 1 ? ` · P${entry.pageNumber}` : ""}`;
+    li.querySelector(".queue-remove").addEventListener("click", async () => {
+      try {
+        await chrome.runtime.sendMessage({
+          action: "removeWhisperQueueEntry",
+          videoId: entry.videoId,
+          pageNumber: entry.pageNumber,
+        });
+      } catch {}
+      refreshWhisperQueue();
+    });
+    list.appendChild(li);
+  });
+
+  if (emptyHint) emptyHint.hidden = queue.length > 0;
+}
+
+function initWhisperQueuePanel() {
+  const toggle = document.getElementById("whisperQueueToggle");
+  if (!toggle) return;
+  toggle.addEventListener("click", () => {
+    whisperQueueExpanded = !whisperQueueExpanded;
+    const body = document.getElementById("whisperQueueBody");
+    const chevron = document.getElementById("whisperQueueChevron");
+    if (body) body.hidden = !whisperQueueExpanded;
+    if (chevron) chevron.classList.toggle("queue-chevron--open", whisperQueueExpanded);
+    toggle.setAttribute("aria-expanded", String(whisperQueueExpanded));
+  });
+  refreshWhisperQueue();
+}
+
 function showWhisperPrompt(videoId, videoUrl, cacheDir) {
   // A whisper job may already be running for THIS video (user switched
   // to another page mid-transcription, then came back — the panel stayed
@@ -1485,8 +1654,23 @@ function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
           Number(String(videoId.split("@p")[1] || "1").replace(/^p/i, "")) || 1,
         ),
         videoUrl,
+        videoTitle: currentVideoTitle || "",
       });
       if (result && result.success) {
+        if (result.queued || result.alreadyQueued) {
+          // Another video is transcribing — this one joined the queue.
+          // Keep the loading screen with the queue position; when the
+          // pump starts this entry its transcriptProgress broadcasts
+          // replace the copy, and succeeded re-renders the transcript.
+          updateLoading(
+            "已加入转录队列",
+            result.alreadyQueued
+              ? `该视频已在队列中（第 ${result.position} 位），前序任务完成后自动开始`
+              : `当前排在第 ${result.position} 位，前序任务完成后自动开始`,
+          );
+          refreshWhisperQueue();
+          return;
+        }
         if (result.alreadyRunning || result.started) {
           // Already running, OR fire-and-ack started (pipeline detached on
           // the background side): attach to the running job's progress UI
@@ -1528,11 +1712,21 @@ let aiKeyMissing = false;
 let whisperPingTimer = null;
 
 function setupWizardButtons() {
-  for (const id of ["openOptionsForAsr", "openOptionsForWhisper", "openOptionsForAiKey"]) {
+  // Each wizard jumps straight to its matching options section via
+  // options.html#<anchor> instead of just opening the page at the top.
+  const WIZARD_OPTION_ANCHORS = {
+    openOptionsForAsr: "asrSection",
+    openOptionsForWhisper: "whisperSettings",
+    openOptionsForAiKey: "aiProviderCard",
+  };
+  for (const id of Object.keys(WIZARD_OPTION_ANCHORS)) {
     const btn = document.getElementById(id);
     if (btn) {
       btn.addEventListener("click", () => {
-        chrome.runtime.sendMessage({ action: "openOptions" });
+        chrome.runtime.sendMessage({
+          action: "openOptions",
+          anchor: WIZARD_OPTION_ANCHORS[id],
+        });
       });
     }
   }
@@ -1562,11 +1756,54 @@ function stopWhisperPing() {
   }
 }
 
+/**
+ * Clean-page helpers (2026-08-29, user request "图一图二下面那几个按钮全去掉"):
+ * while a contextual wizard is showing, the functional sections below it are
+ * dead weight — their buttons (复制/导出/保存/重新生成…) have nothing to act
+ * on yet. The wizard pages should look like the whisper prompt page: one
+ * clean card, one action button. These helpers hide/restore the sections.
+ */
+function setTranscriptSectionHidden(hidden) {
+  const section = document.getElementById("transcriptSection");
+  if (section) section.hidden = hidden;
+}
+
+function setLlmSectionsHidden(hidden) {
+  const panels = document.querySelectorAll(
+    '.tab-panel[data-panel="overview"], .tab-panel[data-panel="summary"]',
+  );
+  for (const panel of panels) {
+    for (const section of panel.querySelectorAll(":scope > .section")) {
+      section.hidden = hidden;
+    }
+  }
+}
+
+/**
+ * Error-aware variant of setLlmSectionsHidden(false): restores a panel's
+ * sections only when its full-panel error page is NOT up. While an error
+ * page owns the panel its sections stay hidden (DESIGN.md), so switching
+ * tabs away and back must not resurrect empty sections behind the error.
+ */
+function restoreLlmSections() {
+  const panels = document.querySelectorAll(
+    '.tab-panel[data-panel="overview"], .tab-panel[data-panel="summary"]',
+  );
+  for (const panel of panels) {
+    const errorPage = panel.querySelector(":scope > .error-hero-page");
+    if (errorPage && !errorPage.hidden) continue;
+    for (const section of panel.querySelectorAll(":scope > .section")) {
+      section.hidden = false;
+    }
+  }
+}
+
 function hideTranscriptWizards() {
   const asr = document.getElementById("asrWizard");
   const wsp = document.getElementById("whisperSetupWizard");
   if (asr) asr.hidden = true;
   if (wsp) wsp.hidden = true;
+  setTranscriptSectionHidden(false);
   stopWhisperPing();
 }
 
@@ -1580,8 +1817,16 @@ function updateAiKeyWizard(tabName) {
   if (!wiz) return;
   if (!aiKeyMissing || (tabName !== "overview" && tabName !== "summary")) {
     wiz.hidden = true;
+    restoreLlmSections();
     return;
   }
+  // Clean page: with the wizard up, the LLM sections below (章节/关键观点/
+  // 总结操作行) render dead buttons over empty placeholders — hide them,
+  // along with any stale full-panel error page from a failed run (the
+  // wizard explains the more fundamental problem and owns the panel).
+  setLlmSectionsHidden(true);
+  hidePanelError("overview");
+  hidePanelError("summary");
   const panel = document.querySelector(`.tab-panel[data-panel="${tabName}"]`);
   if (panel && wiz.parentElement !== panel) {
     panel.insertBefore(wiz, panel.firstChild);
@@ -1596,6 +1841,7 @@ function showAsrWizardState() {
   document.getElementById("tabsNav").style.display = "flex";
   const asr = document.getElementById("asrWizard");
   if (asr) asr.hidden = false;
+  setTranscriptSectionHidden(true);
   switchTab("transcript");
 }
 
@@ -1610,6 +1856,7 @@ function showWhisperSetupWizardState() {
   document.getElementById("tabsNav").style.display = "flex";
   const wsp = document.getElementById("whisperSetupWizard");
   if (wsp) wsp.hidden = false;
+  setTranscriptSectionHidden(true);
   const statusEl = document.getElementById("whisperSetupStatus");
   if (statusEl) statusEl.textContent = "检查中…";
   switchTab("transcript");
@@ -1761,19 +2008,80 @@ function switchTab(tabName) {
 }
 
 /**
- * Renders an error message with an inline 重试 (retry) button into `container`
- * and wires the button to `retryFn`. Safe to re-invoke the trigger functions:
- * on failure `currentAnalysis` / `currentSummary` stay unset and the loading
- * flags are already reset, so the retry call starts a fresh request.
+ * Full-panel standard error pages (DESIGN.md, 2026-08-30 user request):
+ * when an LLM request fails, the ENTIRE tab renders the centered hero
+ * error page — content containers are cleared, the tab's `.section`s are
+ * hidden. Never a mix of one failed block plus one forever-loading
+ * placeholder (the old bug: 「正在提取关键观点…」 stayed up forever next
+ * to the chapter error).
  */
-function renderErrorWithRetry(container, message, retryFn, asListItem) {
-  if (!container) return;
-  const box = `<div class="summary-error">${escapeHtml(message)}<button class="error-retry-btn" type="button">重试</button></div>`;
-  container.innerHTML = asListItem
-    ? `<li class="chapter-item" style="border: none; padding: 0;">${box}</li>`
-    : box;
-  const btn = container.querySelector(".error-retry-btn");
-  if (btn) btn.addEventListener("click", retryFn);
+const PANEL_ERROR_META = {
+  overview: {
+    pageId: "overviewError",
+    containerIds: ["chapterList", "quotesList"],
+  },
+  summary: {
+    pageId: "summaryError",
+    containerIds: ["summaryContent"],
+  },
+};
+
+function panelErrorPage(panelName) {
+  const meta = PANEL_ERROR_META[panelName];
+  if (!meta) return null;
+  return document.getElementById(meta.pageId);
+}
+
+/**
+ * Hides the panel's error page (sections are NOT touched — whoever renders
+ * real content next restores them). Safe to call when nothing is showing.
+ */
+function hidePanelError(panelName) {
+  const page = panelErrorPage(panelName);
+  if (page) page.hidden = true;
+}
+
+/**
+ * Shows the full-panel hero error page: clears the panel's content
+ * containers, hides its sections, sets the raw error message verbatim
+ * (error codes are never rewritten) and wires 重试 to first restore the
+ * panel then re-run `retryFn`. Re-invoking the trigger functions is safe:
+ * on failure `currentAnalysis` / `currentSummary` stay unset and the
+ * loading flags are already reset, so the retry starts a fresh request.
+ */
+function showPanelError(panelName, message, retryFn) {
+  const meta = PANEL_ERROR_META[panelName];
+  const page = panelErrorPage(panelName);
+  if (!meta || !page) return;
+
+  const panel = page.closest(".tab-panel");
+  if (panel) {
+    for (const section of panel.querySelectorAll(":scope > .section")) {
+      section.hidden = true;
+    }
+  }
+  for (const id of meta.containerIds) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "";
+  }
+
+  const msg = page.querySelector(".error-hero-message");
+  if (msg) msg.textContent = message;
+
+  const btn = page.querySelector(".error-hero-btn");
+  if (btn) {
+    btn.onclick = () => {
+      hidePanelError(panelName);
+      if (panel) {
+        for (const section of panel.querySelectorAll(":scope > .section")) {
+          section.hidden = false;
+        }
+      }
+      if (typeof retryFn === "function") retryFn();
+    };
+  }
+
+  page.hidden = false;
 }
 
 /**
@@ -1784,6 +2092,11 @@ async function triggerAnalysis() {
   if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
     return;
 
+  // State honesty (DESIGN.md): a new load must never start behind a stale
+  // error page from a previous video/attempt — and its loaders must land
+  // in VISIBLE sections (see triggerSummary for the 2026-08-30 report).
+  hidePanelError("overview");
+  restoreLlmSections();
   isAnalysisLoading = true;
 
   // Show loading indicators in the Overview tab
@@ -1808,7 +2121,11 @@ async function triggerAnalysis() {
     });
 
     if (!analysisResult.success) {
-      renderErrorWithRetry(chapterList, `Analysis failed: ${analysisResult.error || "Unknown error"}`, triggerAnalysis, true);
+      showPanelError(
+        "overview",
+        `Analysis failed: ${analysisResult.error || "Unknown error"}`,
+        triggerAnalysis,
+      );
       isAnalysisLoading = false;
       return;
     }
@@ -1821,7 +2138,7 @@ async function triggerAnalysis() {
     await saveToCache(currentVideoId);
   } catch (error) {
     console.error("[dk-bilidown Panel] Analysis error:", error);
-    renderErrorWithRetry(chapterList, `Error: ${error.message}`, triggerAnalysis, true);
+    showPanelError("overview", `Error: ${error.message}`, triggerAnalysis);
   }
 
   isAnalysisLoading = false;
@@ -1835,6 +2152,16 @@ async function triggerSummary() {
   if (!currentTranscriptTimestamped || isSummaryLoading || currentSummary)
     return;
 
+  // State honesty (DESIGN.md): a new load must never start behind a stale
+  // error page from a previous video/attempt — and its loader must land in
+  // a VISIBLE section. showPanelError hides the panel's sections; the lazy
+  // tab-switch path never restores them (only the 重试 button did), so the
+  // 「正在总结中…」 placeholder used to render inside a hidden section and
+  // the tab stayed blank until the next tab switch (2026-08-30 report).
+  // hidePanelError first, THEN restoreLlmSections: the restore is
+  // error-aware and skips panels whose error page is still up.
+  hidePanelError("summary");
+  restoreLlmSections();
   isSummaryLoading = true;
   const summaryContent = document.getElementById("summaryContent");
 
@@ -1852,7 +2179,11 @@ async function triggerSummary() {
     });
 
     if (!summaryResult.success) {
-      renderErrorWithRetry(summaryContent, `Summary failed: ${summaryResult.error || "Unknown error"}`, triggerSummary);
+      showPanelError(
+        "summary",
+        `Summary failed: ${summaryResult.error || "Unknown error"}`,
+        triggerSummary,
+      );
       isSummaryLoading = false;
       return;
     }
@@ -1864,7 +2195,7 @@ async function triggerSummary() {
     await saveToCache(currentVideoId);
   } catch (error) {
     console.error("[dk-bilidown Panel] Summary error:", error);
-    renderErrorWithRetry(summaryContent, `Error: ${error.message}`, triggerSummary);
+    showPanelError("summary", `Error: ${error.message}`, triggerSummary);
   }
 
   isSummaryLoading = false;

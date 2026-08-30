@@ -23,7 +23,10 @@ const formatTimestamp = (seconds) => {
   return `${mins}:${String(rem).padStart(2, "0")}`;
 };
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
-const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
+// Streaming responses reset the idle watchdog on every chunk, so the hard
+// cap now only bounds genuinely runaway requests. Long summaries (8192
+// output tokens) legitimately take 1-3 minutes to stream.
+const AI_PROVIDER_HARD_TIMEOUT_MS = 600_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
@@ -116,6 +119,13 @@ async function requestAiCompletion({
   const body = {
     model: settings.aiModel,
     messages,
+    // Streaming keeps the connection visibly alive while the model works:
+    // every SSE delta resets the idle watchdog. Non-streaming requests send
+    // no bytes until the whole completion is generated, so long videos on
+    // thinking models (glm-4.6 reasons first) sat silent past the 50-second
+    // no-bytes abort and were killed while still healthy (user report
+    // 2026-08-30: "inactive for 50 seconds" on every long-video summary).
+    stream: true,
   };
   // MiniMax uses `max_completion_tokens` and the `thinking` toggle to
   // suppress reasoning traces. OpenAI-compatible providers (DeepSeek,
@@ -174,6 +184,27 @@ async function requestAiCompletion({
     // while a non-streaming request queues.
     resetIdleTimeout();
 
+    // Streaming (SSE) response: consume delta chunks as they arrive. Every
+    // chunk resets the idle watchdog, so slow-but-healthy generations (long
+    // videos, thinking models) never trip the no-bytes abort. Non-SSE
+    // responses — provider error bodies (401/402/...), providers that
+    // ignore `stream`, or test shims — fall through to the bounded JSON
+    // read below and keep the existing error surfacing.
+    const responseContentType =
+      response.headers?.get?.("content-type") || "";
+    if (response.ok && responseContentType.includes("text/event-stream")) {
+      const streamedText = await readStreamedAiCompletion(
+        response,
+        resetIdleTimeout,
+      );
+      if (typeof streamedText !== "string" || !streamedText.trim()) {
+        const error = new Error("AI provider returned an empty response.");
+        error.code = "EMPTY_AI_RESPONSE";
+        throw error;
+      }
+      return { text: streamedText, settings };
+    }
+
     const data = await readBoundedAiResponse(response, resetIdleTimeout);
     if (!response.ok) {
       const errorData = data && typeof data === "object" ? data : {};
@@ -204,7 +235,7 @@ async function requestAiCompletion({
     }
     if (timeoutKind === "hard") {
       const timeoutError = new Error(
-        "AI provider request exceeded the 120-second limit. Please Retry.",
+        "AI provider request exceeded the 600-second limit. Please Retry.",
       );
       timeoutError.code = "AI_HARD_TIMEOUT";
       throw timeoutError;
@@ -260,6 +291,56 @@ async function readBoundedAiResponse(response, onActivity) {
   const data = await response.json();
   onActivity();
   return data;
+}
+
+// Reads an OpenAI-compatible SSE stream (chat.completions chunk deltas) and
+// returns the assembled assistant text. Every received chunk calls onActivity
+// (resetting the idle watchdog), including GLM's `reasoning_content` deltas —
+// thinking-model silence is exactly what used to trip the 50-second abort.
+// Reasoning text counts as activity but is NOT part of the final answer.
+// Byte-capped like the JSON path so a runaway stream cannot balloon memory.
+async function readStreamedAiCompletion(response, onActivity) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let responseBytes = 0;
+  let buffer = "";
+  let text = "";
+  const consumeLine = (line) => {
+    if (!line || line.startsWith(":")) return; // SSE comments / keep-alives
+    if (!line.startsWith("data:")) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") return;
+    try {
+      const chunk = JSON.parse(payload);
+      const piece = chunk.choices?.[0]?.delta?.content;
+      if (typeof piece === "string") text += piece;
+    } catch {
+      // A malformed/partial event — the next chunk completes it; skip.
+    }
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onActivity();
+    const byteLength = value?.byteLength ?? 0;
+    responseBytes += byteLength;
+    if (responseBytes > AI_PROVIDER_MAX_RESPONSE_BYTES) {
+      await reader.cancel?.().catch(() => {});
+      const error = new Error("AI provider response exceeded the 2 MiB limit.");
+      error.code = "AI_RESPONSE_TOO_LARGE";
+      throw error;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newlineIndex).replace(/\r$/, "");
+      buffer = buffer.slice(newlineIndex + 1);
+      consumeLine(line);
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer) consumeLine(buffer.replace(/\r$/, ""));
+  return text;
 }
 
 // ============================================================
@@ -399,6 +480,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.videoId,
       message.videoUrl,
       message.pageNumber,
+      message.videoTitle || "",
     )
       .then(sendResponse)
       .catch((err) =>
@@ -543,8 +625,83 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.action === "getWhisperQueue") {
+    // The sidepanel's queue panel pulls current state on open / tab switch.
+    (async () => {
+      try {
+        const queue = await loadWhisperQueue();
+        sendResponse({ queue, job: summarizeWhisperJob(activeWhisperJob) });
+      } catch (err) {
+        sendResponse({ queue: [], job: null, error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.action === "removeWhisperQueueEntry") {
+    // Drop one queued entry (the queue panel's ✕ button). Never touches
+    // the running job — only waiting entries can be removed.
+    (async () => {
+      try {
+        const queue = await loadWhisperQueue();
+        const rest = queue.filter(
+          (e) =>
+            !(
+              e.videoId === message.videoId &&
+              Number(e.pageNumber || 1) === Number(message.pageNumber || 1)
+            ),
+        );
+        await saveWhisperQueue(rest);
+        sendResponse({ success: true, removed: queue.length - rest.length });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
+    return true;
+  }
+
   if (message.action === "openOptions") {
-    chrome.runtime.openOptionsPage();
+    // Side-panel wizards pass an anchor (e.g. "aiProviderCard") so the
+    // options page opens scrolled to the right section. openOptionsPage()
+    // cannot carry a URL fragment, so manage the tab here: reuse an
+    // existing options tab (hash-only navigation keeps unsaved form
+    // state) or open a new focused tab. The synchronous sendResponse
+    // below still acks the side panel immediately.
+    const anchor =
+      typeof message.anchor === "string" &&
+      /^[A-Za-z][A-Za-z0-9_-]*$/.test(message.anchor)
+        ? message.anchor
+        : "";
+    const optionsUrl =
+      chrome.runtime.getURL("options.html") +
+      (anchor ? "#" + anchor : "");
+    chrome.tabs.query(
+      { url: chrome.runtime.getURL("options.html") + "*" },
+      (tabs) => {
+        const existing = Array.isArray(tabs) && tabs[0];
+        if (existing) {
+          chrome.tabs.update(
+            existing.id,
+            { active: true, url: optionsUrl },
+            () => {
+              if (existing.windowId != null) {
+                try {
+                  chrome.windows.update(
+                    existing.windowId,
+                    { focused: true },
+                    () => void chrome.runtime.lastError,
+                  );
+                } catch (e) {
+                  // focusing the owner window is best-effort
+                }
+              }
+            },
+          );
+        } else {
+          chrome.tabs.create({ url: optionsUrl, active: true });
+        }
+      },
+    );
     sendResponse({ success: true });
     return false;
   }
@@ -732,6 +889,16 @@ const WHISPER_STAGES = Object.freeze({
 // builds clamp to 1min, which only slows recovery, never breaks it.
 const WHISPER_KEEPALIVE_ALARM = "bilidown-whisper-keepalive";
 
+// Transcribe queue (2026-08-29): whisper stays strictly single-job (parallel
+// int8 CPU inference starves both pipelines — see the re-entry guard in
+// handleTriggerWhisperTranscription). Instead of REFUSING a trigger for a
+// different video while one runs, we enqueue it and auto-start the next
+// entry when the current job reaches a terminal state. Entries live in
+// storage.session: survives SW evictions, dies with the browser session —
+// queued work is not worth a durable disk write.
+const WHISPER_QUEUE_KEY = "whisperQueue";
+const WHISPER_QUEUE_MAX = 10;
+
 function ensureWhisperKeepalive() {
   try {
     chrome.alarms.create(WHISPER_KEEPALIVE_ALARM, {
@@ -782,6 +949,11 @@ async function whisperWatchdogTick() {
   }
   if (!job || !job.videoId) {
     clearWhisperKeepalive();
+    // Queue (2026-08-29): slot is free — if the SW died between a terminal
+    // write and the pump, queued entries are still waiting.
+    pumpWhisperQueue().catch((e) =>
+      debugLog("[dk-bilidown BG] watchdog queue pump failed:", e),
+    );
     return;
   }
   const terminal =
@@ -790,6 +962,9 @@ async function whisperWatchdogTick() {
   if (terminal) {
     // Leave terminal records alone — the sidepanel acks them on view.
     clearWhisperKeepalive();
+    pumpWhisperQueue().catch((e) =>
+      debugLog("[dk-bilidown BG] watchdog terminal queue pump failed:", e),
+    );
     return;
   }
   if (whisperPipelineActive) {
@@ -986,6 +1161,12 @@ function setWhisperJob(job) {
     // Transcription just finished (live pipeline or watchdog-recovered)
     // — tell the user even if the sidepanel is closed.
     notifyWhisperDone(job);
+    // Queue (2026-08-29): a terminal write frees the single whisper slot —
+    // start the next queued transcription, if any. Fire-and-forget: the
+    // terminal write itself must not block on the next job's startup.
+    pumpWhisperQueue().catch((e) =>
+      debugLog("[dk-bilidown BG] queue pump after terminal failed:", e),
+    );
   } else {
     ensureWhisperKeepalive();
   }
@@ -1028,6 +1209,163 @@ async function loadWhisperJob() {
   const stored = await chrome.storage.session.get(WHISPER_JOB_KEY);
   return stored[WHISPER_JOB_KEY] || null;
 }
+
+// ============================================================
+// WHISPER TRANSCRIBE QUEUE (2026-08-29)
+// ============================================================
+// One running job + a FIFO of waiting entries. The sidepanel's queue panel
+// reads state via getWhisperQueue / whisperQueueUpdate broadcasts.
+
+async function loadWhisperQueue() {
+  try {
+    const stored = await chrome.storage.session.get(WHISPER_QUEUE_KEY);
+    return Array.isArray(stored[WHISPER_QUEUE_KEY]) ? stored[WHISPER_QUEUE_KEY] : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Non-terminal summary of the current job for UI display. Terminal jobs
+ * return null so the queue panel can hide the "进行中" row (the full record
+ * stays in storage until the sidepanel acks it).
+ */
+function summarizeWhisperJob(job) {
+  if (!job || !job.videoId) return null;
+  if (job.stage === WHISPER_STAGES.SUCCEEDED || job.stage === WHISPER_STAGES.FAILED) {
+    return null;
+  }
+  return {
+    videoId: job.videoId,
+    pageNumber: Number(job.pageNumber || 1),
+    title: (job.recoveryMeta && job.recoveryMeta.title) || job.queuedTitle || job.videoId,
+    stage: job.stage,
+    stageTitle: job.title || "",
+    stageSubtitle: job.subtitle || "",
+    startedAt: job.startedAt || null,
+  };
+}
+
+async function broadcastWhisperQueue() {
+  let queue = [];
+  try {
+    const stored = await chrome.storage.session.get(WHISPER_QUEUE_KEY);
+    if (Array.isArray(stored[WHISPER_QUEUE_KEY])) queue = stored[WHISPER_QUEUE_KEY];
+  } catch {}
+  chrome.runtime
+    .sendMessage({
+      action: "whisperQueueUpdate",
+      queue,
+      job: summarizeWhisperJob(activeWhisperJob),
+    })
+    .catch(() => {});
+}
+
+async function saveWhisperQueue(queue) {
+  try {
+    await chrome.storage.session.set({ [WHISPER_QUEUE_KEY]: queue });
+  } catch {}
+  broadcastWhisperQueue().catch(() => {});
+}
+
+/**
+ * Enqueue a transcription request that arrived while another job is live.
+ * Dedupes by videoId+page; caps the queue; returns the position for UI copy.
+ */
+async function enqueueWhisperEntry(videoId, videoUrl, pageNumber, title) {
+  const queue = await loadWhisperQueue();
+  const dupIndex = queue.findIndex(
+    (e) => e.videoId === videoId && Number(e.pageNumber || 1) === pageNumber,
+  );
+  if (dupIndex >= 0) {
+    return { success: true, alreadyQueued: true, position: dupIndex + 1 };
+  }
+  if (queue.length >= WHISPER_QUEUE_MAX) {
+    return {
+      success: false,
+      error: `转录队列已满（最多 ${WHISPER_QUEUE_MAX} 个）。等前面的任务完成后再加。`,
+    };
+  }
+  queue.push({
+    videoId,
+    videoUrl: videoUrl || "",
+    pageNumber,
+    title: title || "",
+    queuedAt: Date.now(),
+  });
+  await saveWhisperQueue(queue);
+  debugLog("[dk-bilidown BG] queued transcription for", videoId, "position", queue.length);
+  return { success: true, queued: true, position: queue.length };
+}
+
+// Re-entrancy guard: setWhisperJob's terminal branch, the SW cold-start
+// arming and watchdog ticks can all try to pump in quick succession.
+let whisperQueuePumping = false;
+
+/**
+ * Start the next queued transcription if the whisper slot is free (no
+ * fresh non-terminal job). Called from:
+ *   - setWhisperJob's terminal branch (normal completion path)
+ *   - top-level SW cold start (SW died between terminal write and pump)
+ *   - watchdog ticks (recovery decided the job is dead)
+ */
+async function pumpWhisperQueue() {
+  if (whisperQueuePumping) return;
+  whisperQueuePumping = true;
+  try {
+    for (let guard = 0; guard <= WHISPER_QUEUE_MAX + 1; guard++) {
+      let live = false;
+      try {
+        const job = await loadWhisperJob();
+        const fresh =
+          job &&
+          job.videoId &&
+          job.stage !== WHISPER_STAGES.SUCCEEDED &&
+          job.stage !== WHISPER_STAGES.FAILED &&
+          job.startedAt &&
+          Date.now() - job.startedAt < 15 * 60 * 1000;
+        live = Boolean(fresh);
+      } catch {}
+      if (live) return; // its terminal write re-arms the pump
+      const queue = await loadWhisperQueue();
+      if (!queue.length) return;
+      const [next, ...rest] = queue;
+      await saveWhisperQueue(rest);
+      debugLog("[dk-bilidown BG] queue pump: starting next entry", next.videoId);
+      let res = null;
+      try {
+        res = await handleTriggerWhisperTranscription(
+          next.videoId,
+          next.videoUrl,
+          next.pageNumber,
+          next.title,
+        );
+      } catch (e) {
+        res = { success: false, error: e?.message || String(e) };
+      }
+      if (res && (res.started || res.alreadyRunning || res.queued || res.alreadyQueued)) {
+        return; // slot now occupied — its terminal write re-arms the pump
+      }
+      debugLog(
+        "[dk-bilidown BG] queue pump: entry failed to start:",
+        res && res.error,
+      );
+      // Entry couldn't start (e.g. whisper no longer enabled) — drop it
+      // and try the next one.
+    }
+  } finally {
+    whisperQueuePumping = false;
+  }
+}
+
+// Cold-start arming: if the SW died after a terminal write but before the
+// pump could start the next entry, the queue sits orphaned (the keepalive
+// alarm is cleared on terminal states, so nothing else would wake us).
+// Top-level code runs on EVERY SW wake-up; the pump itself is a cheap no-op
+// when the queue is empty or a job is live.
+pumpWhisperQueue().catch((e) =>
+  debugLog("[dk-bilidown BG] startup queue pump failed:", e),
+);
 
 function sendWhisperProgress(stage, title, subtitle, extras = {}) {
   // Update persisted job + broadcast to the sidepanel. Both are
@@ -2007,6 +2345,7 @@ async function handleTriggerWhisperTranscription(
   videoId,
   videoUrl = "",
   requestedPage = 1,
+  videoTitle = "",
 ) {
   const settings = await getSettings();
   if (settings.asrProvider !== "whisper") {
@@ -2040,14 +2379,11 @@ async function handleTriggerWhisperTranscription(
         debugLog("[dk-bilidown BG] trigger blocked: job already running for", videoId);
         return { success: true, alreadyRunning: true };
       }
-      const busyTitle =
-        (existing.recoveryMeta && existing.recoveryMeta.title) ||
-        existing.videoId;
-      debugLog("[dk-bilidown BG] trigger blocked: another job running for", existing.videoId);
-      return {
-        success: false,
-        error: `已有另一个视频的转录正在进行中（${busyTitle}）。Whisper 同一时间只能跑一个任务，请等它完成后再试——期间可以随意切换页面，转录在后台不受影响。`,
-      };
+      debugLog("[dk-bilidown BG] trigger queued behind running job for", existing.videoId, "→", videoId);
+      // Queue (2026-08-29): different video while busy → enqueue instead of
+      // refusing. Whisper stays single-job; the pump starts this entry when
+      // the current one reaches a terminal state.
+      return await enqueueWhisperEntry(videoId, videoUrl, requestedPageNumber, videoTitle);
     }
   } catch {
     // storage.session unavailable — fall through and start normally.
@@ -2067,6 +2403,9 @@ async function handleTriggerWhisperTranscription(
     videoId,
     videoUrl: videoUrl || "",
     pageNumber: requestedPageNumber,
+    // Queue panel display name until recoveryMeta.title lands (the view
+    // fetch below is what fills the real title in).
+    queuedTitle: videoTitle || "",
     stage: WHISPER_STAGES.STARTED,
     title: "启动 Whisper 转录",
     subtitle: "正在连接 B 站接口…",
