@@ -2,6 +2,7 @@
 REM bilidown whisper server launcher
 REM Double-click this file to start the local Whisper server.
 REM Keep the window open. The server listens on http://127.0.0.1:7860.
+REM Missing dependencies are REPORTED, never auto-installed (2026-08-30).
 
 REM Resolve the script's own directory so SERVER_SCRIPT is correct no
 REM matter where the repo was cloned (matches the .vbs launcher behavior).
@@ -60,29 +61,40 @@ if not defined PYTHON_EXE (
   exit /b 1
 )
 
-REM Pre-flight (2026-08-29): if faster_whisper / zhconv are missing,
-REM pip-install them automatically so a fresh clone just works - no
-REM separate install step, no PowerShell window, no cd needed.
-"%PYTHON_EXE%" -c "import faster_whisper, zhconv" >nul 2>&1
-if errorlevel 1 (
-  echo [SETUP] First run: installing Python dependencies...
-  echo [SETUP]   pip install faster-whisper zhconv
+REM Pre-flight (2026-08-30 transparency rework): CHECK ONLY.
+REM bilidown never silently pip-installs into your Python. If a dependency
+REM is missing we print exactly what is missing and the exact command to
+REM fix it, then still start the server in LIMITED mode (/health reports
+REM ok:false + what is missing; /transcribe answers 503). The extension
+REM options page ("check system" button) reads the same info from /health.
+set "MISSING_FW=0"
+set "MISSING_ZHCONV=0"
+"%PYTHON_EXE%" -c "import faster_whisper" >nul 2>&1
+if errorlevel 1 set "MISSING_FW=1"
+"%PYTHON_EXE%" -c "import zhconv" >nul 2>&1
+if errorlevel 1 set "MISSING_ZHCONV=1"
+
+if "%MISSING_FW%"=="1" (
   echo.
-  "%PYTHON_EXE%" -m pip install --upgrade faster-whisper zhconv
-  if errorlevel 1 (
+  echo [MISSING] faster-whisper is NOT installed in this Python:
+  echo   %PYTHON_EXE%
+  echo   Install it yourself with:
+  echo   "%PYTHON_EXE%" -m pip install faster-whisper zhconv
+  echo   Then close this window and double-click this file again.
+)
+if "%MISSING_ZHCONV%"=="1" (
+  if "%MISSING_FW%"=="0" (
     echo.
-    echo [ERROR] pip install failed. Check the messages above, then re-run.
-    pause
-    exit /b 1
+    echo [OPTIONAL] zhconv is not installed in this Python.
+    echo   Traditional Chinese in transcripts will NOT be normalized.
+    echo   Optional fix:
+    echo   "%PYTHON_EXE%" -m pip install zhconv
   )
-  "%PYTHON_EXE%" -c "import faster_whisper, zhconv" >nul 2>&1
-  if errorlevel 1 (
-    echo [ERROR] Dependencies installed but still not importable.
-    echo         Run install_whisper_deps.ps1 for a detailed report.
-    pause
-    exit /b 1
-  )
-  echo [SETUP] Dependencies ready.
+)
+if "%MISSING_FW%"=="1" (
+  echo.
+  echo Starting in LIMITED mode - /health will report what is missing.
+  echo Nothing is installed automatically; the choice is yours.
   echo.
 )
 
@@ -104,6 +116,6 @@ REM no PYTHONPATH) — same goal, slightly stronger.
 if errorlevel 1 (
   echo.
   echo [ERROR] Server exited with code %errorlevel%
-  echo Hint: pip install faster-whisper zhconv
+  echo Hint: "%PYTHON_EXE%" -m pip install faster-whisper zhconv
   pause
 )

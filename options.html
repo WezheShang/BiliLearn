@@ -43,26 +43,26 @@
       </header>
 
       <form id="settingsForm">
-        <p id="dirtyBanner" class="dirty-banner is-hidden" role="alert">
+        <p id="dirtyBanner" class="dirty-banner is-hidden" role="alert" data-i18n="dirtyBanner">
           请点击保存设置，否则您的修改将不被保存。
         </p>
 
         <section class="card" id="asrSection">
-          <h2>语音识别</h2>
-          <p class="help">
+          <h2 data-i18n="asrSectionTitle">语音识别</h2>
+          <p class="help" data-i18n="asrSectionHelp">
             B 站没有原生字幕时，bilidown 会用下面选择的引擎给视频生成带时间戳的字幕。
           </p>
 
-          <select id="asrProvider" name="asrProvider" aria-label="语音识别服务">
-            <option value="none">不使用（仅用 B 站原生字幕）</option>
+          <select id="asrProvider" name="asrProvider" aria-label="语音识别服务" data-i18n-aria-label="asrSelectAriaLabel">
+            <option value="none" data-i18n="asrOptionNone">不使用（仅用 B 站原生字幕）</option>
             <!-- HIDE: aliyun bailian (Fun-ASR) — feature not debugged yet, re-enable later
             <option value="bailian">阿里云百炼（Fun-ASR）</option>
             -->
-            <option value="whisper">本地 Whisper</option>
+            <option value="whisper" data-i18n="asrOptionWhisper">本地 Whisper</option>
           </select>
 
           <div data-asr-field="bailian" class="is-hidden">
-            <label for="asrApiKey">百炼 API Key</label>
+            <label for="asrApiKey" data-i18n="asrBailianKeyLabel">百炼 API Key</label>
             <input
               id="asrApiKey"
               name="asrApiKey"
@@ -72,12 +72,16 @@
               placeholder="sk-..."
             />
             <p class="help">
-              bilidown 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。
+              <span data-i18n="asrBailianHelp"
+                >bilidown 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。</span
+              >
               <a
                 href="https://bailian.console.aliyun.com/?apiKey=1"
                 target="_blank"
                 rel="noreferrer"
-                >获取百炼 API Key</a>。
+                data-i18n="asrBailianLink"
+                >获取百炼 API Key</a
+              ><span data-i18n="asrBailianHelpSuffix">。</span>
             </p>
           </div>
 
@@ -86,6 +90,90 @@
               启动 <code>start_whisper_server.bat</code> 后，bilidown 会下载音轨
               交给本地 Whisper 转写，再调用 AI 校正专有名词。
             </p>
+
+            <!-- 2026-08-30 transparency rework: the setup flow is fully
+                 visible and read-only until the user acts. No silent
+                 installs: steps are listed, the check button only READS
+                 /health, and the exact install command (targeting the
+                 detected python) is shown only after a check reports
+                 something missing. The user decides whether to run it. -->
+            <div class="setup-panel" id="whisperSetupPanel">
+              <p class="setup-panel-title" data-i18n="whisperSetupTitle">
+                本地环境准备
+              </p>
+              <ol class="setup-steps">
+                <li data-i18n="whisperSetupStep1">
+                  本机装有 Python 3.10+（bilidown 不自带 Python，也不会替你安装）
+                </li>
+                <li data-i18n="whisperSetupStep2">
+                  安装 Whisper 依赖到你的 Python——检查后这里会给出针对本机的确切命令，装不装由你决定
+                </li>
+                <li>
+                  <!-- 2026-08-31: the setup-panel link is the ONLY affordance
+                       that works before the server has ever run (a web page
+                       may not execute a local .bat, and the sandbox cannot
+                       see the on-disk install path). The deep link opens this
+                       extension's entry on chrome://extensions, where Chrome
+                       shows the folder path. -->
+                  <span data-i18n="whisperSetupStep3"
+                    >双击扩展文件夹里的 <code>start_whisper_server.bat</code
+                    >，保持窗口开着</span
+                  >
+                  <a
+                    href="#"
+                    id="extFolderLink"
+                    data-i18n="whisperExtFolderLink"
+                    data-i18n-title="whisperExtFolderTitle"
+                    >打开扩展管理页，查看文件夹路径</a
+                  >
+                </li>
+                <li data-i18n="whisperSetupStep4">
+                  点「检查系统」，全部 ✓ 即就绪
+                </li>
+              </ol>
+              <div class="diagnostics-actions">
+                <button
+                  id="whisperCheckBtn"
+                  class="secondary"
+                  type="button"
+                  data-i18n="whisperCheckBtn"
+                >
+                  检查系统
+                </button>
+                <button
+                  id="whisperCopyCmdBtn"
+                  class="secondary"
+                  type="button"
+                  hidden
+                  data-i18n="whisperCopyCmdBtn"
+                >
+                  复制安装命令
+                </button>
+                <button
+                  type="button"
+                  id="installDepsBtn"
+                  class="secondary"
+                  hidden
+                  title="下载一个自包含安装脚本：找 Python → pip 安装 faster-whisper + zhconv → 验证导入。装什么、装到哪个 Python 全写在脚本里，运行前可先查看内容"
+                  data-i18n-title="whisperSetupDownloadTitle"
+                  data-i18n="whisperSetupDownloadBtn"
+                >
+                  下载安装脚本
+                </button>
+                <span
+                  id="whisperTestStatus"
+                  role="status"
+                  aria-live="polite"
+                ></span>
+              </div>
+              <ul id="whisperCheckResults" class="diagnostics-list" hidden></ul>
+              <div
+                id="whisperReadyBar"
+                class="ready-bar"
+                role="status"
+                hidden
+              ></div>
+            </div>
 
             <label data-i18n="whisperUrlLabel">Whisper server URL</label>
             <!-- 2026-08-29: fixed address (start_whisper_server.bat binds
@@ -96,12 +184,12 @@
               >Whisper 模型</label
             >
             <select id="whisperModel" name="whisperModel">
-              <option value="tiny">tiny（~75 MB，极快）</option>
-              <option value="base">base（~150 MB，默认）</option>
-              <option value="small">small（~500 MB，较好）</option>
-              <option value="medium">medium（~1.5 GB，精确）</option>
-              <option value="large-v3">large-v3（~3 GB，最精确）</option>
-              <option value="turbo">turbo（~1.5 GB，快速 large）</option>
+              <option value="tiny" data-i18n="whisperModelOptionTiny">tiny（~75 MB，极快）</option>
+              <option value="base" data-i18n="whisperModelOptionBase">base（~150 MB，默认）</option>
+              <option value="small" data-i18n="whisperModelOptionSmall">small（~500 MB，较好）</option>
+              <option value="medium" data-i18n="whisperModelOptionMedium">medium（~1.5 GB，精确）</option>
+              <option value="large-v3" data-i18n="whisperModelOptionLargeV3">large-v3（~3 GB，最精确）</option>
+              <option value="turbo" data-i18n="whisperModelOptionTurbo">turbo（~1.5 GB，快速 large）</option>
             </select>
 
             <label for="whisperLanguage" data-i18n="whisperLanguageLabel"
@@ -130,23 +218,6 @@
             <p class="help" data-i18n="subtitlesDirHelp">
               Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。
               下次再打开同一视频会直接读缓存，不再跑 Whisper。
-            </p>
-
-            <p class="help" style="margin-top: 10px">
-              <button
-                id="whisperTestBtn"
-                class="secondary"
-                type="button"
-                data-i18n="whisperTestBtn"
-              >
-                测试连接
-              </button>
-              <span
-                id="whisperTestStatus"
-                role="status"
-                aria-live="polite"
-                style="margin-left: 10px"
-              ></span>
             </p>
           </div>
         </section>
@@ -383,21 +454,13 @@
       </section>
 
       <section class="card">
-        <h2>诊断</h2>
-        <p class="help">
+        <h2 data-i18n="diagnosticsTitle">诊断</h2>
+        <p class="help" data-i18n="diagnosticsHelp">
           一键检查关键依赖是否就位。不用反复看 README 找命令。
         </p>
         <div class="diagnostics-actions">
-          <button type="button" id="runDiagnosticsBtn" class="secondary">
+          <button type="button" id="runDiagnosticsBtn" class="secondary" data-i18n="diagnosticsRunBtn">
             运行诊断
-          </button>
-          <button
-            type="button"
-            id="installDepsBtn"
-            class="secondary"
-            title="Chrome 扩展不能直接起进程；点这里下载自包含安装脚本，下载完自动打开，Windows 确认框里点“运行”即可。不用 PowerShell，不限目录"
-          >
-            一键装 Whisper 依赖（下载脚本）
           </button>
           <span id="diagnosticsStatus" role="status" aria-live="polite"></span>
         </div>

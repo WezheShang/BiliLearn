@@ -7,10 +7,15 @@ POSTs the file path here; we return timestamped segments.
 
 Endpoints
 ---------
-GET  /health          -> {ok, model, device, version, status}
+GET  /health          -> {ok, version, python:{executable,version},
+                          deps:{faster_whisper,zhconv}, missing?, install_hint?,
+                          current_model, device, compute_type, available_models}
+                         ok:false = limited mode (faster-whisper missing);
+                         nothing is ever auto-installed.
 GET  /models          -> list of whisper model sizes available
 POST /transcribe       body: {audio_path, model?, language?, beam_size?}
                         -> {language, duration, segments:[{start,end,text}]}
+                        503 + install command when deps are missing.
 
 Start manually
 --------------
@@ -37,16 +42,45 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Transparent dependency handling (2026-08-30 rework).
+#
+# bilidown never silently pip-installs into the user's Python. If
+# faster-whisper is missing we still START this server in "limited mode":
+#   /health     -> ok:false + missing list + the exact python executable
+#   /transcribe -> 503 with the exact install command
+# so the extension options page (检查系统 button) can show the user
+# precisely what is absent and let them decide how to install it.
+# ---------------------------------------------------------------------------
+FW_VERSION = None
+WhisperModel = None
+FW_IMPORT_ERROR = None
 try:
     from faster_whisper import WhisperModel, __version__ as FW_VERSION
 except ImportError as exc:
-    sys.stderr.write(
-        "faster-whisper is not installed.\n"
-        r"Install it with:  C:\Users\username\miniconda3\python.exe -m pip install faster-whisper"
-        "\n"
-        f"Original error: {exc}\n"
-    )
-    raise
+    FW_IMPORT_ERROR = str(exc)
+
+
+def _zhconv_version():
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("zhconv")
+    except Exception:
+        try:
+            import zhconv as _zc
+            return getattr(_zc, "__version__", "installed")
+        except Exception:
+            return None
+
+
+ZHCONV_VERSION = _zhconv_version()
+
+
+def _missing_deps():
+    missing = []
+    if FW_VERSION is None:
+        missing.append("faster-whisper")
+    return missing
 
 HOST = "127.0.0.1"
 PORT = 7860
@@ -165,8 +199,14 @@ def _resolve_device() -> tuple[str, str]:
     return "cpu", "int8"
 
 
-def _get_model(name: str) -> WhisperModel:
+def _get_model(name: str):
     global _CURRENT_MODEL, _CURRENT_MODEL_NAME, _CURRENT_DEVICE, _CURRENT_COMPUTE
+    if WhisperModel is None:
+        raise RuntimeError(
+            "faster-whisper is not installed "
+            f"({FW_IMPORT_ERROR or 'import failed'}); run: "
+            f'{sys.executable} -m pip install faster-whisper'
+        )
     with _MODEL_LOCK:
         if _CURRENT_MODEL is not None and _CURRENT_MODEL_NAME == name:
             return _CURRENT_MODEL
@@ -248,8 +288,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         if self.path == "/health":
+            missing = _missing_deps()
             self._send_json(HTTPStatus.OK, {
-                "ok": True,
+                "ok": not missing,
+                # Limited-mode details (ok:false): what is missing and which
+                # python the server runs under, so the options page can show
+                # an install command targeting exactly this interpreter.
+                "reason": "missing_dependencies" if missing else None,
+                "missing": missing,
+                "install_hint": (
+                    sys.executable + " -m pip install " + " ".join(missing + ["zhconv"])
+                    if missing else None
+                ),
+                "python": {
+                    "executable": sys.executable,
+                    "version": sys.version.split()[0],
+                },
+                # Absolute path of this script — the options page derives the
+                # full path of the sibling start_whisper_server.bat from it,
+                # so its copy can point users at the exact file to double-click.
+                "server_script": str(Path(__file__).resolve()),
+                "deps": {
+                    "faster_whisper": FW_VERSION,
+                    "zhconv": ZHCONV_VERSION,
+                },
                 "version": FW_VERSION,
                 "current_model": _CURRENT_MODEL_NAME,
                 "device": _CURRENT_DEVICE,
@@ -317,6 +379,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path != "/transcribe":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found", "path": self.path})
+            return
+        # Limited mode: no silent installs — tell the caller exactly what is
+        # missing and how to install it, with an actionable status code.
+        if FW_VERSION is None:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "error": (
+                        "faster-whisper is not installed in this Python "
+                        f"({sys.executable}). Install it with: "
+                        f'"{sys.executable}" -m pip install faster-whisper zhconv'
+                    ),
+                    "missing": _missing_deps(),
+                    "python": sys.executable,
+                },
+            )
             return
         try:
             content_type = (self.headers.get("Content-Type") or "").lower()
@@ -968,9 +1046,23 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     addr = (HOST, PORT)
+    if FW_VERSION is None:
+        # Limited mode banner — everything the user needs to fix it, printed
+        # right in the console window they are looking at.
+        LOG.warning("=" * 62)
+        LOG.warning("faster-whisper is NOT importable in this Python.")
+        LOG.warning("  python : %s", sys.executable)
+        LOG.warning("  reason : %s", FW_IMPORT_ERROR or "import failed")
+        LOG.warning("Starting in LIMITED mode anyway:")
+        LOG.warning("  /health tells the extension exactly what is missing;")
+        LOG.warning("  /transcribe returns 503 until the dep is installed.")
+        LOG.warning("Install it yourself (nothing is auto-installed):")
+        LOG.warning('  "%s" -m pip install faster-whisper zhconv', sys.executable)
+        LOG.warning("=" * 62)
     httpd = ThreadingHTTPServer(addr, Handler)
     LOG.info("bilidown whisper server listening on http://%s:%d", HOST, PORT)
-    LOG.info("using faster-whisper %s", FW_VERSION)
+    if FW_VERSION is not None:
+        LOG.info("using faster-whisper %s", FW_VERSION)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

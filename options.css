@@ -506,6 +506,24 @@ footer {
   background: #e02525;
 }
 
+/* Optional-enhancement row (2026-08-30): missing optional dep — amber "!"
+   instead of red ✗, plus a 「可选」 chip so it never reads as a failure. */
+.diagnostics-item.warn .diagnostics-mark {
+  background: #d98a00;
+}
+
+.diagnostics-optional-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  vertical-align: 1px;
+}
+
 .diagnostics-item:not(.ok):not(.fail) .diagnostics-mark {
   background: #999;
 }
@@ -519,6 +537,44 @@ footer {
 .diagnostics-detail {
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+/* ------------------------------------------------------------
+   Whisper setup panel (2026-08-30 transparency rework): visible
+   steps + read-only check button. Reuses .diagnostics-list rows for
+   the check results and .diagnostics-actions for the button row.
+   ------------------------------------------------------------ */
+.setup-panel {
+  margin: 12px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated, rgba(127, 127, 127, 0.06));
+}
+
+.setup-panel-title {
+  margin: 0 0 8px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.setup-steps {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ready-bar {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(27, 169, 84, 0.12);
+  border: 1px solid rgba(27, 169, 84, 0.4);
+  color: var(--text, inherit);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 

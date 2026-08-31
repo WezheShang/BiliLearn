@@ -65,6 +65,12 @@
   （glm-4.6 先 reasoning 再写）+ 长视频字幕的静默期轻易超过 50 秒，被自己的看门狗判死
   （用户报告：「inactive for 50 seconds」）。SSE 分支按 `content-type: text/event-stream`
   判定；非 SSE 响应（错误体 / 忽略 stream 的 provider / 测试桩）走原有 bounded JSON 路径。
+- **安装必须透明，禁止默默装**（2026-08-30）：「github 上下下来的东西直接默认安装不靠谱」
+  （用户原话）。依赖缺失时：server 以受限模式启动（`/health` 如实上报缺什么 + python 路径，
+  `/transcribe` 返回 503 + 针对本机的确切安装命令）；`start_whisper_server.bat` 只检测并
+  打印缺什么和命令，**绝不执行 pip**；options 页「检查系统」按钮是只读的——安装命令只在
+  检查发现缺失后才出现，「复制命令」「下载安装脚本」按钮平时隐藏，是否执行由用户拍板。
+  测试门：`test_options_page_init.js` F5 断言 bat 内没有任何执行 pip 的行（仅 echo）。
   硬上限随之放宽到 600 秒——它现在只兜真正失控的请求，不再惩罚正常的慢生成。
 - **空态文案说清「什么时候会有内容」**：「生成 AI 总结后，章节会显示在这里」，而不是干巴巴
   的「暂无数据」。

@@ -130,9 +130,13 @@ var YTD_SETTINGS = (() => {
     aiModel: PROVIDER_PRESETS[DEFAULT_PROVIDER].model,
     // Which speech-to-text engine to fall back on when B-station has no
     // usable native subtitles. "none" disables ASR entirely, "bailian"
-    // uses Alibaba Bailian Fun-ASR (cloud, requires a key), "whisper"
-    // uses the local faster-whisper server (whisper_server.py).
-    asrProvider: "bailian",
+    // uses Alibaba Bailian Fun-ASR (cloud, requires a key; its <option>
+    // is currently hidden in options.html), "whisper" uses the local
+    // faster-whisper server (whisper_server.py). The default MUST be an
+    // engine the dropdown actually offers: "bailian" left a fresh
+    // install with a blank select while the hidden bailian block still
+    // rendered (user report 2026-08-31, new machine first run).
+    asrProvider: "whisper",
     asrApiKey: "",
     supadataApiKey: "",
     // Local Whisper configuration (only used when asrProvider === "whisper").
@@ -141,8 +145,11 @@ var YTD_SETTINGS = (() => {
     whisperLanguage: "",
     // Where Whisper outputs and AI-corrected transcripts are cached on disk
     // so the user does not re-transcribe the same video on a later visit.
-    // The path is user-configurable; we never write outside of it.
-    subtitlesDir: "C:/Users/username/bilibilisubs",
+    // Intentionally NO default path (2026-08-31): a hardcoded fallback would
+    // leak this build machine's layout onto other installs. Fresh installs
+    // start empty; the options page blocks saving until the user picks a
+    // directory, and background consumers treat "" as "cache disabled".
+    subtitlesDir: "",
     // Where exported notes / summaries / reports are written. Defaults to
     // the system Downloads folder; the user can change it to any writable
     // directory (e.g. a project folder or the subtitles cache). Supports
