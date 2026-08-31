@@ -511,10 +511,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "summaryTranscript") {
     // Convert the full transcript into a complete structured note.
+    // videoId/videoUrl ride along so a slow-run completion notification
+    // (notifySummaryDoneIfSlow) can click through to the video.
     handleSummarizeTranscript(
       message.transcriptText,
       message.videoTitle,
       message.channelName,
+      { videoId: message.videoId, videoUrl: message.videoUrl },
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
@@ -1082,8 +1085,10 @@ async function recoverOrphanedWhisperJob(job) {
 // transcript right away.
 
 const WHISPER_DONE_NOTIF_PREFIX = "whisper-done-";
+const SUMMARY_DONE_NOTIF_PREFIX = "summary-done-";
 let lastNotifiedWhisperKey = null;
-const whisperDoneLinks = new Map(); // notifId -> { videoId, videoUrl }
+// Shared by both prefixes above: notifId -> { videoId, videoUrl }.
+const notifVideoLinks = new Map();
 
 function notifyWhisperDone(job) {
   if (!job || job.stage !== WHISPER_STAGES.SUCCEEDED) return;
@@ -1095,13 +1100,13 @@ function notifyWhisperDone(job) {
   const channel = meta.channel ? ` · UP: ${meta.channel}` : "";
   const message = `《${videoTitle}》字幕已就绪${channel}，打开视频即可查看字幕与总结。`;
   const notifId = `${WHISPER_DONE_NOTIF_PREFIX}${job.videoId || "unknown"}-${key}`;
-  whisperDoneLinks.set(notifId, {
+  notifVideoLinks.set(notifId, {
     videoId: job.videoId || "",
     videoUrl: job.videoUrl || "",
   });
-  if (whisperDoneLinks.size > 10) {
+  if (notifVideoLinks.size > 10) {
     // Bound the map — older notifications are long gone from the tray.
-    whisperDoneLinks.delete(whisperDoneLinks.keys().next().value);
+    notifVideoLinks.delete(notifVideoLinks.keys().next().value);
   }
   try {
     chrome.notifications.create(notifId, {
@@ -1119,10 +1124,61 @@ function notifyWhisperDone(job) {
   }
 }
 
+// AI summaries usually come back in seconds while the user is still
+// watching the panel. But a long transcript (or a slow provider) can push
+// the request past a minute — by then the user has often wandered off to
+// another tab. Same deal as transcription-done above, same card style:
+// only SLOW runs (>= SUMMARY_SLOW_NOTIFY_MS) get a completion
+// notification; fast ones stay silent. Fired from the success path of
+// handleSummarizeTranscript. Clicking focuses an already-open tab on the
+// video (or opens one) so the cached summary renders right away.
+const SUMMARY_SLOW_NOTIFY_MS = 60 * 1000;
+
+function formatDurationZh(ms) {
+  const totalSec = Math.round(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return min > 0 ? `${min} 分 ${String(sec).padStart(2, "0")} 秒` : `${sec} 秒`;
+}
+
+function notifySummaryDoneIfSlow(info) {
+  if (!info || !(info.elapsedMs >= SUMMARY_SLOW_NOTIFY_MS)) return;
+  const videoTitle = info.videoTitle || info.videoId || "视频";
+  const channel = info.channelName ? ` · UP: ${info.channelName}` : "";
+  const message =
+    `《${videoTitle}》AI 总结已生成（耗时 ${formatDurationZh(info.elapsedMs)}）${channel}，打开视频即可查看。`;
+  const notifId =
+    `${SUMMARY_DONE_NOTIF_PREFIX}${info.videoId || "unknown"}-${info.elapsedMs}-${Date.now()}`;
+  notifVideoLinks.set(notifId, {
+    videoId: info.videoId || "",
+    videoUrl: info.videoUrl || "",
+  });
+  if (notifVideoLinks.size > 10) {
+    notifVideoLinks.delete(notifVideoLinks.keys().next().value);
+  }
+  try {
+    chrome.notifications.create(notifId, {
+      type: "basic",
+      iconUrl: "icons/icon128.png",
+      title: "bilidown · AI 总结完成",
+      message,
+      priority: 2,
+    }, () => {
+      void chrome.runtime.lastError;
+    });
+  } catch (e) {
+    debugLog("[dk-bilidown BG] summary-done notification failed:", e);
+  }
+}
+
 chrome.notifications.onClicked.addListener((notifId) => {
-  if (!notifId || !notifId.startsWith(WHISPER_DONE_NOTIF_PREFIX)) return;
-  const link = whisperDoneLinks.get(notifId);
-  whisperDoneLinks.delete(notifId);
+  if (
+    !notifId ||
+    (!notifId.startsWith(WHISPER_DONE_NOTIF_PREFIX) &&
+      !notifId.startsWith(SUMMARY_DONE_NOTIF_PREFIX))
+  ) return;
+  const link = notifVideoLinks.get(notifId);
+  notifVideoLinks.delete(notifId);
   if (!link) return; // SW was evicted since — nothing to open
   (async () => {
     try {
@@ -2703,11 +2759,28 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
       ? new Date(view.data.pubdate * 1000).toISOString().split("T")[0]
       : "";
 
+    // 2026-08-31 stale-title fix: stamp this BV-keyed view-API metadata
+    // onto every success payload. The sidepanel's page-DOM read
+    // (getVideoInfo) races Bilibili's SPA navigation and can return the
+    // PREVIOUS video's title; this response is keyed to the exact video
+    // id the panel asked for, so the sidepanel lets it win. Existing
+    // fields on the inner result are preserved (|| fallback).
+    const withVideoMeta = (result) => {
+      if (result && typeof result === "object" && result.success) {
+        result.videoTitle = result.videoTitle || videoTitle;
+        result.channelName = result.channelName || channelName;
+        result.pubDate = result.pubDate || pubDate;
+      }
+      return result;
+    };
+
     // When configured, ASR is the source of truth. This avoids incorrect
     // Bilibili ai-zh tracks and also covers videos without subtitle tracks.
     const settings = await getSettings();
     if (settings.asrApiKey) {
-      return await transcribeWithBailian(videoId, page.cid, settings.asrApiKey);
+      return withVideoMeta(
+        await transcribeWithBailian(videoId, page.cid, settings.asrApiKey),
+      );
     }
 
     // B站官方字幕 (human or ai-zh) 优先于本地文件。本地字幕（up-master-report
@@ -2715,7 +2788,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     // 就别看本地。Bailian key 不影响这个顺序——只要 key 配了就走 Bailian。
     const bilibiliSubtitle = await fetchBilibiliOfficialSubtitle(videoId, page.cid);
     if (bilibiliSubtitle) {
-      return bilibiliSubtitle;
+      return withVideoMeta(bilibiliSubtitle);
     }
 
     // 本地文件 fallback：B站没字幕时才看本地（whisper 旧 cache / up-master-report
@@ -2730,7 +2803,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         page.cid
       );
       if (localFile) {
-        return {
+        return withVideoMeta({
           success: true,
           source: "local-file",
           language: localFile.language || "unknown",
@@ -2739,7 +2812,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
           transcriptText: localFile.transcriptText || "",
           transcriptTextTimestamped: localFile.transcriptTextTimestamped || "",
           cachePath: localFile.cachePath,
-        };
+        });
       }
     }
 
@@ -2776,7 +2849,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         const timestampedText = canonicalTranscript
           .map((seg) => `[${formatTimestamp(seg.start)}] ${seg.text}`)
           .join("\n");
-        return {
+        return withVideoMeta({
           success: true,
           source: "local-cache",
           language: cached.language || "unknown",
@@ -2785,7 +2858,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
           transcriptText: plainText,
           transcriptTextTimestamped: timestampedText,
           cachePath: cached.cachePath,
-        };
+        });
       }
       // No cache: ask the user to opt in. sidepanel renders a button.
       return {
@@ -3069,7 +3142,12 @@ async function handleSummarizeTranscript(
   transcriptText,
   videoTitle,
   channelName,
+  videoMeta,
 ) {
+  // Slow-run notification clock (see notifySummaryDoneIfSlow): starts at
+  // request entry so the measured time matches what the user perceives
+  // as「总结在跑」.
+  const summaryStartedAt = Date.now();
   try {
     const settings = await getSettings();
     if (!YTD_SETTINGS.activeApiKey(settings)) {
@@ -3103,6 +3181,17 @@ async function handleSummarizeTranscript(
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
+    });
+
+    // A summary that crossed the 1-minute line very likely outlasted the
+    // user's attention in the panel — ping them the same way a slow
+    // transcription does. Fast runs stay silent (user is still watching).
+    notifySummaryDoneIfSlow({
+      videoId: (videoMeta && videoMeta.videoId) || "",
+      videoUrl: (videoMeta && videoMeta.videoUrl) || "",
+      videoTitle,
+      channelName,
+      elapsedMs: Date.now() - summaryStartedAt,
     });
 
     return {

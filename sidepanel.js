@@ -689,6 +689,22 @@ async function checkCurrentTab() {
     bilibiliTabId = tab.id;
     currentVideoUrl = url;
 
+    // 2026-08-31 stale-title fix: the header must never carry the OLD
+    // video's title into the new video's load. getVideoInfo below reads the
+    // live page DOM, which can fail (relay race) or still show the old
+    // video (SPA hasn't swapped the title element yet). Clear the info
+    // state + header now; the authoritative title then lands from the
+    // BV-keyed view API via the fetchTranscript response (see
+    // startBilidown) or from the per-video cache.
+    if (videoId !== currentVideoId) {
+      currentVideoTitle = "";
+      currentChannelName = "";
+      currentVideoDescription = "";
+      currentVideoDuration = 0;
+      currentPubDate = "";
+      renderVideoInfoHeader();
+    }
+
     try {
       // Route through background script for reliable message passing
       const result = await chrome.runtime.sendMessage({
@@ -755,6 +771,25 @@ function clearTabDomForNewVideo() {
   }
 }
 
+/**
+ * Renders the video header from the CURRENT in-memory title/channel state.
+ * UNCONDITIONALLY (2026-08-31 stale-title fix): the old guarded form
+ * (`if (currentVideoTitle || ...) { ...text... }`) skipped the DOM write
+ * when the new video's info hadn't arrived yet, so switching videos with a
+ * failed/racy getVideoInfo left the PREVIOUS video's title text sitting in
+ * the header above the new video's transcript. Writing unconditionally —
+ * and hiding the block when both fields are empty — means the header can
+ * never carry text that doesn't belong to the loaded video.
+ */
+function renderVideoInfoHeader() {
+  const videoInfo = document.getElementById("videoInfo");
+  if (!videoInfo) return;
+  document.getElementById("videoTitle").textContent = currentVideoTitle || "";
+  document.getElementById("videoChannel").textContent = currentChannelName || "";
+  videoInfo.style.display =
+    currentVideoTitle || currentChannelName ? "block" : "none";
+}
+
 async function startBilidown(videoId, videoUrl) {
   const gen = ++generation;
   // Check if we already have this video loaded in memory
@@ -801,6 +836,13 @@ async function startBilidown(videoId, videoUrl) {
     updateTranscriptLanguageModes();
     isAnalysisLoading = false;
 
+    // 2026-08-31 stale-title fix: the cache entry was written FOR this
+    // video, so its title/channel beat the racy page-DOM read from
+    // checkCurrentTab (which may still hold the previous video's title
+    // if Bilibili hadn't swapped the DOM when getVideoInfo ran).
+    currentVideoTitle = cached.videoTitle || currentVideoTitle;
+    currentChannelName = cached.channelName || currentChannelName;
+
     // Restore semantic-segment translations from persistent storage.
     if (cached.paragraphCache) {
       for (const [key, value] of Object.entries(cached.paragraphCache)) {
@@ -808,12 +850,7 @@ async function startBilidown(videoId, videoUrl) {
       }
     }
 
-    if (currentVideoTitle || currentChannelName) {
-      const videoInfo = document.getElementById("videoInfo");
-      document.getElementById("videoTitle").textContent = currentVideoTitle;
-      document.getElementById("videoChannel").textContent = currentChannelName;
-      videoInfo.style.display = "block";
-    }
+    renderVideoInfoHeader();
 
     // Always render transcript first
     renderTranscript();
@@ -868,12 +905,7 @@ async function startBilidown(videoId, videoUrl) {
   // (which then triggers the lazy load + DOM overwrite).
   clearTabDomForNewVideo();
 
-  if (currentVideoTitle || currentChannelName) {
-    const videoInfo = document.getElementById("videoInfo");
-    document.getElementById("videoTitle").textContent = currentVideoTitle;
-    document.getElementById("videoChannel").textContent = currentChannelName;
-    videoInfo.style.display = "block";
-  }
+  renderVideoInfoHeader();
 
   showState("loading");
   updateLoading("正在获取字幕", "");
@@ -924,6 +956,18 @@ async function startBilidown(videoId, videoUrl) {
       startBilidown(videoId, videoUrl);
     };
     return;
+  }
+
+  // 2026-08-31 stale-title fix: the fetchTranscript response carries
+  // BV-keyed view-API metadata (videoTitle/channelName/pubDate, attached
+  // by handleFetchTranscript in the background). Unlike getVideoInfo —
+  // which reads the live page DOM and can race Bilibili's SPA swap —
+  // this data is keyed to the exact video id we requested, so it wins.
+  if (transcriptResult.videoTitle || transcriptResult.channelName) {
+    currentVideoTitle = transcriptResult.videoTitle || currentVideoTitle;
+    currentChannelName = transcriptResult.channelName || currentChannelName;
+    currentPubDate = transcriptResult.pubDate || currentPubDate;
+    renderVideoInfoHeader();
   }
 
   currentTranscript = transcriptResult.transcript;
@@ -2176,6 +2220,9 @@ async function triggerSummary() {
       transcriptText: currentTranscriptTimestamped,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
+      // Slow-run (>1min) completion notification click-through target.
+      videoId: currentVideoId || "",
+      videoUrl: currentVideoUrl || "",
     });
 
     if (!summaryResult.success) {
