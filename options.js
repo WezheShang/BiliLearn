@@ -82,6 +82,37 @@ const YTD_OPTIONS = (() => {
         "Whisper transcripts (and AI-corrected versions) are stored here, indexed by BV id. Re-opening the same video reads the cache instead of re-transcribing.",
       subtitlesDirRequired:
         "Subtitle cache directory is empty — nothing was saved. Whisper needs a writable folder on this computer for its transcript cache. Fill in the field above and save again.",
+      // 2026-09-02: desktop completion notification toggles. The two
+      // labels name the job; the help explains the tradeoff (the
+      // background still runs, only the tray popup is suppressed).
+      // 2026-09-02 update: notifyOnSummary + notifyOnAnalysis were
+      // merged into a single store value (notifyOnSummaryAndAnalysis) —
+      // summary and analysis are the same kind of LLM work over the
+      // transcript, so the user opts in/out of both together.
+      notificationsHeading: "Notifications",
+      notificationsHelp:
+        "Desktop notifications pop when a job finishes. Disabling a toggle only suppresses the popup — the underlying job still runs.",
+      notifyPrefsLegend: "Notify when complete",
+      notifyOnTranscribeLabel: "When a Whisper transcription finishes",
+      notifyOnSummaryAndAnalysisLabel: "When a summary or overview finishes (toggled together)",
+      autostartLegend: "Start whisper server at boot (SYSTEM account, hidden window)",
+      autostartHelp:
+        "Runs the local whisper server as a Windows scheduled task under the SYSTEM account. No login required, no visible window. Chrome extensions cannot self-elevate, so the install/uninstall commands have to be pasted into an admin PowerShell once. The status text below is read live from schtasks.",
+      autostartStatusLabel: "Current status:",
+      autostartStatusUnknown:
+        "see manage_whisper_server.bat [1] View status, or run schtasks /Query /TN bilidown-whisper-server-autostart-system in PowerShell",
+      autostartStatusHowToCheck:
+        "Chrome extensions cannot read scheduled-task state. Run manage_whisper_server.bat and pick [1] View status, or open PowerShell and run: schtasks /Query /TN bilidown-whisper-server-autostart-system",
+      autostartCheckBtn: "How to check current status",
+      autostartCopyInstallBtn: "Copy install command",
+      autostartCopyUninstallBtn: "Copy uninstall command",
+      autostartOpenFolderBtn: "Open extension folder",
+      autostartManageHelp:
+        "Day-to-day manage (start / stop / view log) is in manage_whisper_server.bat in the extension folder.",
+      autostartCopied: "Install command copied — paste into an admin PowerShell",
+      autostartUninstallCopied: "Uninstall command copied — paste into an admin PowerShell",
+      notifyPrefsHelp:
+        "Each notification names the video and clicking it focuses the open tab. Disabling a toggle does not stop the underlying job — only the desktop pop-up. Re-enable any time and the next completion will pop normally.",
 
       saveSettings: "Save settings",
       localRemix: "Local remix",
@@ -299,6 +330,30 @@ const YTD_OPTIONS = (() => {
         "Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。再次打开同一视频会直接读缓存，不再跑 Whisper。",
       subtitlesDirRequired:
         "字幕缓存目录为空，无法保存。Whisper 需要本机一个可写目录来缓存转写结果。请填写上方目录后再保存。",
+      // 2026-09-02: 通知块拆成独立 section；总结+概览绑定 1 toggle
+      notificationsHeading: "通知",
+      notificationsHelp: "任务完成后弹系统级通知。任务本体不受影响——关闭后只是不弹卡片。",
+      notifyPrefsLegend: "完成后弹通知",
+      notifyOnTranscribeLabel: "Whisper 转录完成时",
+      notifyOnSummaryAndAnalysisLabel: "总结和概览完成时（一起开关）",
+      autostartLegend: "开机自启 Whisper server（SYSTEM 账户，隐藏窗口）",
+      autostartHelp:
+        "把本地 whisper server 注册成 Windows 计划任务，用 SYSTEM 账户在每次开机时自动启动；不要求登录、不弹窗。Chrome 扩展不能自己提权，安装/卸载命令要复制到「管理员 PowerShell」里跑一次。下方状态从 schtasks 实时读。",
+      autostartStatusLabel: "当前状态：",
+      autostartStatusUnknown:
+        "用 manage_whisper_server.bat 菜单 [1] 查看状态，或在 PowerShell 跑 schtasks /Query /TN bilidown-whisper-server-autostart-system",
+      autostartStatusHowToCheck:
+        "Chrome 扩展读不到计划任务状态。运行 manage_whisper_server.bat 选 [1] 查看状态，或开 PowerShell 跑：schtasks /Query /TN bilidown-whisper-server-autostart-system",
+      autostartCheckBtn: "怎么查看当前状态？",
+      autostartCopyInstallBtn: "复制「安装」命令",
+      autostartCopyUninstallBtn: "复制「卸载」命令",
+      autostartOpenFolderBtn: "打开扩展文件夹",
+      autostartManageHelp:
+        "日常管理（启动 / 停止 / 查看日志）用扩展文件夹里的 manage_whisper_server.bat。",
+      autostartCopied: "已复制安装命令 — 粘贴到管理员 PowerShell 跑一次",
+      autostartUninstallCopied: "已复制卸载命令 — 粘贴到管理员 PowerShell 跑一次",
+      notifyPrefsHelp:
+        "通知会显示视频标题，点击会聚焦已打开的视频标签页。关闭后任务仍正常运行，只是不再弹通知；随时可重新打开，下次完成时立即生效。",
 
       saveSettings: "保存设置",
       localRemix: "本地改造",
@@ -816,6 +871,15 @@ const YTD_OPTIONS = (() => {
     const whisperLanguageInput = doc.getElementById("whisperLanguage");
     const subtitlesDirInput = doc.getElementById("subtitlesDir");
     const whisperCheckBtn = doc.getElementById("whisperCheckBtn");
+    // 2026-09-02: notification-prefs toggles. Their stored values are
+    // booleans normalized to true (see settings.js normalize) — these
+    // .checked reads are the source of truth that saveSettings() writes
+    // through to storage. Live state is what the user sees right now.
+    const notifyOnTranscribeInput = doc.getElementById("notifyOnTranscribe");
+    // 2026-09-02: summary + analysis are a single store value, exposed
+    // as one checkbox #notifyOnSummaryAndAnalysis (the user can only opt
+    // in/out of both together).
+    const notifyOnSummaryAndAnalysisInput = doc.getElementById("notifyOnSummaryAndAnalysis");
     // Setup-panel step 3 link: jumps to this extension's entry on
     // chrome://extensions so the user can copy the on-disk folder path
     // (works before the server has ever run; a page may not run the .bat
@@ -825,6 +889,15 @@ const YTD_OPTIONS = (() => {
     const whisperCopyCmdBtn = doc.getElementById("whisperCopyCmdBtn");
     const whisperReadyBar = doc.getElementById("whisperReadyBar");
     const whisperTestStatus = doc.getElementById("whisperTestStatus");
+    // 2026-09-02: SYSTEM-tier autostart block. Status is read from
+    // schtasks (not from chrome.storage) because the task is managed
+    // outside the extension. The install/uninstall commands are
+    // copy-paste — the extension cannot elevate itself.
+    const autostartStatusText = doc.getElementById("autostartStatusText");
+    const autostartCheckBtn = doc.getElementById("autostartCheckBtn");
+    const autostartCopyInstallBtn = doc.getElementById("autostartCopyInstallBtn");
+    const autostartCopyUninstallBtn = doc.getElementById("autostartCopyUninstallBtn");
+    const autostartOpenFolderBtn = doc.getElementById("autostartOpenFolderBtn");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -1095,6 +1168,12 @@ const YTD_OPTIONS = (() => {
         if (whisperModelSelect) whisperModelSelect.value = settings.whisperModel;
         if (whisperLanguageInput) whisperLanguageInput.value = settings.whisperLanguage;
         if (subtitlesDirInput) subtitlesDirInput.value = settings.subtitlesDir;
+        // 2026-09-02: notification-prefs defaults to ON — `=== false` is
+        // the only way to land in the unchecked branch (see settings.js
+        // normalize). Mirror the same strict form here so a missing
+        // checkbox in storage still renders CHECKED.
+        if (notifyOnTranscribeInput) notifyOnTranscribeInput.checked = settings.notifyOnTranscribe !== false;
+        if (notifyOnSummaryAndAnalysisInput) notifyOnSummaryAndAnalysisInput.checked = settings.notifyOnSummaryAndAnalysis !== false;
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -1110,6 +1189,11 @@ const YTD_OPTIONS = (() => {
       } catch (_error) {
         applyLanguage("en");
       }
+      // 2026-09-02: setup-panel and autostart are now <details> blocks
+      // (browser-native collapse, no JS state to mirror). The notifications
+      // card was initially marked collapsible but it's only two checkbox
+      // rows — folding it hides the only settings the user might want to
+      // touch, which is worse than the vertical space it saves. Left open.
       await loadSettings();
     }
 
@@ -1136,6 +1220,13 @@ const YTD_OPTIONS = (() => {
         whisperModel: whisperModelSelect ? whisperModelSelect.value : "",
         whisperLanguage: whisperLanguageInput ? whisperLanguageInput.value : "",
         subtitlesDir: subtitlesDirInput ? subtitlesDirInput.value : "",
+        // 2026-09-02: read the live checkbox state straight into the
+        // payload. Save is the only place that converts DOM -> storage;
+        // background.js never reads the form, it reads storage.
+        notifyOnTranscribe: notifyOnTranscribeInput ? notifyOnTranscribeInput.checked : true,
+        notifyOnSummaryAndAnalysis: notifyOnSummaryAndAnalysisInput
+          ? notifyOnSummaryAndAnalysisInput.checked
+          : true,
       });
 
       const activeKey = settingsApi.activeApiKey(settings);
@@ -1525,6 +1616,85 @@ const YTD_OPTIONS = (() => {
     if (whisperCopyCmdBtn) {
       whisperCopyCmdBtn.addEventListener("click", () => {
         void copyWhisperInstallCmd();
+      });
+    }
+
+    // 2026-09-02: SYSTEM autostart block wiring. MV3 extensions cannot
+    // resolve their own on-disk folder (no file:// API), cannot spawn
+    // child processes, and cannot read schtasks status. So the page
+    // copies a single PowerShell one-liner with a single placeholder
+    // <EXTENSION_FOLDER> that the user pastes their folder path into.
+    // The "Open extension folder" button jumps to chrome://extensions
+    // where Chrome displays the absolute path next to the extension
+    // card — the user copies that path, replaces the placeholder, and
+    // pastes the result into an admin PowerShell once.
+    //
+    // The setup script does the heavy lifting: setx /M, schtasks
+    // register, hidden window. The one-liner just kicks the script.
+    function buildAutostartCommand(action) {
+      const flag = action === "uninstall" ? "uninstall" : "install";
+      // The setup script lives in the extension folder. We embed a
+      // -ExecutionPolicy Bypass launch that UAC-prompts via Start-Process
+      // -Verb RunAs. The user pastes the command into a NORMAL
+      // PowerShell window; -Verb RunAs triggers the elevation dialog.
+      return (
+        "Start-Process -FilePath 'powershell.exe' " +
+        "-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass'," +
+        "'-File','<EXTENSION_FOLDER>\\setup_whisper_autostart_system.ps1'," +
+        `'-Action','${flag}'` +
+        " -Verb RunAs -WorkingDirectory '<EXTENSION_FOLDER>'"
+      );
+    }
+    async function copyAutostartCommand(action) {
+      const cmdKey =
+        action === "uninstall" ? "autostartUninstallCopied" : "autostartCopied";
+      const cmd = buildAutostartCommand(action);
+      try {
+        await root.navigator.clipboard.writeText(cmd);
+        if (whisperTestStatus) {
+          whisperTestStatus.textContent = translate(currentLanguage, cmdKey);
+        }
+      } catch (_e) {
+        if (whisperTestStatus) {
+          whisperTestStatus.textContent =
+            cmd + "  " + translate(currentLanguage, "copyFailed");
+        }
+      }
+    }
+    if (autostartCheckBtn) {
+      // The page can't read schtasks from JS. The button is a no-op
+      // (clicking it just re-states the limitation) so the user isn't
+      // confused by a "refresh" that never updates. We mark the status
+      // text accordingly so it's clear where to look.
+      autostartCheckBtn.addEventListener("click", () => {
+        if (whisperTestStatus) {
+          whisperTestStatus.textContent = translate(
+            currentLanguage,
+            "autostartStatusHowToCheck",
+          );
+        }
+      });
+    }
+    if (autostartCopyInstallBtn) {
+      autostartCopyInstallBtn.addEventListener("click", () => {
+        void copyAutostartCommand("install");
+      });
+    }
+    if (autostartCopyUninstallBtn) {
+      autostartCopyUninstallBtn.addEventListener("click", () => {
+        void copyAutostartCommand("uninstall");
+      });
+    }
+    if (autostartOpenFolderBtn) {
+      autostartOpenFolderBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        const extensionId = (chrome.runtime && chrome.runtime.id) || "";
+        const targetUrl = "chrome://extensions/?id=" + extensionId;
+        if (chrome.tabs && typeof chrome.tabs.create === "function") {
+          chrome.tabs.create({ url: targetUrl });
+        } else {
+          window.open(targetUrl, "_blank");
+        }
       });
     }
     copyCustomizationPromptBtn.addEventListener(

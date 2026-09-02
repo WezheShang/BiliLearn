@@ -98,9 +98,10 @@
                  detected python) is shown only after a check reports
                  something missing. The user decides whether to run it. -->
             <div class="setup-panel" id="whisperSetupPanel">
-              <p class="setup-panel-title" data-i18n="whisperSetupTitle">
-                本地环境准备
-              </p>
+              <details class="setup-panel-collapse" data-default-collapsed="true">
+                <summary class="setup-panel-title" data-i18n="whisperSetupTitle">
+                  本地环境准备
+                </summary>
               <ol class="setup-steps">
                 <li data-i18n="whisperSetupStep1">
                   本机装有 Python 3.10+（bilidown 不自带 Python，也不会替你安装）
@@ -173,7 +174,67 @@
                 role="status"
                 hidden
               ></div>
+              </details>
             </div>
+
+            <!-- 2026-09-02: SYSTEM-tier autostart. The extension itself
+                 cannot elevate to install a SYSTEM scheduled task (no
+                 native messaging host in this build), so the options page
+                 shows the live status read from the task + a copy-paste
+                 PowerShell command (run once as admin). Re-checking
+                 status re-runs schtasks /Query; the user can refresh it
+                 after running the command without reloading the page. -->
+            <details class="autostart-collapse notify-prefs" id="autostartBlock">
+              <summary data-i18n="autostartLegend">
+                开机自启（SYSTEM 账户，隐藏窗口）
+              </summary>
+              <p class="help" data-i18n="autostartHelp">
+                让 Whisper server 在每次开机时自动启动，不需要登录、不弹窗。
+                安装 / 卸载会调用 setup 脚本，需要一次性 UAC 提权。
+                Chrome 扩展不能替你提权，复制命令到 PowerShell 跑一次即可。
+              </p>
+              <p class="help">
+                <span data-i18n="autostartStatusLabel">当前状态：</span>
+                <code id="autostartStatusText" data-i18n="autostartStatusUnknown">在 manage bat 或 schtasks 里查看</code>
+              </p>
+              <div class="diagnostics-actions">
+                <button
+                  id="autostartCheckBtn"
+                  class="secondary"
+                  type="button"
+                  data-i18n="autostartCheckBtn"
+                >
+                  怎么查看当前状态？
+                </button>
+                <button
+                  id="autostartCopyInstallBtn"
+                  class="secondary"
+                  type="button"
+                  data-i18n="autostartCopyInstallBtn"
+                >
+                  复制「安装」命令
+                </button>
+                <button
+                  id="autostartCopyUninstallBtn"
+                  class="secondary"
+                  type="button"
+                  data-i18n="autostartCopyUninstallBtn"
+                >
+                  复制「卸载」命令
+                </button>
+                <button
+                  id="autostartOpenFolderBtn"
+                  class="secondary"
+                  type="button"
+                  data-i18n="autostartOpenFolderBtn"
+                >
+                  打开扩展文件夹
+                </button>
+              </div>
+              <p class="help" data-i18n="autostartManageHelp">
+                日常管理（启动 / 停止 / 查看日志）双击 manage_whisper_server.bat。
+              </p>
+            </details>
 
             <label data-i18n="whisperUrlLabel">Whisper server URL</label>
             <!-- 2026-08-29: fixed address (start_whisper_server.bat binds
@@ -219,7 +280,47 @@
               Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。
               下次再打开同一视频会直接读缓存，不再跑 Whisper。
             </p>
+
+            <!-- 2026-09-02: notifyOnSummary + notifyOnAnalysis are bound
+                 to a single store value (notifyOnSummaryAndAnalysis) —
+                 the user can only opt in/out of both together. The
+                 individual checkboxes are mirrored on the same boolean. -->
           </div>
+        </section>
+
+        <section class="card" id="notificationsCard">
+          <h2 data-i18n="notificationsHeading">通知</h2>
+          <p class="help" data-i18n="notificationsHelp">
+            任务完成后弹系统级通知。任务本体不受影响——关闭后只是不弹卡片。
+          </p>
+          <fieldset class="notify-prefs" id="notifyPrefs">
+            <legend data-i18n="notifyPrefsLegend">完成后弹通知</legend>
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                id="notifyOnTranscribe"
+                name="notifyOnTranscribe"
+              />
+              <span data-i18n="notifyOnTranscribeLabel"
+                >转录完成时（Whisper）</span
+              >
+            </label>
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                id="notifyOnSummaryAndAnalysis"
+                name="notifyOnSummaryAndAnalysis"
+              />
+              <span data-i18n="notifyOnSummaryAndAnalysisLabel"
+                >总结和概览完成时（一起开关）</span
+              >
+            </label>
+            <p class="help" data-i18n="notifyPrefsHelp">
+              通知会显示视频标题，点击会聚焦已打开的视频标签页。
+              总结和概览是同一类工作（都是对转录后的字幕做 LLM 处理），
+              因此统一一个开关。
+            </p>
+          </fieldset>
         </section>
 
         <section class="card" id="aiProviderCard">
@@ -400,6 +501,7 @@
             <div class="copy-actions">
               <button
                 id="copyCustomizationPromptBtn"
+                class="secondary"
                 type="button"
                 data-i18n="copyCustomizationPrompt"
               >
@@ -435,10 +537,20 @@
           profile. You can remove them at any time.
         </p>
         <div class="data-actions">
-          <button id="clearCacheBtn" type="button" data-i18n="clearCache">
+          <button
+            id="clearCacheBtn"
+            class="secondary"
+            type="button"
+            data-i18n="clearCache"
+          >
             Clear cached summaries
           </button>
-          <button id="clearNotesBtn" type="button" data-i18n="deleteNotes">
+          <button
+            id="clearNotesBtn"
+            class="danger"
+            type="button"
+            data-i18n="deleteNotes"
+          >
             Delete all notes
           </button>
           <button

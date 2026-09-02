@@ -215,6 +215,45 @@ select {
   cursor: pointer;
 }
 
+/* 2026-09-02: notification-prefs fieldset. Reuses the same flex row as
+   .checkbox-label but is lighter (no bold weight) — these are toggles,
+   not section gates, so the visual weight should not compete with the
+   real configuration fields above. The wrapping fieldset groups the
+   three notification toggles under one shared legend. */
+.notify-prefs {
+  /* 2026-09-02: flatten the inner fieldset so the "通知" section
+     matches the visual depth of every other .card section (no nested
+     border, no extra padding). The fieldset stays in the DOM for
+     semantics + accessible form grouping, but renders flat. */
+  margin: 16px 0 4px;
+  padding: 0;
+  border: 0;
+}
+.notify-prefs legend {
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.notify-prefs .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-weight: 400;
+  cursor: pointer;
+}
+.notify-prefs .checkbox-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+.notify-prefs .help {
+  margin: 6px 0 8px;
+  font-size: 0.85em;
+}
+
 /* ASR provider block: spacing under the dropdown mirrors .provider-fields. */
 [data-asr-field] {
   margin-top: 10px;
@@ -226,7 +265,12 @@ select {
 }
 
 button.secondary {
-  background: #f3f5f7;
+  /* 2026-09-02: unified button style. All non-primary buttons share the
+     same shape: white background, light grey border, black text. The
+     only visual differences are (a) hover state (border turns to the
+     brand pink) and (b) .danger overrides the text color to red so a
+     destructive action is never mistaken for a benign one. */
+  background: #fff;
   border-color: var(--border);
 }
 
@@ -242,8 +286,12 @@ button.secondary {
   margin: 0 0 16px;
   font-weight: 600;
 }
-button.secondary:hover {
-  background: #e9ecef;
+button.secondary:hover,
+button.danger:hover {
+  /* Hover = the same pink border for both .secondary and .danger, so
+     destructive actions don't get a louder hover that suggests they
+     are special — they already differ by the red text. */
+  background: #fff;
   border-color: var(--accent);
 }
 
@@ -545,11 +593,13 @@ footer {
    the check results and .diagnostics-actions for the button row.
    ------------------------------------------------------------ */
 .setup-panel {
+  /* 2026-09-02: flatten the wrapper. The summary row inside
+     <details.setup-panel-collapse> already carries the visible
+     affordance; this outer <div> only needs vertical spacing to
+     separate the local-env prep from neighboring blocks. No border,
+     no grey background, no rounded corners — matches the visual
+     weight of the autostart block exactly. */
   margin: 12px 0 16px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-elevated, rgba(127, 127, 127, 0.06));
 }
 
 .setup-panel-title {
@@ -650,4 +700,61 @@ div[data-asr-field]:target {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+}
+
+/* 2026-09-02: collapsible sections + details/summary styling. */
+/* Collapsed state: only the h2 (or summary) is visible. Help text and
+   any body children are hidden. This used to allow `.help` through
+   with a `:not(.help)` exception, but that left stray "任务完成后弹
+   系统级通知" lines floating under section titles when the section
+   was folded — the user couldn't tell they hadn't actually reached
+   the section body yet. Hide everything that isn't the header. */
+.card.collapsible[data-collapsed="true"] > :not(h2) {
+  display: none;
+}
+.card.collapsible[data-collapsed="false"] > :not(h2) {
+  display: block;
+}
+/* setup-panel local-env block uses <details> (browser-native collapse):
+   the summary stays, the body hides. No JS toggling needed. */
+.setup-panel-collapse > summary {
+  cursor: pointer;
+  list-style: none;
+  display: list-item;
+}
+.setup-panel-collapse > summary::-webkit-details-marker {
+  display: none;
+}
+.setup-panel-collapse > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 120ms ease;
+}
+.setup-panel-collapse[open] > summary::before {
+  transform: rotate(90deg);
+}
+/* details/summary arrow + spacing (native browser default is OK,
+   we just make the summary look like the prior fieldset legend). */
+.autostart-collapse > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 4px 0;
+  list-style: none;
+}
+.autostart-collapse > summary::-webkit-details-marker {
+  display: none;
+}
+.autostart-collapse > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 120ms ease;
+}
+.autostart-collapse[open] > summary::before {
+  transform: rotate(90deg);
+}
+.autostart-collapse > summary:focus-visible {
+  outline: 2px solid var(--focus-ring, #4f8cff);
+  outline-offset: 2px;
 }

@@ -2162,6 +2162,9 @@ async function triggerAnalysis() {
       channelName: currentChannelName,
       videoDescription: currentVideoDescription,
       videoDuration: currentVideoDuration,
+      // 2026-09-02: slow-run (>1min) completion notification click-through.
+      videoId: currentVideoId || "",
+      videoUrl: currentVideoUrl || "",
     });
 
     if (!analysisResult.success) {

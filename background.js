@@ -496,13 +496,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "analyzeTranscript") {
-    // Pass video duration to help the AI validate timestamps
+    // Pass video duration to help the AI validate timestamps.
+    // videoId/videoUrl ride along so a slow-run completion notification
+    // (notifyAnalysisDoneIfSlow) can click through to the video.
     handleAnalyzeTranscript(
       message.transcriptText,
       message.videoTitle,
       message.channelName,
       message.videoDescription,
       message.videoDuration,
+      { videoId: message.videoId, videoUrl: message.videoUrl },
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
@@ -1086,15 +1089,55 @@ async function recoverOrphanedWhisperJob(job) {
 
 const WHISPER_DONE_NOTIF_PREFIX = "whisper-done-";
 const SUMMARY_DONE_NOTIF_PREFIX = "summary-done-";
+const ANALYSIS_DONE_NOTIF_PREFIX = "analysis-done-";
 let lastNotifiedWhisperKey = null;
-// Shared by both prefixes above: notifId -> { videoId, videoUrl }.
+// Shared by all three prefixes above: notifId -> { videoId, videoUrl }.
 const notifVideoLinks = new Map();
 
-function notifyWhisperDone(job) {
+// 2026-09-02: notification toggles live in chrome.storage. The background
+// is the only consumer — sidepanel toggles are written on save, this is
+// where they are honored. A per-call async read keeps the surface tiny
+// (no in-memory mirror to drift from disk) at the cost of one storage
+// hit per completion. Notifications are infrequent (one per video job)
+// so the cost is negligible.
+async function isNotificationEnabled(settingKey) {
+  try {
+    const stored = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
+    const settings = YTD_SETTINGS.normalize(
+      stored[YTD_SETTINGS.STORAGE_KEY] || {},
+    );
+    // Strict false is the only way to suppress — see settings.js normalize
+    // and the matching loadSettings branch. A missing key on a legacy
+    // profile falls through to true (the user's first completion still
+    // pops, exactly like the previous default).
+    // 2026-09-02 migration safety net: when the caller asks for the
+    // merged notifyOnSummaryAndAnalysis, also check the two legacy
+    // keys (notifyOnSummary / notifyOnAnalysis) and suppress if any
+    // of them is `false` on disk. Mirrors settings.js normalize's
+    // OR-of-falsees — a user who turned the legacy toggle off in
+    // a pre-merge build stays off even if a buggy upgrade path
+    // overwrites the merged key with `true`. Defense in depth.
+    if (settingKey === "notifyOnSummaryAndAnalysis") {
+      if (settings.notifyOnSummary === false) return false;
+      if (settings.notifyOnAnalysis === false) return false;
+    }
+    return settings[settingKey] !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function notifyWhisperDone(job) {
   if (!job || job.stage !== WHISPER_STAGES.SUCCEEDED) return;
+  // 2026-09-02: user-toggleable. The transcribe toggle was added
+  // alongside the summary/analysis ones; the old "always pop" behaviour
+  // is now gated on the persisted setting. Cache-key dedup runs FIRST
+  // so an explicit-off user is still protected from the very rare
+  // double-finish duplicate.
   const key = `${job.videoId || "?"}@p${job.pageNumber || 1}:${job.finishedAt || 0}`;
-  if (key === lastNotifiedWhisperKey) return; // same terminal write, no repeat
+  if (key === lastNotifiedWhisperKey) return;
   lastNotifiedWhisperKey = key;
+  if (!(await isNotificationEnabled("notifyOnTranscribe"))) return;
   const meta = job.recoveryMeta || {};
   const videoTitle = meta.title || job.videoId || "视频";
   const channel = meta.channel ? ` · UP: ${meta.channel}` : "";
@@ -1124,15 +1167,16 @@ function notifyWhisperDone(job) {
   }
 }
 
-// AI summaries usually come back in seconds while the user is still
-// watching the panel. But a long transcript (or a slow provider) can push
-// the request past a minute — by then the user has often wandered off to
-// another tab. Same deal as transcription-done above, same card style:
-// only SLOW runs (>= SUMMARY_SLOW_NOTIFY_MS) get a completion
-// notification; fast ones stay silent. Fired from the success path of
-// handleSummarizeTranscript. Clicking focuses an already-open tab on the
-// video (or opens one) so the cached summary renders right away.
-const SUMMARY_SLOW_NOTIFY_MS = 60 * 1000;
+// 2026-09-02 (user instruction "总结和概览生成结束那个不设时间要求"):
+// summary/analysis completion notifications are no longer gated on
+// elapsed time. The user's per-toggle preference in options
+// (notifyOnSummary / notifyOnAnalysis) is the only gate. The slow-run
+// threshold is intentionally not reintroduced — fast runs that the user
+// missed while the sidepanel was unfocused are exactly the cases the
+// notification is meant to surface. Fired from the success path of
+// handleSummarizeTranscript / handleAnalyzeTranscript. Clicking focuses
+// an already-open tab on the video (or opens one) so the cached summary
+// or overview renders right away.
 
 function formatDurationZh(ms) {
   const totalSec = Math.round(ms / 1000);
@@ -1141,14 +1185,19 @@ function formatDurationZh(ms) {
   return min > 0 ? `${min} 分 ${String(sec).padStart(2, "0")} 秒` : `${sec} 秒`;
 }
 
-function notifySummaryDoneIfSlow(info) {
-  if (!info || !(info.elapsedMs >= SUMMARY_SLOW_NOTIFY_MS)) return;
-  const videoTitle = info.videoTitle || info.videoId || "视频";
-  const channel = info.channelName ? ` · UP: ${info.channelName}` : "";
-  const message =
-    `《${videoTitle}》AI 总结已生成（耗时 ${formatDurationZh(info.elapsedMs)}）${channel}，打开视频即可查看。`;
-  const notifId =
-    `${SUMMARY_DONE_NOTIF_PREFIX}${info.videoId || "unknown"}-${info.elapsedMs}-${Date.now()}`;
+// Common shape for "slow-run completion" notifications. Slow is the
+// pre-condition (>= threshold) AND the user toggle is on. Both are
+// checked in the per-kind wrappers below; this is just the shared body
+// that builds and fires the actual chrome.notifications call.
+async function createCompletionNotification({
+  prefix,
+  settingKey,
+  info,
+  title,
+  buildMessage,
+}) {
+  if (!(await isNotificationEnabled(settingKey))) return;
+  const notifId = `${prefix}${info.videoId || "unknown"}-${Date.now()}`;
   notifVideoLinks.set(notifId, {
     videoId: info.videoId || "",
     videoUrl: info.videoUrl || "",
@@ -1157,25 +1206,69 @@ function notifySummaryDoneIfSlow(info) {
     notifVideoLinks.delete(notifVideoLinks.keys().next().value);
   }
   try {
-    chrome.notifications.create(notifId, {
-      type: "basic",
-      iconUrl: "icons/icon128.png",
-      title: "bilidown · AI 总结完成",
-      message,
-      priority: 2,
-    }, () => {
-      void chrome.runtime.lastError;
-    });
+    chrome.notifications.create(
+      notifId,
+      {
+        type: "basic",
+        iconUrl: "icons/icon128.png",
+        title,
+        message: buildMessage(info),
+        priority: 2,
+      },
+      () => {
+        void chrome.runtime.lastError;
+      },
+    );
   } catch (e) {
-    debugLog("[dk-bilidown BG] summary-done notification failed:", e);
+    debugLog(`[dk-bilidown BG] ${prefix} notification failed:`, e);
   }
+}
+
+async function notifySummaryDoneIfSlow(info) {
+  if (!info) return;
+  await createCompletionNotification({
+    prefix: SUMMARY_DONE_NOTIF_PREFIX,
+    // 2026-09-02: summary + analysis are a single store value now.
+    // isNotificationEnabled still consults the two legacy keys for
+    // a user upgrading from a pre-merge build (defense in depth).
+    settingKey: "notifyOnSummaryAndAnalysis",
+    info,
+    title: "bilidown · AI 总结完成",
+    buildMessage: (i) => {
+      const videoTitle = i.videoTitle || i.videoId || "视频";
+      const channel = i.channelName ? ` · UP: ${i.channelName}` : "";
+      return `《${videoTitle}》AI 总结已生成（耗时 ${formatDurationZh(i.elapsedMs)}）${channel}，打开视频即可查看。`;
+    },
+  });
+}
+
+// 2026-09-02: analysis (Overview) completion notification. Same shape
+// as summary. Both wrappers consult the merged `notifyOnSummaryAndAnalysis`
+// store key + the two legacy keys (see isNotificationEnabled's safety
+// net). The function name still says "IfSlow" for source compatibility
+// with tests, but the only gate is the toggle now (per user
+// instruction "总结和概览生成结束那个不设时间要求").
+async function notifyAnalysisDoneIfSlow(info) {
+  if (!info) return;
+  await createCompletionNotification({
+    prefix: ANALYSIS_DONE_NOTIF_PREFIX,
+    settingKey: "notifyOnSummaryAndAnalysis",
+    info,
+    title: "bilidown · AI 概览完成",
+    buildMessage: (i) => {
+      const videoTitle = i.videoTitle || i.videoId || "视频";
+      const channel = i.channelName ? ` · UP: ${i.channelName}` : "";
+      return `《${videoTitle}》AI 概览已生成（耗时 ${formatDurationZh(i.elapsedMs)}）${channel}，点击 Overview 标签页查看。`;
+    },
+  });
 }
 
 chrome.notifications.onClicked.addListener((notifId) => {
   if (
     !notifId ||
     (!notifId.startsWith(WHISPER_DONE_NOTIF_PREFIX) &&
-      !notifId.startsWith(SUMMARY_DONE_NOTIF_PREFIX))
+      !notifId.startsWith(SUMMARY_DONE_NOTIF_PREFIX) &&
+      !notifId.startsWith(ANALYSIS_DONE_NOTIF_PREFIX))
   ) return;
   const link = notifVideoLinks.get(notifId);
   notifVideoLinks.delete(notifId);
@@ -3023,7 +3116,12 @@ async function handleAnalyzeTranscript(
   channelName,
   videoDescription,
   videoDuration,
+  videoMeta,
 ) {
+  // 2026-09-02: slow-run notification clock (see
+  // notifyAnalysisDoneIfSlow) — starts at handler entry so the
+  // measured time matches what the user perceives as「概览在跑」.
+  const analysisStartedAt = Date.now();
   try {
     const settings = await getSettings();
     if (!YTD_SETTINGS.activeApiKey(settings)) {
@@ -3100,6 +3198,19 @@ async function handleAnalyzeTranscript(
     // Treat every model response as untrusted data. Rebuild the supported
     // schema and derive display timestamps from validated numeric seconds.
     analysis = validateAndFixTimestamps(analysis, maxTimestampSeconds);
+
+    // Slow-run completion notification (2026-09-02) — same rule as the
+    // summary one: a run that crossed the 1-minute line very likely
+    // outlasted the user's attention in the panel, so ping them the same
+    // way. Fast runs stay silent. The user can also disable the
+    // notification entirely via the options page toggle.
+    notifyAnalysisDoneIfSlow({
+      videoId: (videoMeta && videoMeta.videoId) || "",
+      videoUrl: (videoMeta && videoMeta.videoUrl) || "",
+      videoTitle,
+      channelName,
+      elapsedMs: Date.now() - analysisStartedAt,
+    });
 
     return {
       success: true,

@@ -155,6 +155,22 @@ var YTD_SETTINGS = (() => {
     // directory (e.g. a project folder or the subtitles cache). Supports
     // `~/...` paths which the client expands using KNOWN_HOMES below.
     exportDir: "C:/Users/username/Downloads",
+    // Desktop completion notifications. Default ON (2026-09-02): all three
+    // pop unconditionally when their job finishes — whisper transcription
+    // fires on every SUCCEEDED job (no slow-run threshold anymore — keep
+    // it simple, the user wants to know each video is done), the summary
+    // and analysis still only fire on >=60s slow runs, the toggle just
+    // gates whether ANY of these pop at all. Stored as booleans so a
+    // missing or non-bool stored value falls back to ON, never silently
+    // disables a notification the user was relying on. 2026-09-02:
+    // notifyOnSummary + notifyOnAnalysis merged into a single field
+    // (notifyOnSummaryAndAnalysis) — the user can only opt in/out of
+    // both together because they are the same kind of LLM work over
+    // the transcript. Migration: an existing `false` on EITHER old
+    // field flips the merged one off, so a user who turned summary off
+    // before doesn't get surprise notifications when this build lands.
+    notifyOnTranscribe: true,
+    notifyOnSummaryAndAnalysis: true,
   });
 
   const WHISPER_MODELS = Object.freeze([
@@ -268,6 +284,20 @@ var YTD_SETTINGS = (() => {
         typeof input.exportDir === "string" && input.exportDir.trim()
           ? input.exportDir.trim().replace(/[\\/]+$/, "")
           : DEFAULTS.exportDir,
+      // Notification toggles (2026-09-02). Strict boolean coercion: a
+      // stored 0 / "false" / null / undefined all normalize to true
+      // (DEFAULT ON) — users who never touched the setting must not be
+      // silently muted by a corrupt storage value. 2026-09-02:
+      // notifyOnSummary + notifyOnAnalysis are now a single field.
+      // The OR-of-falsees rule preserves any previous OFF the user
+      // set on EITHER of the old keys.
+      notifyOnTranscribe: input.notifyOnTranscribe === false ? false : true,
+      notifyOnSummaryAndAnalysis:
+        input.notifyOnSummaryAndAnalysis === false ||
+        input.notifyOnSummary === false ||
+        input.notifyOnAnalysis === false
+          ? false
+          : true,
     };
   }
 

@@ -1,7 +1,9 @@
 <#
 .SYNOPSIS
-    Register bilidown's whisper server to start automatically when
-    the current user logs in (no admin needed — per-user scheduled task).
+    [DEPRECATED 2026-09-02] Per-user logon autostart for bilidown's
+    whisper server. Replaced by setup_whisper_autostart_system.ps1
+    (SYSTEM account, AtStartup). Kept for users who explicitly want
+    per-user logon behavior. New installs should use the SYSTEM variant.
 
 .DESCRIPTION
     Creates (or removes) a Windows Scheduled Task that runs
@@ -11,8 +13,8 @@
 
     This task is per-user (no UAC prompt) and only runs when the
     current user is logged in. Suitable for desktop / laptop dev
-    setups. For headless servers, edit -Trigger to use -AtStartup
-    and run elevated.
+    setups. For headless / always-on setups, use
+    setup_whisper_autostart_system.ps1 instead.
 
 .PARAMETER Action
     'install' (default)  - register the task

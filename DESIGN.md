@@ -1,105 +1,304 @@
-# bilidown 侧边面板设计原则（DESIGN.md）
+# bilidown 设计风格规范
 
-> 2026-08-30 定稿。来源：用户对概览/总结失败态的反馈——「AI model 不能用，应该都是
-> failure，不应该下面还在提取。应该直接出现那个标准错误页面。」
-> 本文档是 UI 迭代的 single source of truth：改侧边面板 / options 页视觉前先读这里，
-> 新增状态页时按这里的规格执行，测试（test_wizard_clean_page.js Part F/G）会守护关键规则。
+> 适用范围：bilidown Chrome 扩展 options 页 + 任何后续要做 / 复用的产品。
+> 最后更新：2026-09-02（v1）
 
-## 1. 设计语言总则（hero 风）
+---
 
-- **居中 hero 布局**：空态 / 引导态 / 错误态一律整面板居中（flex column + align-items
-  center + justify-content center），大留白（上下 30px+），不是卡片套卡片。
-- **无框**：hero 页不套卡片框、不画分隔线、不加背景色块。页面本身就是容器。
-  参照实现：`.error-container`（无字幕引导页）、`.wizard`（AI key / ASR / Whisper 向导）、
-  `.error-hero-page`（整页错误）。
-- **静态扁平，悬停浮起**：直接坐在面板背景上的列表项（`.chapter-item` / `.quote-item`）
-  静态不带投影（`box-shadow: none`），hover 才出 `--shadow-sm` + 轻微上移。卡片不叠卡片，
-  避免灰底上再垫白卡的层叠感。
-- **主色粉**（B 站系）：`--accent: #fb7299`。强调元素（按钮、图标、进度、选中态）统一用它，
-  不引入第二种彩色。
+## 1. 颜色 Token
 
-## 2. 标准错误页（整页规格）
+CSS 变量统一在 `options.css` 顶部声明，跨产品沿用同一份。
 
-**适用**：一个面板的核心功能失败时（概览分析失败 / 总结失败 / 无字幕引导）。不是局部的
-一条错误消息，而是**整个面板变成错误页**。
+| Token | 值 | 用途 |
+|---|---|---|
+| `--bg` | `#f6f7f8` | 页面背景 |
+| `--surface` | `#ffffff` | 卡片 / 弹窗背景 |
+| `--text` | `#18191c` | 主要正文 |
+| `--text-secondary` | `#5b6068` | 次要文字 |
+| `--muted` | `#7a7f87` | 辅助 / 状态文字 |
+| `--border` | `#e3e5e7` | 浅灰边框（默认按钮 / 卡片描边） |
+| `--accent` | `#fb7299` | **品牌粉**（B 站粉红）—— hover / 强调边 |
+| `--accent-hover` | `#ff5f8f` | 品牌粉的 hover 加深色 |
+| `--danger` | `#9f2d2d` | 危险文字（保留按钮的「红字」感） |
 
-**规格**（对应实现 `.error-hero-page` + `.error-hero-*`，sidepanel.css）：
+**派生语义色**（按需，不要新造名字）：
 
-1. 3D 感图标（`&#9888;` 喇叭/警示类，`--accent` 色）在最上方。
-2. 深色大标题（display 字体、600）：「分析失败」/「总结失败」——中文短语，说明哪个功能挂了。
-3. 灰色说明段（`--text-secondary`，12.5px，居中，最大宽 280px）：**原始错误信息原样保留**，
-   错误码（如 `INVALID_AI_KEY`）不改写、不翻译、不隐藏。
-4. 粉胶囊发光按钮「重试」（`--accent` 实底、`--r-pill` 圆角、
-   `box-shadow: 0 4px 14px rgba(251, 114, 153, 0.26)`）。
-5. 居中、无卡片框、大留白、浅灰底。
+| 用途 | 颜色 |
+|---|---|
+| 成功绿 | `#1ba954`（带 `.muted-scheme` 处理后） |
+| 警告橙 | `#d98a00` |
+| 错误红（粗） | `#e02525` |
+| 信息蓝 | `#00aeec` |
 
-**实现契约**（sidepanel.js）：
+---
 
-- `showPanelError(panelName, message, retryFn)`：清空该面板内容容器 → 隐藏面板全部
-  `:scope > .section` → 显示错误页 → 「重试」先复位（隐藏错误页 + 恢复 sections）再调
-  `retryFn`。
-- `hidePanelError(panelName)`：只隐藏错误页，不动 sections（由渲染内容方恢复）。
-- 失败路径一律走 `showPanelError`；禁止再往单个容器里塞区块级错误块。
+## 2. 字体
 
-## 3. 状态诚实原则
+- 全栈系统字体栈，**不嵌入网络字体**：
+  ```css
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  ```
+- 标题：`font-weight: 700`（中英文一致）
+- 正文：`font-weight: 400`
+- 按钮 / 复选框文字：`font-weight: 700`（永远加粗，与正文拉开层级）
+- 等宽（code / 路径 / 副 ID）：`ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`
 
-- **失败后不得残留 loading 占位**：「正在提取关键观点…」「正在生成章节…」这类占位在请求
-  结束（无论成败）后必须消失。失败 = 整页标准错误页，不允许出现「一个区块报错 + 另一个
-  区块永远转圈」的组合。
-- **AI 不可用 = 整页**：AI 模型不可用（无 key / key 失效）时，概览和总结 tab 要么显示
-  AI key 向导（可修复的配置态），要么显示整页标准错误页（请求失败态）。不允许半可用视觉。
-- **新加载不得叠在旧错误上**：`triggerAnalysis` / `triggerSummary` 开头先
-  `hidePanelError(...)`，避免上一支视频的错误页挡住新视频的加载指示。
-- **过渡态必须真实可见**（2026-08-30）：loading 占位（「正在根据完整字幕整理笔记…」
-  「正在生成章节…」）必须落在**可见的 section** 里。`showPanelError` 会隐藏面板
-  sections，而懒加载路径（切 tab 触发）不像「重试」按钮那样自带恢复——所以 trigger
-  在 `hidePanelError(...)` 之后必须紧跟 `restoreLlmSections()`；顺序不能反（restore
-  是错误页感知的，先藏错误页再恢复）。违反后果：loading 写进被藏掉的 section，
-  页面全程空白、结果「突然出现」（2026-08-30 用户报告）。
-- **切视频清旧错误页**（2026-08-30）：`startBilidown` 在视频变化时对两个 LLM 面板
-  `hidePanelError(...)`——下一支视频可能命中缓存（`currentSummary` 已设、懒加载不再
-  触发、没人复位面板），缓存内容不能躲在上一支视频的错误页后面；随后
-  `updateAiKeyWizard(当前tab)` 重放向导状态（key 仍缺失时向导优先，sections 保持隐藏）。
-- **长生成必须流式**（2026-08-30）：AI 请求一律带 `stream: true` 并逐 chunk 消费——每个
-  SSE 增量都重置空闲看门狗。非流式请求在模型生成完毕前**一个字节都不回来**，思考型模型
-  （glm-4.6 先 reasoning 再写）+ 长视频字幕的静默期轻易超过 50 秒，被自己的看门狗判死
-  （用户报告：「inactive for 50 seconds」）。SSE 分支按 `content-type: text/event-stream`
-  判定；非 SSE 响应（错误体 / 忽略 stream 的 provider / 测试桩）走原有 bounded JSON 路径。
-- **安装必须透明，禁止默默装**（2026-08-30）：「github 上下下来的东西直接默认安装不靠谱」
-  （用户原话）。依赖缺失时：server 以受限模式启动（`/health` 如实上报缺什么 + python 路径，
-  `/transcribe` 返回 503 + 针对本机的确切安装命令）；`start_whisper_server.bat` 只检测并
-  打印缺什么和命令，**绝不执行 pip**；options 页「检查系统」按钮是只读的——安装命令只在
-  检查发现缺失后才出现，「复制命令」「下载安装脚本」按钮平时隐藏，是否执行由用户拍板。
-  测试门：`test_options_page_init.js` F5 断言 bat 内没有任何执行 pip 的行（仅 echo）。
-  硬上限随之放宽到 600 秒——它现在只兜真正失控的请求，不再惩罚正常的慢生成。
-- **空态文案说清「什么时候会有内容」**：「生成 AI 总结后，章节会显示在这里」，而不是干巴巴
-  的「暂无数据」。
+---
 
-## 4. 按钮语言
+## 3. 圆角
 
-- **主按钮**：粉实底胶囊 + 粉色发光（`box-shadow: 0 4px 14px rgba(251, 114, 153, .26)`），
-  白字。每屏最多一个。范例：wizard 的「去设置」、错误页的「重试」。
-- **次级按钮**：粉幽灵胶囊——透明底、`1px solid rgba(251, 114, 153, 0.45)` 边、
-  `--accent` 文字，hover 变实粉白字。范例：`.action-btn` / `.enhance-btn` /
-  `.export-format` / `.note-action-btn` / `.quote-copy-btn` / `.quote-save-note-btn`。
-- **激活态**：`--accent-dim` 背景。范例：`.transcript-mode-btn.active`。
-- 不用灰色实底按钮、不用直角按钮、不加图标堆砌。
+- **胶囊按钮**：`border-radius: 999px`（这是页面绝大多数按钮的形状）
+- **小卡片 / 标签**：`border-radius: 6px`
+- **大卡片**：`border-radius: 12px`（settings card）
+- **永远不要**用 0 圆角——会显得像控制台系统控件
 
-## 5. 颜色与 token（:root，sidepanel.css）
+---
 
-| token | 值 | 用途 |
-| --- | --- | --- |
-| `--accent` | `#fb7299` | 主色：按钮、图标、选中态、强调线 |
-| `--accent-hover` | hover 加深 | 主按钮 hover |
-| `--accent-dim` | 低饱和粉 | 激活态背景 |
-| `--r-pill` | `999px` | 胶囊圆角（按钮统一形态） |
-| `--shadow-sm` / `--shadow-md` | 阴影 | 仅 hover / 浮层用，静态列表项不用 |
-| `--text` / `--text-secondary` / `--text-muted` | 文本三档 | 标题 / 说明 / 占位 |
+## 4. 间距
 
-## 6. 修改守则
+- 卡片之间垂直：`16px`（不要更小，会显得挤）
+- 卡片内 padding：`18px` 左右
+- 标签 ↔ 控件：`8px`
+- help 文字距上方控件：`8px`
 
-- 改视觉前先跑 `bilidown-tests\test_wizard_clean_page.js`（Part E/F 守护 hero 风与错误页
-  契约）；改完跑全量 `run_all.js`。
-- 新增面板状态时：先问「这是空态 / 引导态 / 错误态 / 内容态哪一种」，再套对应规格，不自创
-  形态。
-- 错误文案：中文标题 + 原始错误串，不吞错误码（见 §2.3）。
+---
+
+## 5. 按钮
+
+**所有非主操作按钮统一三态**（粉红 hover + 灰边白底）。其他产品沿用同一份规则。
+
+### 5.1 普通按钮 `.secondary`
+- 默认：白底 + 浅灰边（`#fff` / `var(--border)`）+ 黑色加粗字
+- Hover：白底 + **粉红边**（`var(--accent)`）+ 黑字（背景不变）
+- Active / Focus：粉红边加深 1px 或 outline 1px
+- 形状：胶囊（`border-radius: 999px`）+ `padding: 10px 15px`
+- 字号 / 字重：继承 + `font-weight: 700`
+
+```css
+button.secondary { background:#fff; border-color: var(--border); }
+button.secondary:hover { background:#fff; border-color: var(--accent); }
+```
+
+### 5.2 主操作按钮 `.primary`
+- **整个页面只用一个**（典型 = 表单底部的「保存设置」）
+- 默认：实色粉红（`var(--accent)`）+ 白字
+- Hover：实色加深（`var(--accent-hover)`）
+- 形状：胶囊
+- 不能在 section 中混用——其他 section 的按钮都是 `.secondary` / `.danger`
+
+```css
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.primary:hover { background: var(--accent-hover); }
+```
+
+### 5.3 危险按钮 `.danger`
+- 用于**不可逆 / 易误点的操作**（清空笔记、重置数据、删除）
+- 默认：白底 + 浅灰边 + **红色字**（`var(--danger)`）
+- Hover：白底 + **粉红边**（与 secondary 相同，不让危险按钮在 hover 时跳出来）
+- 形状：胶囊
+- 文字仍 `font-weight: 700`
+
+```css
+button.danger { background:#fff; border-color: var(--border); color: var(--danger); }
+button.danger:hover { background:#fff; border-color: var(--accent); }
+```
+
+> 原则：危险按钮的「危险感」**只在文字颜色**——不允许用红边 + 红字 + 浅红底这种
+> 组合，会跟「未保存修改」的红 banner 视觉撞色。
+
+### 5.4 绝对不要出现的样式
+- 实色红按钮（`background: var(--danger)` + 白字）—— 跟「错误」语义绑死
+- 渐变按钮
+- 带 emoji 前缀的按钮（emoji 留给「卡片标题 / 状态行」用，不进按钮）
+- 文字按钮（无背景无边框）—— 跟链接混淆
+
+---
+
+## 6. 折叠块（collapsible）
+
+**所有「不常用 / 配置完成后可以收起」的高级块都用浏览器原生 `<details>`**，不用 JS 写折叠状态。
+
+### 6.1 适用块
+- 开机自启（SYSTEM 计划任务配置）
+- 本地环境准备（setup panel，4 个 step + 检查系统按钮）
+- 任何「设置完成后很久才回来一次」的 section
+
+### 6.2 不适用块
+- 通知 section（只有 2 个 checkbox + 1 行说明——折叠反而是负担）
+- 通知 section 当前永远展开
+
+### 6.3 实现模板
+```html
+<details class="collapsible-block" data-default-collapsed="true">
+  <summary class="collapsible-summary">标题</summary>
+  <div class="collapsible-body">
+    <!-- 内容 -->
+  </div>
+</details>
+```
+
+```css
+.collapsible-block > summary {
+  cursor: pointer;
+  list-style: none;
+  /* Plain text on the page background — NO extra border, NO background
+     fill, NO rounded box. The summary row is just `▸ + bold title`
+     on the page. */
+}
+.collapsible-block > summary::-webkit-details-marker { display: none; }
+.collapsible-block > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 120ms ease;
+}
+.collapsible-block[open] > summary::before { transform: rotate(90deg); }
+```
+
+### 6.4 折叠块的「外层 wrapper」必须是透明的
+- `<details>` 外面如果再包一层 `<div>` 充当 wrapper（用来挂其他 class、加 margin 等），
+  **wrapper 自身不能加 border / background / padding / border-radius**
+- 只允许 wrapper 提供 `margin: 上下间距`，所有视觉样式集中在 `<details>` + `<summary>` 自身
+- 否则两个 `<details>` 块（一个用 wrapper、一个不用）会出现**一个有框一个没框**的
+  视觉不一致（实测场景：本地环境准备用了 `.setup-panel` wrapper，开机自启没包，
+  2026-09-02 用户反馈两个折叠块看起来不一样）
+- 反例 `.setup-panel { padding: 14px 16px; border: 1px solid ...; background: ...; }`
+  —— 修法：只留 `margin`
+
+---
+
+## 7. 卡片
+
+```css
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+```
+
+- 卡片内 h2：不需要再加边框 / 底色——`margin-top: 0` 即可
+- 卡片之间永远用 `margin-bottom: 16px`，不要 `gap`（IE/Edge legacy 兼容）
+- **卡片内部永远是扁平的**——不要在 card 里再嵌 `<fieldset>` 加边框
+  - 如果语义上需要分组（form 关联 / accessibility），用 `<fieldset>` 但 CSS 强制
+    `border: 0; padding: 0;`，让 legend 当成普通小标题渲染
+  - 嵌套边框 / 嵌套背景会让一个 section 看起来比相邻 section 更「深」，
+    视觉深度不一致 = 风格不一致
+- 卡片不要套卡片
+
+---
+
+## 8. 输入控件
+
+### 8.1 text / textarea
+- `border: 1px solid var(--border)`
+- `border-radius: 6px`（不是胶囊）
+- `padding: 11px 12px`
+- 焦点态：`border-color: var(--accent)` + `outline: none`（用 border 表达焦点）
+
+### 8.2 select
+- 同 text，但 `appearance: none` + 自绘 `▾` 箭头：
+  ```css
+  background: #fff url("data:image/svg+xml,...") no-repeat right 12px center;
+  padding-right: 32px;
+  ```
+
+### 8.3 checkbox
+- 自绘样式：14×14，`border-radius: 3px`
+- 选中：粉红底 + 白勾（用 CSS `::after` 画勾，不用图片）
+
+---
+
+## 9. i18n 双语
+
+- 任何用户可见文案都走 `data-i18n` 属性
+- 英文 / 中文两份必须在同一文件定义（en 块 + zh 块）
+- 翻译键用语义化英文命名（`notifyOnTranscribeLabel`），不要用 `label1` / `btn1`
+- 翻译表在 `options.js` 顶部 `translate()` 函数
+
+---
+
+## 10. 暗色模式（TODO / 未实现）
+
+预留 CSS 变量结构，未来通过 `prefers-color-scheme: dark` 自动切换：
+
+```css
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1014;
+    --surface: #1a1b1f;
+    --text: #e8e9eb;
+    --text-secondary: #aab0b8;
+    --muted: #6f747c;
+    --border: #2a2c30;
+    /* accent 保持不变（品牌粉在暗底下也亮） */
+  }
+}
+```
+
+---
+
+## 11. 反馈 / 状态文字
+
+- 操作成功：「✓ …」（绿勾 + 简短中文）
+- 操作失败：「✗ …」（红叉）
+- 操作中：「… 中」（省略号结尾）
+- 状态行（`#saveStatus` / `#copyStatus`）：`color: var(--muted)` + `font-size: 13px`，不要大字号
+
+---
+
+## 12. 复盘 / 教训（2026-09-02）
+
+1. **折叠时**别留 `.help` 文字当「副标题」——用户会以为那行就是 section 的全部内容。
+   折叠态要彻底藏非 h2 内容。
+2. **危险按钮的 hover 跟普通按钮一致**——红字已经表达危险，hover 再跳出来反而
+   抢了真正主操作（保存按钮）的视觉权重。
+3. **`primary` 按钮全页只一个**——多 primary 等于无 primary（视觉锚点失效）。
+4. **统一规则进 DESIGN.md**，而不是每次口头说——这样新加按钮时不会又冒出第三种风格。
+
+---
+
+## 13. Sidepanel 状态诚实原则（2026-08-30）
+
+> 用户原话：「AI model 不能用，应该都是 failure，不应该下面还在提取。
+> 应该直接出现那个标准错误页面。」+「把这个写到设计的 principal 里面」
+
+### 13.1 标准错误页接管整个 tab
+- 任何 LLM 请求失败（summary / overview / 校正） → 整个 tab 切到**标准错误页**
+  - 隐藏所有 section（chapters / summary body / loading placeholder / toolbar）
+  - 居中显示：失败原因 + 重试按钮（保留可恢复性）
+- 不允许「上面红 banner 错误，下面的章节区还在 loading」这种半截状态
+
+### 13.2 状态诚实
+- UI 任何时刻**只能展示**与当前真实状态一致的内容
+- 失败的请求 → 删掉它留下的所有 loading 占位（「正在提取…」「正在总结…」）
+  - 残留下来的占位会被用户当成「还在跑」——比报错还误导
+  - 规则：失败后**不留任何**残留 loading 占位
+
+### 13.3 过渡态必须真实可见
+- 加载中 → 显示「正在 XX…」（明示在跑）
+- 加载成功 → 内容
+- 加载失败 → 立即清掉 loading 字样 + 切标准错误页
+
+### 13.4 切视频清旧错误页
+- 用户切换视频（`startBilidown` 检测到 videoId 变化）时：
+  - 清掉所有 `hidePanelError(...)` 标记
+  - 不让上一个视频的「失败状态」污染新视频的初次加载
+  - cached content 路径也必须显式 hidePanelError 后再渲染
+
+---
+
+## 14. 检查清单（新页面交付前）
+
+- [ ] 所有非主操作按钮是 `.secondary`（白底浅灰边）
+- [ ] 危险操作（删除/重置/清空）是 `.danger`（白底浅灰边+红字）
+- [ ] 全页只有一个 `.primary`（dialog 内的 Keep / Cancel 例外）
+- [ ] 高级块用 `<details>` 折叠
+- [ ] 通知 / 概览 / 总结用「单 toggle 一起开关」模式
+- [ ] 所有用户可见文案在 en + zh 块都有对应 key
+- [ ] sidepanel 失败请求会切到标准错误页（不留 loading 占位）
+- [ ] 切视频会清掉旧 tab 的标准错误页标记
+- [ ] 跑全量回归 24/24 +0 fail
