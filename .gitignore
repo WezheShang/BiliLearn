@@ -24,3 +24,6 @@ package-lock.json
 *.bak
 *.tmp
 *.log
+
+# Whisper server runtime logs (output by whisper_server.py)
+*.err

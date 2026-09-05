@@ -63,6 +63,7 @@ const YTD_OPTIONS = (() => {
       whisperModelLabel: "Whisper model",
       whisperLanguageLabel: "Whisper language (blank = auto-detect)",
       whisperSetupTitle: "Local setup (transparent, nothing is auto-installed)",
+      whisperSetupHint: "Check whether your Python + faster-whisper + server are ready",
       whisperSetupStep1: "Python 3.10+ installed on this machine (bilidown bundles no Python and never installs one)",
       whisperSetupStep2: "Install the Whisper dependencies into YOUR Python — after the check, the exact command for this machine is shown; whether to run it is your call",
       whisperSetupStep3: "Double-click start_whisper_server.bat in the extension folder and keep the window open",
@@ -95,22 +96,13 @@ const YTD_OPTIONS = (() => {
       notifyPrefsLegend: "Notify when complete",
       notifyOnTranscribeLabel: "When a Whisper transcription finishes",
       notifyOnSummaryAndAnalysisLabel: "When a summary or overview finishes (toggled together)",
-      autostartLegend: "Start whisper server at boot (SYSTEM account, hidden window)",
-      autostartHelp:
-        "Runs the local whisper server as a Windows scheduled task under the SYSTEM account. No login required, no visible window. Chrome extensions cannot self-elevate, so the install/uninstall commands have to be pasted into an admin PowerShell once. The status text below is read live from schtasks.",
-      autostartStatusLabel: "Current status:",
-      autostartStatusUnknown:
-        "see manage_whisper_server.bat [1] View status, or run schtasks /Query /TN bilidown-whisper-server-autostart-system in PowerShell",
-      autostartStatusHowToCheck:
-        "Chrome extensions cannot read scheduled-task state. Run manage_whisper_server.bat and pick [1] View status, or open PowerShell and run: schtasks /Query /TN bilidown-whisper-server-autostart-system",
-      autostartCheckBtn: "How to check current status",
-      autostartCopyInstallBtn: "Copy install command",
-      autostartCopyUninstallBtn: "Copy uninstall command",
-      autostartOpenFolderBtn: "Open extension folder",
-      autostartManageHelp:
-        "Day-to-day manage (start / stop / view log) is in manage_whisper_server.bat in the extension folder.",
-      autostartCopied: "Install command copied — paste into an admin PowerShell",
-      autostartUninstallCopied: "Uninstall command copied — paste into an admin PowerShell",
+      // 2026-09-04: the "开机自启 Whisper server" block has been removed
+      // from the options page entirely. The setup script
+      // (setup_whisper_autostart_system.ps1) and the manage menu
+      // (manage_whisper_server.bat) still exist for users who want to
+      // install the SYSTEM-tier scheduled task by hand. The page no
+      // longer needs to copy install/uninstall commands or read schtasks
+      // status from JS — Chrome extensions cannot do either.
       notifyPrefsHelp:
         "Each notification names the video and clicking it focuses the open tab. Disabling a toggle does not stop the underlying job — only the desktop pop-up. Re-enable any time and the next completion will pop normally.",
 
@@ -210,6 +202,11 @@ const YTD_OPTIONS = (() => {
       whisperInstalled: "installed",
       whisperZhconvMissingHint: ({ pyExe }) =>
         `Not installed → subtitles may be Traditional; transcription is unaffected. To install: ${pyExe} -m pip install zhconv (relaunch the bat afterwards)`,
+      whisperVcRedistHint:
+        "faster-whisper imports fine, but ctranslate2.dll can't load — your Windows is missing the Microsoft Visual C++ 2015-2022 x64 redistributable. This is an OS-level dependency, NOT a pip package. Download and install it from Microsoft's site, then restart this PC and re-open the bat.",
+      whisperVcRedistLink: "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+      whisperLimitedStatusVcRedist:
+        "Server is up but the local Python can't load ctranslate2.dll. Install the Visual C++ 2015-2022 x64 redistributable (link above) and restart, then re-open the bat — pip alone can't fix this.",
       whisperReadyBarCore:
         "Environment ready. The first transcription with a model downloads and caches that model's weights (base ≈ 150 MB); transcripts are cached by BV id in the subtitle cache directory above — the same video is never transcribed twice.",
       whisperReadyBarZhconvSuffix:
@@ -315,6 +312,7 @@ const YTD_OPTIONS = (() => {
       whisperModelLabel: "Whisper 模型",
       whisperLanguageLabel: "Whisper 语言（留空自动检测）",
       whisperSetupTitle: "本地环境准备（透明流程，不会自动装任何东西）",
+      whisperSetupHint: "检查本机 Python + faster-whisper + 服务是否就绪",
       whisperSetupStep1: "本机装有 Python 3.10+（bilidown 不自带 Python，也不会替你安装）",
       whisperSetupStep2: "安装 Whisper 依赖到你的 Python——检查后这里会给出针对本机的确切命令，装不装由你决定",
       whisperSetupStep3: "双击扩展文件夹里的 start_whisper_server.bat，保持窗口开着",
@@ -336,22 +334,10 @@ const YTD_OPTIONS = (() => {
       notifyPrefsLegend: "完成后弹通知",
       notifyOnTranscribeLabel: "Whisper 转录完成时",
       notifyOnSummaryAndAnalysisLabel: "总结和概览完成时（一起开关）",
-      autostartLegend: "开机自启 Whisper server（SYSTEM 账户，隐藏窗口）",
-      autostartHelp:
-        "把本地 whisper server 注册成 Windows 计划任务，用 SYSTEM 账户在每次开机时自动启动；不要求登录、不弹窗。Chrome 扩展不能自己提权，安装/卸载命令要复制到「管理员 PowerShell」里跑一次。下方状态从 schtasks 实时读。",
-      autostartStatusLabel: "当前状态：",
-      autostartStatusUnknown:
-        "用 manage_whisper_server.bat 菜单 [1] 查看状态，或在 PowerShell 跑 schtasks /Query /TN bilidown-whisper-server-autostart-system",
-      autostartStatusHowToCheck:
-        "Chrome 扩展读不到计划任务状态。运行 manage_whisper_server.bat 选 [1] 查看状态，或开 PowerShell 跑：schtasks /Query /TN bilidown-whisper-server-autostart-system",
-      autostartCheckBtn: "怎么查看当前状态？",
-      autostartCopyInstallBtn: "复制「安装」命令",
-      autostartCopyUninstallBtn: "复制「卸载」命令",
-      autostartOpenFolderBtn: "打开扩展文件夹",
-      autostartManageHelp:
-        "日常管理（启动 / 停止 / 查看日志）用扩展文件夹里的 manage_whisper_server.bat。",
-      autostartCopied: "已复制安装命令 — 粘贴到管理员 PowerShell 跑一次",
-      autostartUninstallCopied: "已复制卸载命令 — 粘贴到管理员 PowerShell 跑一次",
+      // 2026-09-04:「开机自启 Whisper server」块已从设置页整体删除，
+      // 不再需要任何 autostart* 文案。需要手动安装的用户可以
+      // 直接运行扩展文件夹里的 setup_whisper_autostart_system.ps1
+      // 或 manage_whisper_server.bat。
       notifyPrefsHelp:
         "通知会显示视频标题，点击会聚焦已打开的视频标签页。关闭后任务仍正常运行，只是不再弹通知；随时可重新打开，下次完成时立即生效。",
 
@@ -441,6 +427,11 @@ const YTD_OPTIONS = (() => {
       whisperInstalled: "已安装",
       whisperZhconvMissingHint: ({ pyExe }) =>
         `未安装 → 字幕可能是繁体，转写不受影响。想装：${pyExe} -m pip install zhconv（装完重开 bat）`,
+      whisperVcRedistHint:
+        "faster-whisper 装好了，但加载 ctranslate2.dll 失败——你的 Windows 缺「Microsoft Visual C++ 2015-2022 x64 Redistributable」。这是系统级依赖，不是 pip 包。从微软官网下载安装，重启电脑后重开 bat。",
+      whisperVcRedistLink: "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+      whisperLimitedStatusVcRedist:
+        "server 起来了，但本地 Python 加载 ctranslate2.dll 失败。先装上方的 Visual C++ 2015-2022 x64 重启电脑后重开 bat —— pip 装不了这个，是系统级依赖。",
       whisperReadyBarCore:
         "环境就绪。首次用某个模型转写时会自动下载该模型权重并缓存（base 约 150MB）；" +
         "转写结果按 BV 号缓存在上方「字幕缓存目录」，同一视频不会重复转写。",
@@ -889,15 +880,13 @@ const YTD_OPTIONS = (() => {
     const whisperCopyCmdBtn = doc.getElementById("whisperCopyCmdBtn");
     const whisperReadyBar = doc.getElementById("whisperReadyBar");
     const whisperTestStatus = doc.getElementById("whisperTestStatus");
-    // 2026-09-02: SYSTEM-tier autostart block. Status is read from
-    // schtasks (not from chrome.storage) because the task is managed
-    // outside the extension. The install/uninstall commands are
-    // copy-paste — the extension cannot elevate itself.
-    const autostartStatusText = doc.getElementById("autostartStatusText");
-    const autostartCheckBtn = doc.getElementById("autostartCheckBtn");
-    const autostartCopyInstallBtn = doc.getElementById("autostartCopyInstallBtn");
-    const autostartCopyUninstallBtn = doc.getElementById("autostartCopyUninstallBtn");
-    const autostartOpenFolderBtn = doc.getElementById("autostartOpenFolderBtn");
+    // 2026-09-04: the SYSTEM-tier autostart block has been removed from
+    // options.html entirely, so there are no #autostartStatusText /
+    // #autostartCheckBtn / #autostartCopyInstallBtn / #autostartCopyUninstallBtn
+    // / #autostartOpenFolderBtn refs to grab. The setup script
+    // (setup_whisper_autostart_system.ps1) and the manage menu
+    // (manage_whisper_server.bat) still live in the extension folder
+    // for users who want to install the scheduled task by hand.
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -1159,6 +1148,15 @@ const YTD_OPTIONS = (() => {
           const asrValue = offered ? settings.asrProvider : "whisper";
           asrProviderSelect.value = asrValue;
           applyAsrProviderVisibility(asrValue);
+          // 2026-09-04 (user instruction "切换到whisper时要默认启动
+          // 环境监测，不满足时折叠部分要展开"): on first load, if the
+          // saved provider is whisper, kick off the same auto-check
+          // the change handler uses. Falsy when the saved value is
+          // "none" / "bailian" so we don't burn a /health roundtrip
+          // for users who never pick whisper.
+          if (asrValue === "whisper") {
+            void autoCheckWhisperAndExpand();
+          }
         }
         if (whisperUrlText) {
           // 2026-08-29: the URL is fixed (start_whisper_server.bat binds
@@ -1189,8 +1187,9 @@ const YTD_OPTIONS = (() => {
       } catch (_error) {
         applyLanguage("en");
       }
-      // 2026-09-02: setup-panel and autostart are now <details> blocks
-      // (browser-native collapse, no JS state to mirror). The notifications
+      // 2026-09-04: setup-panel is the only remaining <details> block
+      // (browser-native collapse, no JS state to mirror). The autostart
+      // block has been removed from the page entirely. The notifications
       // card was initially marked collapsible but it's only two checkbox
       // rows — folding it hides the only settings the user might want to
       // touch, which is worse than the vertical space it saves. Left open.
@@ -1323,6 +1322,59 @@ const YTD_OPTIONS = (() => {
       renderWhisperCheckResults((r && r.data) || null);
     }
 
+    // 2026-09-04: auto-check + auto-expand behavior for the whisper
+    // option. Triggered when the user (a) loads the page with whisper
+    // already selected, or (b) flips the ASR provider dropdown to
+    // "whisper". Runs runWhisperCheck (which paints the standard
+    // ✓/✗ report), then opens the local-env <details> and scrolls it
+    // into view ONLY if the check shows the environment isn't ready.
+    // If everything is green we keep the panel folded — there's no
+    // need to surface the install steps when nothing is broken.
+    async function autoCheckWhisperAndExpand() {
+      if (!whisperCheckResults) return;
+      try {
+        await runWhisperCheck();
+      } catch (_err) {
+        // The check is best-effort. A network error here should still
+        // expand the panel so the user can see the manual install
+        // instructions rather than staring at a blank report.
+        expandSetupPanelIfPresent();
+        return;
+      }
+      const h = lastWhisperHealthData || {};
+      const deps = h.deps || {};
+      const ready =
+        h.ok !== false &&
+        (deps.faster_whisper === true || deps.faster_whisper === "1.2.1");
+      if (!ready) {
+        expandSetupPanelIfPresent();
+      }
+    }
+
+    function expandSetupPanelIfPresent() {
+      const details = doc.querySelector("details.setup-panel-collapse");
+      if (!details) return;
+      if (!details.open) {
+        details.open = true;
+      }
+      // Only scroll if the panel isn't already mostly visible, so we
+      // don't yank the page if the user is already reading something
+      // else in the whisper block. JSDOM and some older browsers throw
+      // on scrollIntoView (no-op, missing impl, or the options object
+      // form) — guard the whole call rather than each branch.
+      if (typeof details.scrollIntoView === "function") {
+        try {
+          details.scrollIntoView({ block: "start", behavior: "smooth" });
+        } catch (_e1) {
+          try {
+            details.scrollIntoView();
+          } catch (_e2) {
+            // No-op: env (e.g. JSDOM) doesn't implement scroll at all.
+          }
+        }
+      }
+    }
+
     // Pure renderer for the check flow (2026-08-31 i18n rework): called by
     // runWhisperCheck after a fetch AND by applyLanguage when the UI
     // language changes, so the rendered report always follows the selected
@@ -1397,9 +1449,27 @@ const YTD_OPTIONS = (() => {
       // Case 3: limited mode — required deps missing. The command targets
       // the DETECTED python; installing is the user's call.
       if (d.ok === false) {
+        const missingList = Array.isArray(d.missing) ? d.missing : [];
         renderCheckItem(list, "Whisper server", false, translate(currentLanguage, "whisperLimitedDetail"));
         if (deps.faster_whisper == null) {
           renderCheckItem(list, "faster-whisper", false, translate(currentLanguage, "whisperMissingRequired"));
+        }
+        // 2026-09-04: detect the "ctranslate2.dll not loadable" case
+        // (VC++ 2015-2022 x64 redistributable missing on Windows).
+        // The server tags this as missing="vc_redist" — it is NOT a
+        // pip-installable package, so the regular pip-install button
+        // would mislead the user. We hide the install button and
+        // surface a direct download link instead.
+        const vcRedistMissing = missingList.indexOf("vc_redist") !== -1;
+        if (vcRedistMissing) {
+          const link = translate(currentLanguage, "whisperVcRedistLink");
+          renderCheckItem(
+            list,
+            "Visual C++ 2015-2022 x64",
+            false,
+            translate(currentLanguage, "whisperVcRedistHint"),
+            { html: `<a href="${link}" target="_blank" rel="noreferrer">${link}</a>` },
+          );
         }
         renderCheckItem(
           list,
@@ -1408,14 +1478,19 @@ const YTD_OPTIONS = (() => {
           zhconvOk ? deps.zhconv : translate(currentLanguage, "whisperZhconvMissingLimited"),
           { optional: true },
         );
-        // quoting rule: see pyCmdRef above (PowerShell paste fix).
-        const cmd = pyCmdRef + " -m pip install faster-whisper zhconv";
-        whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatus", { cmd });
-        if (whisperCopyCmdBtn) {
-          whisperCopyCmdBtn.hidden = false;
-          whisperCopyCmdBtn.dataset.cmd = cmd;
+        if (vcRedistMissing) {
+          // OS-level fix, not pip — do not show the pip install button.
+          whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatusVcRedist");
+        } else {
+          // quoting rule: see pyCmdRef above (PowerShell paste fix).
+          const cmd = pyCmdRef + " -m pip install faster-whisper zhconv";
+          whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatus", { cmd });
+          if (whisperCopyCmdBtn) {
+            whisperCopyCmdBtn.hidden = false;
+            whisperCopyCmdBtn.dataset.cmd = cmd;
+          }
+          if (installDepsBtn) installDepsBtn.hidden = false;
         }
-        if (installDepsBtn) installDepsBtn.hidden = false;
         return;
       }
 
@@ -1590,7 +1665,18 @@ const YTD_OPTIONS = (() => {
     }
     if (asrProviderSelect) {
       asrProviderSelect.addEventListener("change", () => {
-        applyAsrProviderVisibility(asrProviderSelect.value);
+        const v = asrProviderSelect.value;
+        applyAsrProviderVisibility(v);
+        // 2026-09-04: auto-run the env check on every switch to whisper.
+        // If the check reports anything other than "fully ready",
+        // expand the local-env setup panel + scroll it into view so
+        // the user lands on the install instructions immediately,
+        // without having to click "检查系统" first and then chase
+        // the dropdown. Skipped for "none" / "bailian" because the
+        // whisper block isn't even visible there.
+        if (v === "whisper") {
+          void autoCheckWhisperAndExpand();
+        }
       });
     }
     if (extFolderLink) {
@@ -1619,84 +1705,13 @@ const YTD_OPTIONS = (() => {
       });
     }
 
-    // 2026-09-02: SYSTEM autostart block wiring. MV3 extensions cannot
-    // resolve their own on-disk folder (no file:// API), cannot spawn
-    // child processes, and cannot read schtasks status. So the page
-    // copies a single PowerShell one-liner with a single placeholder
-    // <EXTENSION_FOLDER> that the user pastes their folder path into.
-    // The "Open extension folder" button jumps to chrome://extensions
-    // where Chrome displays the absolute path next to the extension
-    // card — the user copies that path, replaces the placeholder, and
-    // pastes the result into an admin PowerShell once.
-    //
-    // The setup script does the heavy lifting: setx /M, schtasks
-    // register, hidden window. The one-liner just kicks the script.
-    function buildAutostartCommand(action) {
-      const flag = action === "uninstall" ? "uninstall" : "install";
-      // The setup script lives in the extension folder. We embed a
-      // -ExecutionPolicy Bypass launch that UAC-prompts via Start-Process
-      // -Verb RunAs. The user pastes the command into a NORMAL
-      // PowerShell window; -Verb RunAs triggers the elevation dialog.
-      return (
-        "Start-Process -FilePath 'powershell.exe' " +
-        "-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass'," +
-        "'-File','<EXTENSION_FOLDER>\\setup_whisper_autostart_system.ps1'," +
-        `'-Action','${flag}'` +
-        " -Verb RunAs -WorkingDirectory '<EXTENSION_FOLDER>'"
-      );
-    }
-    async function copyAutostartCommand(action) {
-      const cmdKey =
-        action === "uninstall" ? "autostartUninstallCopied" : "autostartCopied";
-      const cmd = buildAutostartCommand(action);
-      try {
-        await root.navigator.clipboard.writeText(cmd);
-        if (whisperTestStatus) {
-          whisperTestStatus.textContent = translate(currentLanguage, cmdKey);
-        }
-      } catch (_e) {
-        if (whisperTestStatus) {
-          whisperTestStatus.textContent =
-            cmd + "  " + translate(currentLanguage, "copyFailed");
-        }
-      }
-    }
-    if (autostartCheckBtn) {
-      // The page can't read schtasks from JS. The button is a no-op
-      // (clicking it just re-states the limitation) so the user isn't
-      // confused by a "refresh" that never updates. We mark the status
-      // text accordingly so it's clear where to look.
-      autostartCheckBtn.addEventListener("click", () => {
-        if (whisperTestStatus) {
-          whisperTestStatus.textContent = translate(
-            currentLanguage,
-            "autostartStatusHowToCheck",
-          );
-        }
-      });
-    }
-    if (autostartCopyInstallBtn) {
-      autostartCopyInstallBtn.addEventListener("click", () => {
-        void copyAutostartCommand("install");
-      });
-    }
-    if (autostartCopyUninstallBtn) {
-      autostartCopyUninstallBtn.addEventListener("click", () => {
-        void copyAutostartCommand("uninstall");
-      });
-    }
-    if (autostartOpenFolderBtn) {
-      autostartOpenFolderBtn.addEventListener("click", (event) => {
-        event.preventDefault();
-        const extensionId = (chrome.runtime && chrome.runtime.id) || "";
-        const targetUrl = "chrome://extensions/?id=" + extensionId;
-        if (chrome.tabs && typeof chrome.tabs.create === "function") {
-          chrome.tabs.create({ url: targetUrl });
-        } else {
-          window.open(targetUrl, "_blank");
-        }
-      });
-    }
+    // 2026-09-04: the SYSTEM autostart block (buildAutostartCommand,
+    // copyAutostartCommand, check / copy-install / copy-uninstall /
+    // open-folder button listeners) has been removed from options.html
+    // and the JS no longer wires anything for it. The setup script
+    // (setup_whisper_autostart_system.ps1) and the manage menu
+    // (manage_whisper_server.bat) still live in the extension folder
+    // for users who want to install the scheduled task by hand.
     copyCustomizationPromptBtn.addEventListener(
       "click",
       copyCustomizationPrompt,

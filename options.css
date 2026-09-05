@@ -597,8 +597,7 @@ footer {
      <details.setup-panel-collapse> already carries the visible
      affordance; this outer <div> only needs vertical spacing to
      separate the local-env prep from neighboring blocks. No border,
-     no grey background, no rounded corners — matches the visual
-     weight of the autostart block exactly. */
+     no grey background, no rounded corners — just an honest block. */
   margin: 12px 0 16px;
 }
 
@@ -734,27 +733,33 @@ div[data-asr-field]:target {
 .setup-panel-collapse[open] > summary::before {
   transform: rotate(90deg);
 }
-/* details/summary arrow + spacing (native browser default is OK,
-   we just make the summary look like the prior fieldset legend). */
-.autostart-collapse > summary {
-  cursor: pointer;
-  font-weight: 600;
-  padding: 4px 0;
-  list-style: none;
+/* 2026-09-04: the autostart block has been removed from options.html
+   entirely, so the .autostart-collapse rules above are dead. The
+   local-env setup-panel-collapse still uses the same ▸ affordance
+   — see the .setup-panel-collapse block below. */
+/* 2026-09-04: collapsible <summary> now carries two spans — the
+   bolded title and a one-line muted hint that explains what the
+   block does at a glance. The hint sits right of the title with a
+   slight gap, and the whole row stays a single clickable line.
+   Why: users asked what the local-env block actually does when
+   collapsed — title alone ("本地环境准备") doesn't tell a new
+   visitor. */
+details > summary > .summary-hint {
+  margin-left: 10px;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.92em;
 }
-.autostart-collapse > summary::-webkit-details-marker {
-  display: none;
+/* 2026-09-04: keep the ▸ arrow pinned to the first line of the summary
+   when the hint wraps to a second line (long EN hint). The flex
+   container also tightens the gap between title and hint. */
+details > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0;
 }
-.autostart-collapse > summary::before {
-  content: "▸";
-  display: inline-block;
+details > summary::before {
+  flex: 0 0 auto;
   margin-right: 6px;
-  transition: transform 120ms ease;
-}
-.autostart-collapse[open] > summary::before {
-  transform: rotate(90deg);
-}
-.autostart-collapse > summary:focus-visible {
-  outline: 2px solid var(--focus-ring, #4f8cff);
-  outline-offset: 2px;
 }

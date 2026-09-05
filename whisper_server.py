@@ -55,10 +55,25 @@ from pathlib import Path
 FW_VERSION = None
 WhisperModel = None
 FW_IMPORT_ERROR = None
+# 2026-09-04 (user report on Python 3.13): faster-whisper itself
+# installs fine via pip (the wheel is pure-Python for faster_whisper),
+# but importing it pulls in ctranslate2 — whose DLL load fails on a
+# fresh Windows install that lacks the Visual C++ 2015-2022
+# redistributable. The error surfaces as OSError (FileNotFoundError
+# on a DLL), NOT ImportError, so the original except clause below
+# misses it. We catch OSError too and tag the missing-dep list with
+# "vc_redist" so the options page can show the user the right link.
+FW_CTRANSLATE2_ERROR = None
 try:
     from faster_whisper import WhisperModel, __version__ as FW_VERSION
 except ImportError as exc:
     FW_IMPORT_ERROR = str(exc)
+except OSError as exc:
+    # ctranslate2.dll not found, or one of its native deps (msvcp140,
+    # vcruntime140, concrt140) is missing — all caused by the absence
+    # of the Visual C++ 2015-2022 x64 redistributable on Windows.
+    FW_IMPORT_ERROR = f"ctranslate2 native deps missing: {exc}"
+    FW_CTRANSLATE2_ERROR = str(exc)
 
 
 def _zhconv_version():
@@ -80,6 +95,11 @@ def _missing_deps():
     missing = []
     if FW_VERSION is None:
         missing.append("faster-whisper")
+    if FW_CTRANSLATE2_ERROR is not None:
+        # Surface this as a separate "vc_redist" dep so the options
+        # page can show a different fix (install VC++ runtime) than
+        # the "pip install faster-whisper zhconv" hint.
+        missing.append("vc_redist")
     return missing
 
 HOST = "127.0.0.1"

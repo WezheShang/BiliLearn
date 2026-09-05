@@ -120,18 +120,25 @@ button.danger:hover { background:#fff; border-color: var(--accent); }
 **所有「不常用 / 配置完成后可以收起」的高级块都用浏览器原生 `<details>`**，不用 JS 写折叠状态。
 
 ### 6.1 适用块
-- 开机自启（SYSTEM 计划任务配置）
 - 本地环境准备（setup panel，4 个 step + 检查系统按钮）
 - 任何「设置完成后很久才回来一次」的 section
 
-### 6.2 不适用块
+### 6.2 不适用块 / 已删除块
 - 通知 section（只有 2 个 checkbox + 1 行说明——折叠反而是负担）
 - 通知 section 当前永远展开
+- **2026-09-04 反例**：「开机自启 Whisper server」块（原本是 §6.1 里的折叠块候选）
+  已从 `options.html` **整体删除**——不再用折叠收起来，而是直接没有这页 UI。
+  原因：用户已通过 `setup_whisper_autostart_system.ps1` + `manage_whisper_server.bat` 完成默认安装，
+  设置页里只展示「状态 + 复制安装/卸载命令」对用户无意义（装好就装好了）。
+  这个规则升级为：**「不常配置」≠「必须留着 UI」**——如果默认就能跑通，UI 块就删掉，不要为了"完整性"硬留在页面上。
 
 ### 6.3 实现模板
 ```html
 <details class="collapsible-block" data-default-collapsed="true">
-  <summary class="collapsible-summary">标题</summary>
+  <summary>
+    <span class="summary-title">标题</span>
+    <span class="summary-hint">一句话说明这玩意是干什么的</span>
+  </summary>
   <div class="collapsible-body">
     <!-- 内容 -->
   </div>
@@ -142,19 +149,33 @@ button.danger:hover { background:#fff; border-color: var(--accent); }
 .collapsible-block > summary {
   cursor: pointer;
   list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
   /* Plain text on the page background — NO extra border, NO background
-     fill, NO rounded box. The summary row is just `▸ + bold title`
-     on the page. */
+     fill, NO rounded box. */
 }
 .collapsible-block > summary::-webkit-details-marker { display: none; }
 .collapsible-block > summary::before {
   content: "▸";
   display: inline-block;
   margin-right: 6px;
+  flex: 0 0 auto;
   transition: transform 120ms ease;
 }
 .collapsible-block[open] > summary::before { transform: rotate(90deg); }
+.collapsible-block > summary > .summary-hint {
+  margin-left: 10px;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.92em;
+}
 ```
+
+**折叠块的 summary 必须有「标题 + 副标题」两段**（标题加粗，副标题灰色细字）：
+- 标题 = 这块叫什么（autostart → "开机自启（SYSTEM 账户，隐藏窗口）"）
+- 副标题 = 这块**干什么用的**（"让 whisper server 在每次 Windows 开机时自动启动"）
+- 没有副标题，折叠时只看到标题，**用户不知道这玩意有什么用**（2026-09-04 反馈）
 
 ### 6.4 折叠块的「外层 wrapper」必须是透明的
 - `<details>` 外面如果再包一层 `<div>` 充当 wrapper（用来挂其他 class、加 margin 等），
