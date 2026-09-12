@@ -1,6 +1,6 @@
-# bilidown 设计风格规范
+# bililearn 设计风格规范
 
-> 适用范围：bilidown Chrome 扩展 options 页 + 任何后续要做 / 复用的产品。
+> 适用范围：bililearn Chrome 扩展 options 页 + 任何后续要做 / 复用的产品。
 > 最后更新：2026-09-02（v1）
 
 ---
@@ -305,7 +305,7 @@ button.danger:hover { background:#fff; border-color: var(--accent); }
 - 加载失败 → 立即清掉 loading 字样 + 切标准错误页
 
 ### 13.4 切视频清旧错误页
-- 用户切换视频（`startBilidown` 检测到 videoId 变化）时：
+- 用户切换视频（`startBililearn` 检测到 videoId 变化）时：
   - 清掉所有 `hidePanelError(...)` 标记
   - 不让上一个视频的「失败状态」污染新视频的初次加载
   - cached content 路径也必须显式 hidePanelError 后再渲染

@@ -1,10 +1,10 @@
 @echo off
-REM bilidown whisper server — manager menu
+REM bililearn whisper server — manager menu
 REM Four actions: status / log / stop / start.
 REM Double-click this file to open the menu. Pick 1-4 or press 0 to exit.
 REM
 REM The server lives at http://127.0.0.1:7860. It can be started two ways:
-REM   (a) by the SYSTEM scheduled task "bilidown-whisper-server-autostart-system"
+REM   (a) by the SYSTEM scheduled task "bililearn-whisper-server-autostart-system"
 REM       which fires AtStartup and runs start_whisper_server_silent.vbs;
 REM   (b) manually via option [3] below (same vbs, on demand).
 REM
@@ -16,13 +16,13 @@ setlocal EnableExtensions
 set "SCRIPT_DIR=%~dp0"
 set "VBS_PATH=%SCRIPT_DIR%start_whisper_server_silent.vbs"
 set "HEALTH_URL=http://127.0.0.1:7860/health"
-set "TASK_NAME_SYSTEM=bilidown-whisper-server-autostart-system"
+set "TASK_NAME_SYSTEM=bililearn-whisper-server-autostart-system"
 set "LOG_GUESS=%SCRIPT_DIR%whisper_server.log"
 
 :menu
 cls
 echo ====================================================
-echo  bilidown whisper server manager
+echo  bililearn whisper server manager
 echo ====================================================
 echo   Server URL : %HEALTH_URL%
 echo   vbs path   : %VBS_PATH%

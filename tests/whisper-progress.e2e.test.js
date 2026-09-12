@@ -309,7 +309,7 @@ async function runFourStageFlow() {
   record("1.4 session storage holds in-flight job state", true);
 
   // Now let the in-flight triggerWhisperTranscription resolve. The
-  // success branch will try to call startBilidown, which will re-fetch
+  // success branch will try to call startBililearn, which will re-fetch
   // the transcript and likely fail (no cache yet in test) — but the
   // test only cares that we DIDN'T error out in a way that unmounts
   // the loading state.

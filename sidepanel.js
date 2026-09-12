@@ -1,7 +1,7 @@
 /**
  * SIDE PANEL LOGIC
  *
- * Handles the UI for dk-bilidown: video detection, transcript analysis,
+ * Handles the UI for dk-bililearn: video detection, transcript analysis,
  * rendering results, and export features.
  */
 
@@ -15,7 +15,22 @@ const debugLog = (...args) => {
 // ============================================================
 
 let currentVideoId = null;
-const BILIDOWN_CACHE_SCHEMA_VERSION = 4;
+const BILILEARN_CACHE_SCHEMA_VERSION = 4;
+// chrome.storage.local key prefix for per-video transcript/analysis cache.
+// Entries written before the bilidown→bililearn rename (2026-09) live under
+// the legacy prefix; reads fall back to it and migrate, removes clear both.
+const CACHE_KEY_PREFIX = "bililearn_";
+const LEGACY_CACHE_KEY_PREFIX = "bilidown_";
+
+// Clear a video's cache under both the current and the legacy (pre-rename)
+// prefix. chrome.storage.local.remove on a missing key is a harmless no-op.
+async function removeVideoCache(videoId) {
+  if (!videoId) return;
+  await chrome.storage.local.remove([
+    `${CACHE_KEY_PREFIX}${videoId}`,
+    `${LEGACY_CACHE_KEY_PREFIX}${videoId}`,
+  ]);
+}
 let generation = 0;
 let currentVideoUrl = null;
 let currentAnalysis = null;
@@ -335,7 +350,7 @@ async function maybeResumeWhisperJob() {
     try {
       await chrome.runtime.sendMessage({ action: "ackWhisperJobDone" });
     } catch {}
-    await startBilidown(frontVideoId, job.videoUrl || "");
+    await startBililearn(frontVideoId, job.videoUrl || "");
     return true;
   }
   if (job.stage === "failed") {
@@ -372,9 +387,9 @@ async function readActiveBilibiliVideoId() {
   }
 }
 
-// Listen for messages from the bilidown button on Bilibili page
+// Listen for messages from the bililearn button on Bilibili page
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === "startBilidownFromButton") {
+  if (message.action === "startBililearnFromButton") {
     // Load the digest for the current video. Served from cache when we've
     // seen this video before (no API calls); fetched fresh otherwise.
     // (This used to force-clear the cache on every click, which silently
@@ -411,7 +426,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // the watchdog recovered it from the server-side cache). If this
       // panel is attached to the job's video — e.g. it re-attached via
       // maybeResumeWhisperJob and there is no trigger caller around to
-      // re-enter startBilidown — do the re-entry ourselves so the
+      // re-enter startBililearn — do the re-entry ourselves so the
       // subtitles actually render instead of the loading screen sitting
       // there forever. (Async IIFE: this listener is not async and we
       // must not block sendResponse.)
@@ -421,8 +436,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!vid) return;
         // Drop any stale poisoned entry first, then refetch from the
         // (now-written) server cache.
-        try { await chrome.storage.local.remove(`bilidown_${vid}`); } catch {}
-        startBilidown(vid, currentVideoUrl).catch(() => {});
+        try { await chrome.storage.local.remove([`bililearn_${vid}`, `bilidown_${vid}`]); } catch {}
+        startBililearn(vid, currentVideoUrl).catch(() => {});
       })();
     }
     if (message.stage === "failed" && forThisVideo) {
@@ -468,7 +483,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 //     reopen the panel after every tab switch — too much friction.)
 //   - Front tab IS a B站 video (same or different) -> refresh the
 //     digest. Bilibili is a single-page app (clicking a video swaps
-//     content without a reload), so we track URL changes; startBilidown()
+//     content without a reload), so we track URL changes; startBililearn()
 //     caches per video, making re-checks instant and free for
 //     already-digested videos.
 //
@@ -490,7 +505,7 @@ chrome.windows.getCurrent().then((w) => {
   panelWindowId = w.id;
 });
 
-function scheduleBilidownRefresh() {
+function scheduleBililearnRefresh() {
   // Small delay lets Bilibili finish rendering the new video's title and
   // description before we read them. Also collapses rapid-fire URL events
   // into a single refresh.
@@ -525,7 +540,7 @@ function handleFrontTabUrl(url) {
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video).
   if (newVideoId !== currentVideoId || !panelIsShowingResults()) {
-    scheduleBilidownRefresh();
+    scheduleBililearnRefresh();
   }
 }
 
@@ -563,7 +578,7 @@ function setupEventListeners() {
       return;
     }
     if (currentVideoId) {
-      startBilidown(currentVideoId, currentVideoUrl);
+      startBililearn(currentVideoId, currentVideoUrl);
     }
   });
 
@@ -659,7 +674,7 @@ async function checkCurrentTab() {
     const tab = tabs[0] || null;
     const url = tab?.url || "";
 
-    debugLog("[dk-bilidown Panel] Active tab:", tab?.id, url);
+    debugLog("[dk-bililearn Panel] Active tab:", tab?.id, url);
 
     if (!url) {
       showWelcome(
@@ -671,7 +686,7 @@ async function checkCurrentTab() {
     if (!/^https:\/\/www\.bilibili\.com\/video\//.test(url)) {
       showWelcome(
         "当前页面不是 B 站视频。\n当前页面: " + url +
-        "\n提示：bilidown 只会显示 B 站视频的字幕。请打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
+        "\n提示：bililearn 只会显示 B 站视频的字幕。请打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
       );
       return;
     }
@@ -695,7 +710,7 @@ async function checkCurrentTab() {
     // video (SPA hasn't swapped the title element yet). Clear the info
     // state + header now; the authoritative title then lands from the
     // BV-keyed view API via the fetchTranscript response (see
-    // startBilidown) or from the per-video cache.
+    // startBililearn) or from the per-video cache.
     if (videoId !== currentVideoId) {
       currentVideoTitle = "";
       currentChannelName = "";
@@ -711,7 +726,7 @@ async function checkCurrentTab() {
         action: "relayToContent",
         payload: { action: "getVideoInfo" },
       });
-      debugLog("[dk-bilidown Panel] getVideoInfo result:", result);
+      debugLog("[dk-bililearn Panel] getVideoInfo result:", result);
       if (result.success && result.response) {
         currentVideoTitle = result.response.title || "";
         currentChannelName = result.response.channelName || "";
@@ -720,7 +735,7 @@ async function checkCurrentTab() {
         currentPubDate = result.response.pubdate || "";
       }
     } catch (e) {
-      console.error("[dk-bilidown Panel] getVideoInfo error:", e);
+      console.error("[dk-bililearn Panel] getVideoInfo error:", e);
       currentVideoTitle = "";
       currentChannelName = "";
       currentVideoDescription = "";
@@ -728,7 +743,7 @@ async function checkCurrentTab() {
       currentPubDate = "";
     }
 
-    startBilidown(videoId, url);
+    startBililearn(videoId, url);
   } catch (error) {
     console.error("Tab check error:", error);
     showWelcome("检测出错: " + (error?.message || error));
@@ -752,12 +767,12 @@ function extractVideoId(url) {
 }
 
 // ============================================================
-// BILIDOWN PIPELINE
+// BILILEARN PIPELINE
 // ============================================================
 
 /**
  * Wipe the previous video's DOM from every panel container (2026-08-23).
- * Called at the top of `startBilidown` (cache-miss branch) right after the
+ * Called at the top of `startBililearn` (cache-miss branch) right after the
  * in-memory state is cleared. Without this, the panel keeps showing the
  * OLD video's chapter list / quotes / summary text until the user clicks
  * the Overview or Summary tab — at which point lazy load overwrites it.
@@ -790,7 +805,7 @@ function renderVideoInfoHeader() {
     currentVideoTitle || currentChannelName ? "block" : "none";
 }
 
-async function startBilidown(videoId, videoUrl) {
+async function startBililearn(videoId, videoUrl) {
   const gen = ++generation;
   // Check if we already have this video loaded in memory
   if (videoId === currentVideoId && currentAnalysis) {
@@ -945,15 +960,15 @@ async function startBilidown(videoId, videoUrl) {
       return;
     }
     showError(
-      String(detail).includes("百炼") || String(detail).includes("音轨")
+      String(detail).includes("音轨")
         ? "语音识别失败"
         : "没有找到可靠字幕",
       detail,
     );
     errorAction = async () => {
-      await chrome.storage.local.remove(`bilidown_${videoId}`);
+      await removeVideoCache(videoId);
       currentVideoId = null;
-      startBilidown(videoId, videoUrl);
+      startBililearn(videoId, videoUrl);
     };
     return;
   }
@@ -1027,7 +1042,7 @@ function renderAnalysisResults(analysis) {
     `;
     li.addEventListener("click", () => {
       debugLog(
-        "[dk-bilidown Panel] Chapter clicked:",
+        "[dk-bililearn Panel] Chapter clicked:",
         chapter.timestamp,
         chapter.timestampSeconds,
       );
@@ -1058,7 +1073,7 @@ function renderAnalysisResults(analysis) {
     `;
     div.addEventListener("click", () => {
       debugLog(
-        "[dk-bilidown Panel] Quote clicked:",
+        "[dk-bililearn Panel] Quote clicked:",
         quote.timestamp,
         quote.timestampSeconds,
       );
@@ -1117,7 +1132,7 @@ async function saveQuoteAsNote(quote, btn) {
       // Refresh notes list if on Notes tab
       loadNotes(currentVideoId);
     } else {
-      console.error("[dk-bilidown] Save quote as note failed:", result.error);
+      console.error("[dk-bililearn] Save quote as note failed:", result.error);
       btn.textContent = "失败";
       setTimeout(() => {
         btn.textContent = originalText;
@@ -1125,7 +1140,7 @@ async function saveQuoteAsNote(quote, btn) {
       }, 1500);
     }
   } catch (error) {
-    console.error("[dk-bilidown] Save quote as note error:", error);
+    console.error("[dk-bililearn] Save quote as note error:", error);
     btn.textContent = "失败";
     setTimeout(() => {
       btn.textContent = originalText;
@@ -1189,9 +1204,7 @@ function renderTranscript() {
   const badge = document.createElement("div");
   badge.id = "transcriptSourceBadge";
   badge.className = "transcript-source-badge";
-  const sourceLabel = currentTranscriptSource === "aliyun-fun-asr"
-    ? "阿里云 Fun-ASR 语音识别"
-    : currentTranscriptSource === "local-file"
+  const sourceLabel = currentTranscriptSource === "local-file"
     ? "本地字幕"
     : currentTranscriptSource === "local-cache"
     ? "本地 Whisper 缓存"
@@ -1251,11 +1264,11 @@ function renderTranscript() {
             const resumed = await maybeResumeWhisperJob();
             if (resumed) return;
           }
-          // Capture before nulling — startBilidown needs the id to refetch.
+          // Capture before nulling — startBililearn needs the id to refetch.
           const vid = currentVideoId;
-          await chrome.storage.local.remove(`bilidown_${vid}`);
+          await removeVideoCache(vid);
           currentVideoId = null;
-          await startBilidown(vid, currentVideoUrl);
+          await startBililearn(vid, currentVideoUrl);
         } else {
           showWhisperError(result);
         }
@@ -1336,7 +1349,7 @@ function buildMarkdownExport() {
   }
   lines.push("## 完整字幕", "");
   exportTranscriptEntries().forEach((entry) => lines.push(`- [${entry.timestamp}](${entry.url}) ${entry.text}`));
-  lines.push("", "---", "由 bilidown · WezeShang二次开发版导出");
+  lines.push("", "---", "由 bililearn · WezeShang二次开发版导出");
   return lines.join("\n");
 }
 
@@ -1348,7 +1361,7 @@ function buildHtmlExport() {
     <blockquote><b>${escapeHtml(quote.timestamp)}</b>${escapeHtml(quote.quote)}</blockquote>`).join("");
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</title><style>
   :root{--pink:#fb7299;--blue:#00aeec;--ink:#18191c;--muted:#61666d;--line:#e3e5e7}*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:var(--ink);font:15px/1.75 system-ui,-apple-system,"Segoe UI",sans-serif}.page{width:min(900px,calc(100% - 28px));margin:32px auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:clamp(22px,5vw,54px);box-shadow:0 12px 36px rgba(24,25,28,.07)}h1{line-height:1.3;margin:0 0 14px}h2{margin-top:38px;padding-bottom:10px;border-bottom:2px solid rgba(251,114,153,.18)}.meta{color:var(--muted)}a{color:var(--pink);text-decoration:none}.chapter{display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--line)}.chapter a{flex:0 0 54px;font-weight:700}.chapter p{margin:4px 0;color:var(--muted)}blockquote{margin:12px 0;padding:14px 18px;border-left:4px solid var(--pink);background:rgba(251,114,153,.06);border-radius:0 10px 10px 0}blockquote b{margin-right:12px;color:var(--pink)}.line{display:grid;grid-template-columns:62px 1fr;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}.time{font-family:ui-monospace,monospace;font-weight:700}.footer{margin-top:38px;color:#9499a0;font-size:12px}@media(max-width:560px){.line{grid-template-columns:52px 1fr}.page{margin:12px auto}}
-  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}${chapters ? `<h2>AI 章节</h2>${chapters}` : ""}${quotes ? `<h2>关键观点</h2>${quotes}` : ""}<h2>完整字幕</h2>${entries.map((entry) => `<div class="line"><a class="time" href="${escapeHtml(entry.url)}">${escapeHtml(entry.timestamp)}</a><div>${escapeHtml(entry.text)}</div></div>`).join("")}<div class="footer">由 bilidown · WezeShang二次开发版导出</div></main></body></html>`;
+  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}${chapters ? `<h2>AI 章节</h2>${chapters}` : ""}${quotes ? `<h2>关键观点</h2>${quotes}` : ""}<h2>完整字幕</h2>${entries.map((entry) => `<div class="line"><a class="time" href="${escapeHtml(entry.url)}">${escapeHtml(entry.timestamp)}</a><div>${escapeHtml(entry.text)}</div></div>`).join("")}<div class="footer">由 bililearn · WezeShang二次开发版导出</div></main></body></html>`;
 }
 
 async function copyForFeishu() {
@@ -1396,7 +1409,7 @@ function buildSummaryMarkdownExport() {
     `- **视频链接：** ${currentCanonicalVideoUrl()}`,
   ];
   if (currentVideoDescription) lines.push("", "## 视频简介", "", currentVideoDescription);
-  lines.push("", currentSummary || "（暂无总结内容）", "", "---", "由 bilidown · WezeShang二次开发版导出");
+  lines.push("", currentSummary || "（暂无总结内容）", "", "---", "由 bililearn · WezeShang二次开发版导出");
   return lines.join("\n");
 }
 
@@ -1408,7 +1421,7 @@ function buildSummaryHtmlExport() {
   const body = currentSummary ? renderMarkdown(currentSummary) : "<p>（暂无总结内容）</p>";
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</title><style>
   :root{--pink:#fb7299;--blue:#00aeec;--ink:#18191c;--muted:#61666d;--line:#e3e5e7}*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:var(--ink);font:15px/1.75 system-ui,-apple-system,"Segoe UI",sans-serif}.page{width:min(900px,calc(100% - 28px));margin:32px auto;background:#fff;border:1px solid var(--line);border-radius:16px;padding:clamp(22px,5vw,54px);box-shadow:0 12px 36px rgba(24,25,28,.07)}h1{line-height:1.3;margin:0 0 14px}.meta{color:var(--muted)}a{color:var(--pink);text-decoration:none}.note h1,.note h2,.note h3,.note h4{line-height:1.35;margin:22px 0 8px}.note h1{font-size:22px}.note h2{font-size:19px;padding-bottom:8px;border-bottom:2px solid rgba(251,114,153,.18)}.note h3{font-size:16px}.note p{margin:8px 0}.note ul,.note ol{margin:8px 0;padding-left:22px}.note li{margin:3px 0}.note blockquote{margin:12px 0;padding:14px 18px;border-left:4px solid var(--pink);background:rgba(251,114,153,.06);border-radius:0 10px 10px 0;color:var(--muted)}.note code{font-family:ui-monospace,monospace;font-size:.9em;background:rgba(24,25,28,.05);border-radius:4px;padding:1px 5px}.note pre{margin:12px 0;padding:14px 16px;background:rgba(24,25,28,.04);border:1px solid var(--line);border-radius:10px;overflow-x:auto}.note pre code{background:none;padding:0}.note hr{border:none;border-top:1px solid var(--line);margin:20px 0}.note strong{color:var(--ink)}.footer{margin-top:38px;color:#9499a0;font-size:12px}@media(max-width:560px){.page{margin:12px auto}}
-  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}<div class="note">${body}</div><div class="footer">由 bilidown · WezeShang二次开发版导出</div></main></body></html>`;
+  </style></head><body><main class="page"><h1>${escapeHtml(currentVideoTitle || "B站视频学习笔记")}</h1><div class="meta">UP主：${escapeHtml(currentChannelName || "未知")} · <a href="${escapeHtml(currentCanonicalVideoUrl())}">打开原视频</a></div>${currentVideoDescription ? `<h2>视频简介</h2><p>${escapeHtml(currentVideoDescription)}</p>` : ""}<div class="note">${body}</div><div class="footer">由 bililearn · WezeShang二次开发版导出</div></main></body></html>`;
 }
 
 /**
@@ -1463,7 +1476,7 @@ async function saveFullSummaryAsNote() {
         btn.textContent = original;
         btn.disabled = false;
       }, 2500);
-      console.error("[dk-bilidown] Save summary note failed:", result?.error);
+      console.error("[dk-bililearn] Save summary note failed:", result?.error);
     }
   } catch (error) {
     btn.textContent = "保存失败";
@@ -1471,7 +1484,7 @@ async function saveFullSummaryAsNote() {
       btn.textContent = original;
       btn.disabled = false;
     }, 2500);
-    console.error("[dk-bilidown] Save summary note error:", error);
+    console.error("[dk-bililearn] Save summary note error:", error);
   }
 }
 
@@ -1664,7 +1677,7 @@ function showWhisperPrompt(videoId, videoUrl, cacheDir) {
   // A whisper job may already be running for THIS video (user switched
   // to another page mid-transcription, then came back — the panel stayed
   // open through Bilibili's SPA navigation, so only checkCurrentTab→
-  // startBilidown→fetchTranscript ran, NOT the panel-init resume path).
+  // startBililearn→fetchTranscript ran, NOT the panel-init resume path).
   // In that case attach to the job's loading UI instead of showing the
   // "no cache" prompt again, which would invite a duplicate trigger.
   maybeResumeWhisperJob().then((resumed) => {
@@ -1720,15 +1733,15 @@ function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
           // the background side): attach to the running job's progress UI
           // instead of waiting on the sendMessage promise — the terminal
           // state arrives via transcriptProgress broadcast. Falls through
-          // to startBilidown only if the job record is somehow unreadable.
+          // to startBililearn only if the job record is somehow unreadable.
           const resumed = await maybeResumeWhisperJob();
           if (resumed) return;
         }
         // Re-enter the normal flow so the new transcript renders with the
         // same UI as a first-time analysis.
-        await chrome.storage.local.remove(`bilidown_${videoId}`);
+        await removeVideoCache(videoId);
         currentVideoId = null;
-        await startBilidown(videoId, videoUrl);
+        await startBililearn(videoId, videoUrl);
       } else {
         showWhisperError(result);
         btn.disabled = false;
@@ -1915,7 +1928,7 @@ function showWhisperSetupWizardState() {
     if (up) {
       stopWhisperPing();
       if (currentVideoId && currentVideoUrl) {
-        await startBilidown(currentVideoId, currentVideoUrl);
+        await startBililearn(currentVideoId, currentVideoUrl);
       }
     } else if (statusEl) {
       statusEl.textContent = "仍未连上（每 5 秒自动重试）— 启动 server 后会自动继续";
@@ -2184,7 +2197,7 @@ async function triggerAnalysis() {
     // Save to cache now that we have analysis
     await saveToCache(currentVideoId);
   } catch (error) {
-    console.error("[dk-bilidown Panel] Analysis error:", error);
+    console.error("[dk-bililearn Panel] Analysis error:", error);
     showPanelError("overview", `Error: ${error.message}`, triggerAnalysis);
   }
 
@@ -2244,7 +2257,7 @@ async function triggerSummary() {
     // Save to cache now that we have summary
     await saveToCache(currentVideoId);
   } catch (error) {
-    console.error("[dk-bilidown Panel] Summary error:", error);
+    console.error("[dk-bililearn Panel] Summary error:", error);
     showPanelError("summary", `Error: ${error.message}`, triggerSummary);
   }
 
@@ -2470,9 +2483,9 @@ function renderMarkdown(markdown) {
 // ============================================================
 
 async function seekTo(seconds) {
-  debugLog("[dk-bilidown Panel] seekTo called with:", seconds);
+  debugLog("[dk-bililearn Panel] seekTo called with:", seconds);
   if (seconds === undefined || seconds === null) {
-    debugLog("[dk-bilidown Panel] seekTo aborted - no seconds value");
+    debugLog("[dk-bililearn Panel] seekTo aborted - no seconds value");
     return;
   }
 
@@ -2486,11 +2499,11 @@ async function seekTo(seconds) {
     if (bilibiliTabId) {
       try {
         await chrome.tabs.sendMessage(bilibiliTabId, payload);
-        debugLog("[dk-bilidown Panel] seekTo direct success");
+        debugLog("[dk-bililearn Panel] seekTo direct success");
         return;
       } catch (directErr) {
         debugLog(
-          "[dk-bilidown Panel] Direct seekTo failed, falling back to relay:",
+          "[dk-bililearn Panel] Direct seekTo failed, falling back to relay:",
           directErr.message,
         );
       }
@@ -2501,9 +2514,9 @@ async function seekTo(seconds) {
       action: "relayToContent",
       payload,
     });
-    debugLog("[dk-bilidown Panel] seekTo relay result:", result);
+    debugLog("[dk-bililearn Panel] seekTo relay result:", result);
   } catch (error) {
-    console.error("[dk-bilidown Panel] seekTo error:", error);
+    console.error("[dk-bililearn Panel] seekTo error:", error);
   }
 }
 
@@ -2598,11 +2611,24 @@ async function copyToClipboardWithFeedback(text, buttonId) {
  * to land a file at an arbitrary path without a native helper, and it
  * gives the user a confirmation of where the file is going.
  *
- * If no custom `exportDir` is set, the file lands in the default
- * Downloads folder silently (no dialog).
+ * If no custom `exportDir` is set, the file lands in the
+ * DEFAULT_EXPORT_SUBDIR subfolder of the browser's default Downloads
+ * folder, silently (no dialog). A relative `filename` in
+ * chrome.downloads.download() is resolved against the default download
+ * directory on Windows/macOS/Linux alike, and Chrome creates missing
+ * subfolders automatically — so the extension never needs to know the
+ * absolute Downloads path (MV3 exposes no $HOME / %USERPROFILE% API).
+ * If the user has changed the browser's download location, the relative
+ * path follows that setting too.
  *
  * Requires the `downloads` permission.
  */
+const DEFAULT_EXPORT_SUBDIR = "BiliSubs";
+
+function defaultExportFilename(filename) {
+  return `${DEFAULT_EXPORT_SUBDIR}/${filename}`;
+}
+
 async function downloadTextFile(text, filename, mimeType = "text/plain;charset=utf-8") {
   const blob = new Blob([text], { type: mimeType });
 
@@ -2623,10 +2649,10 @@ async function downloadTextFile(text, filename, mimeType = "text/plain;charset=u
     const STORAGE_KEY = "ytd_settings";
     const stored = await chrome.storage.local.get(STORAGE_KEY);
     exportDir = (stored?.[STORAGE_KEY]?.exportDir || "").trim();
-    console.log("[dk-bilidown] Export directory from storage:", exportDir || "(default Downloads)");
+    console.log("[dk-bililearn] Export directory from storage:", exportDir || "(default Downloads/BiliSubs)");
   } catch (_err) {
     // Storage might be locked or unavailable; fall through to default.
-    console.error("[dk-bilidown] Failed to read exportDir from storage:", _err);
+    console.error("[dk-bililearn] Failed to read exportDir from storage:", _err);
   }
 
   const downloadOptions = {
@@ -2643,25 +2669,29 @@ async function downloadTextFile(text, filename, mimeType = "text/plain;charset=u
     downloadOptions.filename = fullPath;
     downloadOptions.saveAs = true; // Show Save As dialog with path pre-filled
   } else {
-    downloadOptions.saveAs = false; // Silent download to default Downloads
+    // No custom directory: relative filename resolves against the
+    // browser's default Downloads folder; the BiliSubs subfolder is
+    // created automatically on first export.
+    downloadOptions.filename = defaultExportFilename(filename);
+    downloadOptions.saveAs = false; // Silent download to Downloads/BiliSubs
   }
 
   try {
     const downloadId = await chrome.downloads.download(downloadOptions);
-    console.log("[dk-bilidown] Download started, ID:", downloadId, "options:", downloadOptions);
+    console.log("[dk-bililearn] Download started, ID:", downloadId, "options:", downloadOptions);
   } catch (error) {
-    console.error("[dk-bilidown] Failed to start download:", error);
-    // Try a fallback: just use the filename without path
+    console.error("[dk-bililearn] Failed to start download:", error);
+    // Try a fallback: relative path into the default Downloads folder
     try {
       const fallbackId = await chrome.downloads.download({
         url: dataUrl,
-        filename: filename,
+        filename: defaultExportFilename(filename),
         saveAs: false,
         conflictAction: "uniquify",
       });
-      console.log("[dk-bilidown] Fallback download started, ID:", fallbackId);
+      console.log("[dk-bililearn] Fallback download started, ID:", fallbackId);
     } catch (fallbackError) {
-      console.error("[dk-bilidown] Fallback download also failed:", fallbackError);
+      console.error("[dk-bililearn] Fallback download also failed:", fallbackError);
       alert("下载失败：\n" + error.message);
     }
   }
@@ -2921,7 +2951,7 @@ async function saveToCache(videoId) {
     }
 
     const cacheData = {
-      schemaVersion: BILIDOWN_CACHE_SCHEMA_VERSION,
+      schemaVersion: BILILEARN_CACHE_SCHEMA_VERSION,
       videoId,
       analysis: currentAnalysis, // May be null if not yet analyzed
       summary: currentSummary, // May be null if not yet summarized
@@ -2936,7 +2966,7 @@ async function saveToCache(videoId) {
       timestamp: Date.now(),
     };
 
-    await chrome.storage.local.set({ [`bilidown_${videoId}`]: cacheData });
+    await chrome.storage.local.set({ [`${CACHE_KEY_PREFIX}${videoId}`]: cacheData });
     debugLog(
       "Saved to cache:",
       videoId,
@@ -2959,24 +2989,24 @@ async function saveToCache(videoId) {
 async function evictOldCacheEntries(maxEntries) {
   try {
     const allData = await chrome.storage.local.get(null);
-    let bilidownKeys = Object.keys(allData).filter((k) =>
-      k.startsWith("bilidown_"),
+    let bililearnKeys = Object.keys(allData).filter(
+      (k) => k.startsWith(CACHE_KEY_PREFIX) || k.startsWith(LEGACY_CACHE_KEY_PREFIX),
     );
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
-    const expired = bilidownKeys.filter((key) => {
+    const expired = bililearnKeys.filter((key) => {
       const timestamp = Number(allData[key]?.timestamp) || 0;
       return Date.now() - timestamp > THIRTY_DAYS;
     });
     if (expired.length) {
       await chrome.storage.local.remove(expired);
       const expiredSet = new Set(expired);
-      bilidownKeys = bilidownKeys.filter((key) => !expiredSet.has(key));
+      bililearnKeys = bililearnKeys.filter((key) => !expiredSet.has(key));
     }
 
-    if (bilidownKeys.length <= maxEntries) return;
+    if (bililearnKeys.length <= maxEntries) return;
 
     // Sort by timestamp (oldest first) and remove excess
-    const sorted = bilidownKeys
+    const sorted = bililearnKeys
       .map((k) => ({ key: k, ts: allData[k]?.timestamp || 0 }))
       .sort((a, b) => a.ts - b.ts);
 
@@ -2985,7 +3015,7 @@ async function evictOldCacheEntries(maxEntries) {
       .map((e) => e.key);
     if (toRemove.length > 0) {
       await chrome.storage.local.remove(toRemove);
-      debugLog(`[dk-bilidown] Evicted ${toRemove.length} old cache entries`);
+      debugLog(`[dk-bililearn] Evicted ${toRemove.length} old cache entries`);
     }
   } catch (error) {
     console.error("Cache eviction error:", error);
@@ -3000,10 +3030,22 @@ async function loadFromCache(videoId) {
   if (!videoId) return null;
 
   try {
-    const result = await chrome.storage.local.get(`bilidown_${videoId}`);
-    const cached = result[`bilidown_${videoId}`];
+    const cacheKey = `${CACHE_KEY_PREFIX}${videoId}`;
+    const legacyKey = `${LEGACY_CACHE_KEY_PREFIX}${videoId}`;
+    const result = await chrome.storage.local.get([cacheKey, legacyKey]);
+    let cached = result[cacheKey] || result[legacyKey];
 
     if (!cached) return null;
+
+    // Migrate a pre-rename entry so future reads hit the new key directly.
+    if (!result[cacheKey] && result[legacyKey]) {
+      try {
+        await chrome.storage.local.set({ [cacheKey]: cached });
+        await chrome.storage.local.remove(legacyKey);
+      } catch (_e) {
+        // Best-effort migration; the legacy entry still works without it.
+      }
+    }
 
     // Poisoned/legacy cache guard (2026-08-22): entries saved before the
     // background normalizeSegment fix store transcript segments in the raw
@@ -3028,8 +3070,11 @@ async function loadFromCache(videoId) {
     const wantsAsr = !!YTD_SETTINGS.normalize(
       storedSettings[YTD_SETTINGS.STORAGE_KEY],
     ).asrApiKey;
-    if (wantsAsr && cached.transcriptSource !== "aliyun-fun-asr") {
-      await chrome.storage.local.remove(`bilidown_${videoId}`);
+    if (wantsAsr) {
+      // Provider field kept for backward compat with stored user settings;
+      // never used at runtime (default is "none"). Cache is invalidated so a
+      // future settings change re-triggers the fetch path.
+      await removeVideoCache(videoId);
       return null;
     }
 
@@ -3037,17 +3082,17 @@ async function loadFromCache(videoId) {
     // fetching P1 and caching that transcript under another part. Never reuse
     // those records after the part-routing fix.
     if (
-      cached.schemaVersion !== BILIDOWN_CACHE_SCHEMA_VERSION ||
+      cached.schemaVersion !== BILILEARN_CACHE_SCHEMA_VERSION ||
       cached.videoId !== videoId
     ) {
-      await chrome.storage.local.remove(`bilidown_${videoId}`);
+      await removeVideoCache(videoId);
       return null;
     }
 
     // Cache expires after 30 days
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
     if (Date.now() - cached.timestamp > THIRTY_DAYS) {
-      await chrome.storage.local.remove(`bilidown_${videoId}`);
+      await removeVideoCache(videoId);
       return null;
     }
 
@@ -3086,7 +3131,7 @@ async function loadNotes(videoId) {
       renderNotes(result.notes, videoId);
     }
   } catch (error) {
-    console.error("[dk-bilidown Panel] Load notes error:", error);
+    console.error("[dk-bililearn Panel] Load notes error:", error);
   }
 }
 
@@ -3204,7 +3249,7 @@ async function deleteNote(noteId) {
       noteId: noteId,
     });
   } catch (error) {
-    console.error("[dk-bilidown Panel] Delete note error:", error);
+    console.error("[dk-bililearn Panel] Delete note error:", error);
   }
 }
 

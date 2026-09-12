@@ -3,7 +3,7 @@
 ## 1. 确认扩展已重新加载
 
 1. 打开 `chrome://extensions/`
-2. 找到 bilidown 扩展
+2. 找到 bililearn 扩展
 3. 点击 🔄 刷新按钮（Reload）
 4. 确认版本显示为 `1.0.0`
 
@@ -49,7 +49,7 @@
 4. 填写对应的 API Key
 5. 点击 "保存设置" 按钮
 6. **预期结果**：
-   - ✅ 显示 "设置已保存并验证成功，bilidown 将立即使用新配置。"
+   - ✅ 显示 "设置已保存并验证成功，bililearn 将立即使用新配置。"
 
 ## 7. 实际使用验证
 
@@ -100,7 +100,7 @@ chrome.storage.local.set({ 'ytd_settings': { whisperEnabled: false } });
 
 **解决方法**：
 1. 打开 PowerShell
-2. 进入 bilidown 目录
+2. 进入 bililearn 目录
 3. 运行：
 ```powershell
 python whisper_server.py

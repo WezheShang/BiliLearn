@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Install Python dependencies for bilidown's local Whisper server.
+    Install Python dependencies for bililearn's local Whisper server.
 
 .DESCRIPTION
     Detects any installed Python 3.10+ interpreter, then runs
@@ -76,7 +76,7 @@ function Test-Dep {
     }
 }
 
-Write-Host "=== bilidown whisper dependencies installer ==="
+Write-Host "=== bililearn whisper dependencies installer ==="
 Write-Host ""
 
 $py = Resolve-Python

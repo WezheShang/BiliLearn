@@ -1,7 +1,7 @@
 r"""
-bilidown Whisper local server
+bililearn Whisper local server
 =============================
-A small HTTP server that exposes `faster-whisper` to the bilidown Chrome
+A small HTTP server that exposes `faster-whisper` to the bililearn Chrome
 extension. The extension downloads the B-station audio to a local file, then
 POSTs the file path here; we return timestamped segments.
 
@@ -19,7 +19,7 @@ POST /transcribe       body: {audio_path, model?, language?, beam_size?}
 
 Start manually
 --------------
-    C:\Users\username\miniconda3\python.exe C:\Users\username\bilidown\whisper_server.py
+    C:\Users\username\miniconda3\python.exe C:\Users\username\bililearn\whisper_server.py
     # or double-click start_whisper_server.bat
 
 The first time you transcribe with a new model, faster-whisper downloads the
@@ -45,7 +45,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Transparent dependency handling (2026-08-30 rework).
 #
-# bilidown never silently pip-installs into the user's Python. If
+# bililearn never silently pip-installs into the user's Python. If
 # faster-whisper is missing we still START this server in "limited mode":
 #   /health     -> ok:false + missing list + the exact python executable
 #   /transcribe -> 503 with the exact install command
@@ -149,11 +149,11 @@ def _transcribe_claim(audio_key):
         return False, job
 ALLOWED_AUDIO_DIRS = [
     Path(os.environ.get("TEMP", r"C:\Users\username\AppData\Local\Temp")),
-    Path(r"C:\Users\username\bilidown\tmp"),
+    Path(r"C:\Users\username\bililearn\tmp"),
     Path(os.getcwd()),
 ]
 
-LOG = logging.getLogger("bilidown-whisper")
+LOG = logging.getLogger("bililearn-whisper")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -279,7 +279,7 @@ def _serialize_segments(segments, info) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "bilidown-whisper/1.0"
+    server_version = "bililearn-whisper/1.0"
 
     # Quieter logs -- only log requests, not every static asset.
     def log_message(self, fmt, *args):  # noqa: A003
@@ -668,7 +668,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = ALLOWED_AUDIO_DIRS[0]
         target.mkdir(parents=True, exist_ok=True)
         # Prefer the same {date}_{title}_{UP}.json convention that
-        # loadLocalSubtitleFile uses, so the bilidown-written cache
+        # loadLocalSubtitleFile uses, so the bililearn-written cache
         # appears in the same human-friendly namespace as .md/.txt
         # exports. Falls back to the legacy bvid_cid.json name if any
         # of the metadata fields is missing.
@@ -681,7 +681,7 @@ class Handler(BaseHTTPRequestHandler):
     def _subtitle_cache_filename(safe_bvid, safe_cid, video_title, channel_name, pub_date, ext):
         """Mirror of `subtitleCacheFilename` in settings.js. Stays in
         lockstep so the read + write paths agree on the same filename
-        for any given video — the bilidown cache is otherwise invisible
+        for any given video — the bililearn cache is otherwise invisible
         to `loadLocalSubtitleFile`, which only matches human-friendly
         names.
         """
@@ -742,7 +742,7 @@ class Handler(BaseHTTPRequestHandler):
     def _scan_json_for_ids(self, bvid, cid, root_dir):
         """Find a .json subtitle doc under root_dir pinning BOTH bvid+cid.
 
-        Reads only file heads (bilidown docs start with bvid/cid), so
+        Reads only file heads (bililearn docs start with bvid/cid), so
         scanning even a few hundred cache files stays cheap. Returns the
         winning Path or None.
         """
@@ -766,7 +766,7 @@ class Handler(BaseHTTPRequestHandler):
         If `bvid` is supplied, scans every .txt/.md under cache_dir and
         matches files whose first non-empty line is a `# Source: <bvid>`
         header — that's how up-master-report labels its outputs. This
-        lets bilidown find subtitles even when the filename pattern
+        lets bililearn find subtitles even when the filename pattern
         (YYYY-MM-DD_Title_UP) doesn't match (different date format, no
         UP name, different folder layout, etc.).
 
@@ -870,7 +870,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json_head_pins(file_path, bvid, cid):
         """True if the JSON subtitle doc at file_path pins BOTH `bvid` and `cid`.
 
-        Reads only the head of the file — bilidown-written docs always
+        Reads only the head of the file — bililearn-written docs always
         start with {"bvid": ..., "cid": ...}. The cid comparison is
         string-based because the extension writes cid as a JSON number
         while this server writes it as a string. A doc that lacks either
@@ -948,7 +948,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Test write permission by creating a temp file
         try:
-            test_file = p / f".bilidown_write_test_{int(time.time())}.tmp"
+            test_file = p / f".bililearn_write_test_{int(time.time())}.tmp"
             test_file.touch()
             test_file.unlink()
         except OSError as exc:
@@ -1080,7 +1080,7 @@ def main():
         LOG.warning('  "%s" -m pip install faster-whisper zhconv', sys.executable)
         LOG.warning("=" * 62)
     httpd = ThreadingHTTPServer(addr, Handler)
-    LOG.info("bilidown whisper server listening on http://%s:%d", HOST, PORT)
+    LOG.info("bililearn whisper server listening on http://%s:%d", HOST, PORT)
     if FW_VERSION is not None:
         LOG.info("using faster-whisper %s", FW_VERSION)
     try:

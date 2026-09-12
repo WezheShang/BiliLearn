@@ -1,6 +1,6 @@
 @echo off
-REM bilidown Whisper dependency REMOVER - testing utility (2026-08-31).
-REM Exact reverse of bilidown_whisper_setup.bat: pip-uninstalls the two
+REM bililearn (formerly bilidown) Whisper dependency REMOVER - testing utility (2026-08-31).
+REM Exact reverse of the Whisper setup script: pip-uninstalls the two
 REM packages that installer adds, so start_whisper_server.bat starts in
 REM limited mode again and the options-page first-run / setup flow can be
 REM re-tested from scratch.
@@ -10,13 +10,19 @@ REM     onnxruntime, huggingface-hub and friends. Other software on this
 REM     machine may need them; removing them blindly is unsafe.
 REM   - already-downloaded model weights, so re-testing after a reinstall
 REM     does not re-download hundreds of MB.
-title bilidown Whisper deps - uninstall (testing)
+title bililearn Whisper deps - uninstall (testing)
 setlocal
 
 set "PYTHON_EXE="
 
-if defined BILIDOWN_PYTHON (
-  if exist "%BILIDOWN_PYTHON%" set "PYTHON_EXE=%BILIDOWN_PYTHON%"
+if defined BILILEARN_PYTHON (
+  if exist "%BILILEARN_PYTHON%" set "PYTHON_EXE=%BILILEARN_PYTHON%"
+)
+
+if not defined PYTHON_EXE (
+  if defined BILIDOWN_PYTHON (
+    if exist "%BILIDOWN_PYTHON%" set "PYTHON_EXE=%BILIDOWN_PYTHON%"
+  )
 )
 
 if not defined PYTHON_EXE (

@@ -1,6 +1,6 @@
 # Changelog
 
-bilidown 的所有可记录改动。按"用户能感知到的影响"维度写，不按 commit 维度。
+bililearn 的所有可记录改动。按"用户能感知到的影响"维度写，不按 commit 维度。
 
 ## Unreleased
 
@@ -34,13 +34,13 @@ bilidown 的所有可记录改动。按"用户能感知到的影响"维度写，
 - 同一时间只允许一个非终态转写任务（同视频→提示已在跑；异视频→中文报错"同一时间只能跑一个"，避免 CPU int8 并行互相拖慢）
 - 转录进度广播带 `videoId`，面板按视频过滤，不再串台；完成广播由面板自行消费，不依赖当初触发它的页面还在
 - `showWhisperPrompt` 先查进行中任务再弹提示，避免切回页面重复弹"点 Whisper 转录"
-- "请保持视频页面打开"文案改为"转录在后台进行，可随意切换页面"（百炼路径同步）
+- "请保持视频页面打开"文案改为"转录在后台进行，可随意切换页面"（云端路径同步）
 
 **已知局限**：若 SW 死在音轨下载阶段（转写 POST 尚未发出），该次无法恢复，等 30 分钟超时后手动重试。恢复能力依赖转写请求已到达服务端。
 
 **用户操作**：manifest 新增了 `"alarms"` 权限——**必须 reload 扩展一次**才生效。
 
-**回归测试**：新增 `test_server_cache_write.js`（TTS 合成真实语音 → 验证服务端缓存落盘 + `/cache` 恢复路径 + 负例 404；朗读文本带随机编号防 LRU 撞缓存）。套件现 8 个文件，`node C:\Users\username\bilidown-tests\run_all.js` 全绿。
+**回归测试**：新增 `test_server_cache_write.js`（TTS 合成真实语音 → 验证服务端缓存落盘 + `/cache` 恢复路径 + 负例 404；朗读文本带随机编号防 LRU 撞缓存）。套件现 8 个文件，`node C:\Users\username\bililearn-tests\run_all.js` 全绿。
 
 ### 2026-08-22：两个紧急 bug 修复 + 回归测试套件
 
@@ -54,7 +54,7 @@ bilidown 的所有可记录改动。按"用户能感知到的影响"维度写，
 
 - 根因：同一音频被并发 POST `/transcribe` 三次（15:50:37 / 15:50:53 / 15:56:48），CPU int8 三路互相拖慢，几分钟内无一完成，未完成也不写缓存
 - 修复：whisper_server 按 sha256(音频) 去重——并发的相同请求共享同一次转写结果（`reused: true`）；客户端 `alreadyRunning` 防重入 + sidepanel 挂接到进行中任务的进度 UI，不再重复触发
-- 顺带修复：regenerate 按钮原代码先把 `currentVideoId` 置 null 再传给 `startBilidown`
+- 顺带修复：regenerate 按钮原代码先把 `currentVideoId` 置 null 再传给 `startBililearn`
 
 **3. Whisper 缓存文件命名统一**
 
@@ -63,8 +63,8 @@ bilidown 的所有可记录改动。按"用户能感知到的影响"维度写，
 
 **4. 回归测试套件**
 
-- 位置：`bilidown-tests/`（扩展目录外，Chrome 不扫描，避开 `_` 前缀保留字规则）
-- 一键全跑：`node C:\Users\username\bilidown-tests\run_all.js`（7 个文件，全绿 exit 0；依赖 whisper_server 在 7860 端口）
+- 位置：`bililearn-tests/`（扩展目录外，Chrome 不扫描，避开 `_` 前缀保留字规则）
+- 一键全跑：`node C:\Users\username\bililearn-tests\run_all.js`（7 个文件，全绿 exit 0；依赖 whisper_server 在 7860 端口）
 
 改动文件：`background.js` (+262) / `sidepanel.js` (+347) / `settings.js` (+42) / `whisper_server.py` (+164)
 
@@ -112,7 +112,7 @@ bilidown 的所有可记录改动。按"用户能感知到的影响"维度写，
 #### 跑测试
 
 ```powershell
-cd C:\Users\username\bilidown
+cd C:\Users\username\bililearn
 node tests/whisper-progress.e2e.test.js
 ```
 
@@ -131,6 +131,6 @@ node tests/whisper-progress.e2e.test.js
 #### 已知小问题（不影响功能但待清）
 
 - `tests/_debug_disabled.js` 残留：开发时 debug 用的临时脚本，重命名后没删。Windows mavis-trash 在当前环境不可用，需要你手动 `del tests\_debug_disabled.js`
-- `transcribeWithBailian`（阿里云百炼）路径仍然用旧的 `chrome.runtime.sendMessage({action: "transcriptProgress"})` 直发，没走 `sendWhisperProgress()` 持久化层——这条路径通常 < 1 分钟，不需要 resume，所以不强制改造
+- 已下线的云端 ASR 路径曾用旧的 `chrome.runtime.sendMessage({action: "transcriptProgress"})` 直发，没走 `sendWhisperProgress()` 持久化层——这条路径通常 < 1 分钟，不需要 resume，所以不强制改造
 
 ---

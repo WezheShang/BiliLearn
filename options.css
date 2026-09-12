@@ -215,28 +215,14 @@ select {
   cursor: pointer;
 }
 
-/* 2026-09-02: notification-prefs fieldset. Reuses the same flex row as
-   .checkbox-label but is lighter (no bold weight) — these are toggles,
-   not section gates, so the visual weight should not compete with the
-   real configuration fields above. The wrapping fieldset groups the
-   three notification toggles under one shared legend. */
-.notify-prefs {
-  /* 2026-09-02: flatten the inner fieldset so the "通知" section
-     matches the visual depth of every other .card section (no nested
-     border, no extra padding). The fieldset stays in the DOM for
-     semantics + accessible form grouping, but renders flat. */
-  margin: 16px 0 4px;
-  padding: 0;
-  border: 0;
-}
-.notify-prefs legend {
-  padding: 0;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text);
-  margin-bottom: 8px;
-}
-.notify-prefs .checkbox-row {
+/* 2026-09-10: inline checkbox row used by the embedded notify
+   toggles (whisper-notify-block, provider-notify-block). Visually
+   identical to .checkbox-label — single line, gap between the box
+   and the label, no extra padding. Reusing the same class name
+   instead of .checkbox-label because the embedded blocks live
+   INSIDE a <label> rather than next to one (a label wrapping a
+   checkbox already wires the click target). */
+.checkbox-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -244,15 +230,18 @@ select {
   font-weight: 400;
   cursor: pointer;
 }
-.notify-prefs .checkbox-row input[type="checkbox"] {
+.checkbox-row input[type="checkbox"] {
   width: auto;
   margin: 0;
   cursor: pointer;
 }
-.notify-prefs .help {
-  margin: 6px 0 8px;
-  font-size: 0.85em;
-}
+
+/* 2026-09-10: notification toggles are now embedded in their parent
+   section (whisper-notify-block inside the whisper card, and
+   provider-notify-block inside the AI provider card). They share the
+   checkbox-row / help styles already defined for the rest of the
+   form, so no extra class-specific overrides are needed. The old
+   standalone notifications card and its wrapper rules are gone. */
 
 /* ASR provider block: spacing under the dropdown mirrors .provider-fields. */
 [data-asr-field] {
@@ -588,13 +577,13 @@ footer {
 }
 
 /* ------------------------------------------------------------
-   Whisper setup panel (2026-08-30 transparency rework): visible
+   Whisper check section (2026-08-30 transparency rework): visible
    steps + read-only check button. Reuses .diagnostics-list rows for
    the check results and .diagnostics-actions for the button row.
    ------------------------------------------------------------ */
 .setup-panel {
   /* 2026-09-02: flatten the wrapper. The summary row inside
-     <details.setup-panel-collapse> already carries the visible
+     <details> already carries the visible
      affordance; this outer <div> only needs vertical spacing to
      separate the local-env prep from neighboring blocks. No border,
      no grey background, no rounded corners — just an honest block. */
@@ -714,29 +703,11 @@ div[data-asr-field]:target {
 .card.collapsible[data-collapsed="false"] > :not(h2) {
   display: block;
 }
-/* setup-panel local-env block uses <details> (browser-native collapse):
-   the summary stays, the body hides. No JS toggling needed. */
-.setup-panel-collapse > summary {
-  cursor: pointer;
-  list-style: none;
-  display: list-item;
-}
-.setup-panel-collapse > summary::-webkit-details-marker {
-  display: none;
-}
-.setup-panel-collapse > summary::before {
-  content: "▸";
-  display: inline-block;
-  margin-right: 6px;
-  transition: transform 120ms ease;
-}
-.setup-panel-collapse[open] > summary::before {
-  transform: rotate(90deg);
-}
-/* 2026-09-04: the autostart block has been removed from options.html
-   entirely, so the .autostart-collapse rules above are dead. The
-   local-env setup-panel-collapse still uses the same ▸ affordance
-   — see the .setup-panel-collapse block below. */
+/* 2026-09-07: the local-env setup block + the autostart block
+   have both been removed from options.html entirely. The check
+   button is the only entry point now. The .autostart-collapse and
+   local-env <details> styling rules above are dead and slated for
+   removal on the next CSS pass. */
 /* 2026-09-04: collapsible <summary> now carries two spans — the
    bolded title and a one-line muted hint that explains what the
    block does at a glance. The hint sits right of the title with a

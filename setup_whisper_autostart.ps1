@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    [DEPRECATED 2026-09-02] Per-user logon autostart for bilidown's
+    [DEPRECATED 2026-09-02] Per-user logon autostart for bililearn's
     whisper server. Replaced by setup_whisper_autostart_system.ps1
     (SYSTEM account, AtStartup). Kept for users who explicitly want
     per-user logon behavior. New installs should use the SYSTEM variant.
@@ -39,7 +39,7 @@ $ErrorActionPreference = "Stop"
 # the repo is cloned. This is the same pattern as the .vbs launcher.
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VbsPath   = Join-Path $ScriptDir "start_whisper_server_silent.vbs"
-$TaskName  = "bilidown-whisper-server-autostart"
+$TaskName  = "bililearn-whisper-server-autostart"
 
 function Test-WhisperVbs {
     if (-not (Test-Path $VbsPath)) {
@@ -107,7 +107,7 @@ Register-ScheduledTask `
     -Trigger $Trigger `
     -Principal $Principal `
     -Settings $Settings `
-    -Description "Starts bilidown's local Whisper server (127.0.0.1:7860) in a hidden window when the current user logs in. Re-run with -Action uninstall to remove." `
+    -Description "Starts bililearn's local Whisper server (127.0.0.1:7860) in a hidden window when the current user logs in. Re-run with -Action uninstall to remove." `
     -Force
 
 Write-Host ""

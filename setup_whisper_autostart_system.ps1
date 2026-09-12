@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Register bilidown's whisper server to start automatically at Windows
+    Register bililearn's whisper server to start automatically at Windows
     boot under the SYSTEM account (no UAC prompt, runs before any user
     logs in). For headless / always-on setups.
 
@@ -11,17 +11,20 @@
     don't want a UAC prompt at boot.
 
     What it does:
-      1. setx /M BILIDOWN_PYTHON=<resolved python.exe>
+      1. setx /M BILILEARN_PYTHON=<resolved python.exe>
          (machine-level env var so the SYSTEM process can find Python
-         without depending on SYSTEM's PATH or conda activation).
-      2. Register (or remove) a scheduled task "bilidown-whisper-server-autostart-system"
+         without depending on SYSTEM's PATH or conda activation. A legacy
+         machine-level BILIDOWN_PYTHON from before the rename is still
+         honored by start_whisper_server.bat).
+      2. Register (or remove) a scheduled task "bililearn-whisper-server-autostart-system"
          that runs at system startup, as SYSTEM, hidden window.
          The task calls wscript.exe against start_whisper_server_silent.vbs
          which in turn launches start_whisper_server.bat hidden.
 
     The Python path is resolved from the same probe order as
-    start_whisper_server.bat (BILIDOWN_PYTHON > miniconda3 > anaconda3 >
-    python.org 3.10-3.13) so this script and the bat stay in sync.
+    start_whisper_server.bat (BILILEARN_PYTHON > legacy BILIDOWN_PYTHON >
+    miniconda3 > anaconda3 > python.org 3.10-3.13) so this script and the
+    bat stay in sync.
 
 .PARAMETER Action
     'install' (default)  - resolve Python, setx /M, register SYSTEM task
@@ -44,14 +47,20 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VbsPath         = Join-Path $ScriptDir "start_whisper_server_silent.vbs"
-$TaskName        = "bilidown-whisper-server-autostart-system"
-$EnvVar          = "BILIDOWN_PYTHON"
+$TaskName        = "bililearn-whisper-server-autostart-system"
+$EnvVar          = "BILILEARN_PYTHON"
+$LegacyEnvVar    = "BILIDOWN_PYTHON"
 
 function Resolve-PythonPath {
     # Mirror the probe order in start_whisper_server.bat so the env var
-    # we set here is the same one the bat would have picked.
-    $override = [Environment]::GetEnvironmentVariable($EnvVar, "User")
-    if ($override -and (Test-Path $override)) { return $override }
+    # we set here is the same one the bat would have picked. The legacy
+    # pre-rename variable still counts as an explicit user override.
+    foreach ($name in @($EnvVar, $LegacyEnvVar)) {
+        foreach ($scope in @("User", "Machine")) {
+            $override = [Environment]::GetEnvironmentVariable($name, $scope)
+            if ($override -and (Test-Path $override)) { return $override }
+        }
+    }
 
     $candidates = @(
         (Join-Path $env:USERPROFILE "miniconda3\python.exe"),
@@ -73,7 +82,7 @@ function Resolve-PythonPath {
     $whereOut = (where.exe python 2>$null | Select-Object -First 1)
     if ($whereOut -and (Test-Path $whereOut)) { return $whereOut }
 
-    throw "Python not found. Install Python 3.10+ or set BILIDOWN_PYTHON first, then re-run."
+    throw "Python not found. Install Python 3.10+ or set BILILEARN_PYTHON first, then re-run."
 }
 
 if ($Action -eq "status") {
@@ -157,7 +166,7 @@ Register-ScheduledTask `
     -Trigger $Trigger `
     -Principal $Principal `
     -Settings $Settings `
-    -Description "Starts bilidown's local Whisper server (127.0.0.1:7860) at Windows boot under SYSTEM, in a hidden window. Re-run with -Action uninstall to remove." `
+    -Description "Starts bililearn's local Whisper server (127.0.0.1:7860) at Windows boot under SYSTEM, in a hidden window. Re-run with -Action uninstall to remove." `
     -Force
 
 Write-Host ""
@@ -168,7 +177,7 @@ Write-Host "  - On your next reboot, the whisper server starts under SYSTEM"
 Write-Host "  - It listens on http://127.0.0.1:7860"
 Write-Host "  - It runs whether or not any user is logged in"
 Write-Host "  - Logs go to Task Scheduler event log + the user-account log"
-Write-Host "    file (C:\Users\...\bilidown\whisper_server.log) if writable"
+Write-Host "    file (C:\Users\...\bililearn\whisper_server.log) if writable"
 Write-Host ""
 Write-Host "To start it RIGHT NOW (without waiting for boot):"
 Write-Host "      wscript `"$VbsPath`""

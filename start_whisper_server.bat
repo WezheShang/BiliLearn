@@ -1,5 +1,5 @@
 @echo off
-REM bilidown whisper server launcher
+REM bililearn whisper server launcher
 REM Double-click this file to start the local Whisper server.
 REM Keep the window open. The server listens on http://127.0.0.1:7860.
 REM Missing dependencies are REPORTED, never auto-installed (2026-08-30).
@@ -10,14 +10,21 @@ set "SCRIPT_DIR=%~dp0"
 set "SERVER_SCRIPT=%SCRIPT_DIR%whisper_server.py"
 
 REM Find a Python interpreter. Order:
-REM   1) %BILIDOWN_PYTHON% (user override, optional)
+REM   1) %BILILEARN_PYTHON% (user override, optional;
+REM      legacy %BILIDOWN_PYTHON% from before the rename still honored)
 REM   2) `where python` (whatever is on PATH)
 REM   3) common install locations (miniconda / anaconda / official Python.org)
 REM If none found, prompt the user to install one — don't hard-fail.
 set "PYTHON_EXE="
 
-if defined BILIDOWN_PYTHON (
-  if exist "%BILIDOWN_PYTHON%" set "PYTHON_EXE=%BILIDOWN_PYTHON%"
+if defined BILILEARN_PYTHON (
+  if exist "%BILILEARN_PYTHON%" set "PYTHON_EXE=%BILILEARN_PYTHON%"
+)
+
+if not defined PYTHON_EXE (
+  if defined BILIDOWN_PYTHON (
+    if exist "%BILIDOWN_PYTHON%" set "PYTHON_EXE=%BILIDOWN_PYTHON%"
+  )
 )
 
 if not defined PYTHON_EXE (
@@ -52,17 +59,17 @@ if not defined PYTHON_EXE (
   echo.
   echo Then either:
   echo   - Re-run this bat after Python is on PATH, or
-  echo   - Set BILIDOWN_PYTHON to your python.exe absolute path before running.
+  echo   - Set BILILEARN_PYTHON (legacy BILIDOWN_PYTHON also works) to your python.exe absolute path before running.
   echo.
   echo Example:
-  echo   set BILIDOWN_PYTHON=C:\Python312\python.exe
+  echo   set BILILEARN_PYTHON=C:\Python312\python.exe
   echo   %~nx0
   pause
   exit /b 1
 )
 
 REM Pre-flight (2026-08-30 transparency rework): CHECK ONLY.
-REM bilidown never silently pip-installs into your Python. If a dependency
+REM bililearn never silently pip-installs into your Python. If a dependency
 REM is missing we print exactly what is missing and the exact command to
 REM fix it, then still start the server in LIMITED mode (/health reports
 REM ok:false + what is missing; /transcribe answers 503). The extension
@@ -98,7 +105,7 @@ if "%MISSING_FW%"=="1" (
   echo.
 )
 
-echo Starting bilidown Whisper server...
+echo Starting bililearn Whisper server...
 echo   python : %PYTHON_EXE%
 echo   script : %SERVER_SCRIPT%
 echo   url    : http://127.0.0.1:7860

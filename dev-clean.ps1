@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Pre-flight cleanup for the bilidown Chrome extension directory.
+  Pre-flight cleanup for the bililearn Chrome extension directory.
 
 .DESCRIPTION
   Chrome refuses to load an extension when ANY file or subdirectory
@@ -20,24 +20,24 @@
        the extension tree while iterating
 
   This script moves any such entries from the extension root to a
-  sibling directory outside the extension (bilidown-tests/_stray/) so
+  sibling directory outside the extension (bililearn-tests/_stray/) so
   Chrome will load the extension. The moves are recoverable — nothing
   is deleted.
 
 .PARAMETER ExtDir
-  Path to the bilidown extension root. Defaults to the script's own
+  Path to the bililearn extension root. Defaults to the script's own
   parent directory (so it can be double-clicked from File Explorer).
 
 .PARAMETER StashDir
   Where to put recovered entries. Defaults to
-  ..\bilidown-tests\_stray\ relative to ExtDir.
+  ..\bililearn-tests\_stray\ relative to ExtDir.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\dev-clean.ps1
   # Cleans the extension dir next to this script.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\dev-clean.ps1 -ExtDir C:\path\to\bilidown
+  powershell -ExecutionPolicy Bypass -File .\dev-clean.ps1 -ExtDir C:\path\to\bililearn
 
 .NOTES
   - Idempotent: safe to re-run. Skips anything that's already been moved.
@@ -73,7 +73,7 @@ if (-not $ExtDir) {
 Set-Location $ExtDir
 
 if (-not $StashDir) {
-  $StashDir = Join-Path (Join-Path $ExtDir '..') 'bilidown-tests\_stray'
+  $StashDir = Join-Path (Join-Path $ExtDir '..') 'bililearn-tests\_stray'
 }
 if (-not (Test-Path $StashDir)) {
   New-Item -ItemType Directory -Force -Path $StashDir | Out-Null

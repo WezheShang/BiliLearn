@@ -1,4 +1,4 @@
-' bilidown whisper server — silent launcher (no console window at all)
+' bililearn whisper server — silent launcher (no console window at all)
 ' Used by both the per-user setup and the SYSTEM AtStartup setup.
 ' Double-clicking it has the same effect: starts the server with no
 ' visible window. WindowStyle=0 hides the cmd window that start_whisper_server.bat

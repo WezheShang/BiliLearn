@@ -1,11 +1,11 @@
 const YTD_OPTIONS = (() => {
   const LANGUAGE_STORAGE_KEY = "ytd_options_language";
-  const PREVIEW_STORAGE_PREFIX = "bilidownPreview:";
+  const PREVIEW_STORAGE_PREFIX = "bililearnPreview:";
   const SUPPORTED_LANGUAGES = new Set(["en", "zh-CN"]);
 
   const COPY = {
     en: {
-      pageTitle: "bilidown Settings",
+      pageTitle: "bililearn Settings",
       languageGroupLabel: "Interface language",
       heading: "Bring your own API keys",
       lede:
@@ -42,11 +42,11 @@ const YTD_OPTIONS = (() => {
       glmApiTypeCoding: "Coding Plan (subscription)",
       glmApiTypeStandard: "Standard API (pay-as-you-go)",
       minimaxHelp:
-        "bilidown uses minimax for overviews, explanations, translation, and note polishing. ",
+        "bililearn uses minimax for overviews, explanations, translation, and note polishing. ",
       deepseekHelp:
-        "bilidown uses DeepSeek for overviews, explanations, translation, and note polishing. ",
+        "bililearn uses DeepSeek for overviews, explanations, translation, and note polishing. ",
       glmHelp:
-        "bilidown uses GLM (Zhipu / Z.AI) for overviews, explanations, translation, and note polishing. Default model: glm-4.6. ",
+        "bililearn uses GLM (Zhipu / Z.AI) for overviews, explanations, translation, and note polishing. Default model: glm-4.6. ",
       minimaxLink: "Create a minimax API key",
       deepseekLink: "Create a DeepSeek API key",
       glmLink: "Create a Zhipu API key",
@@ -57,14 +57,14 @@ const YTD_OPTIONS = (() => {
         "When you use AI features, the selected provider receives the video transcript and relevant video context. Review the active provider's terms and pricing before saving.",
       whisperHeading: "Local Whisper (optional)",
       whisperHelp:
-        "After starting start_whisper_server.bat, bilidown downloads the audio when Bilibili has no usable subtitles, transcribes it locally, and then asks the AI to fix proper-noun errors.",
+        "After starting start_whisper_server.bat, bililearn downloads the audio when Bilibili has no usable subtitles, transcribes it locally, and then asks the AI to fix proper-noun errors.",
       whisperEnabledLabel: "Enable local Whisper fallback",
       whisperUrlLabel: "Whisper server URL",
       whisperModelLabel: "Whisper model",
       whisperLanguageLabel: "Whisper language (blank = auto-detect)",
       whisperSetupTitle: "Local setup (transparent, nothing is auto-installed)",
       whisperSetupHint: "Check whether your Python + faster-whisper + server are ready",
-      whisperSetupStep1: "Python 3.10+ installed on this machine (bilidown bundles no Python and never installs one)",
+      whisperSetupStep1: "Python 3.10+ installed on this machine (bililearn bundles no Python and never installs one)",
       whisperSetupStep2: "Install the Whisper dependencies into YOUR Python — after the check, the exact command for this machine is shown; whether to run it is your call",
       whisperSetupStep3: "Double-click start_whisper_server.bat in the extension folder and keep the window open",
       whisperSetupStep4: "Click “Check system” — all ✓ means ready",
@@ -105,6 +105,11 @@ const YTD_OPTIONS = (() => {
       // status from JS — Chrome extensions cannot do either.
       notifyPrefsHelp:
         "Each notification names the video and clicking it focuses the open tab. Disabling a toggle does not stop the underlying job — only the desktop pop-up. Re-enable any time and the next completion will pop normally.",
+      // 2026-09-11: help for the notify block embedded in the AI provider
+      // card (#aiProviderNotifyBlock). Mirrors notifyPrefsHelp but explains
+      // why summary + overview share one toggle.
+      aiProviderNotifyHelp:
+        "A desktop notification pops when the job finishes; clicking it focuses the open video tab. Disabling it only suppresses the pop-up — the underlying job still runs. Summary and overview are the same kind of work (both are LLM passes over the transcript), so they share one toggle.",
 
       saveSettings: "Save settings",
       localRemix: "Local remix",
@@ -114,7 +119,7 @@ const YTD_OPTIONS = (() => {
       customizationIntro:
         "You can edit the prompt directly. Complete these three steps before copying:",
       customizationStepFolder:
-        "Open the extracted bilidown project folder in your coding agent.",
+        "Open the extracted bililearn project folder in your coding agent.",
       customizationStepReplace:
         "Replace [PROVIDER] and [MODEL] with the service and model you want to use.",
       customizationStepKeys:
@@ -124,7 +129,7 @@ const YTD_OPTIONS = (() => {
       customizationReminder:
         "Before copying, replace [PROVIDER] and [MODEL] with the provider and model you want to use.",
       customizationPrompt:
-        "Customize this local bilidown workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is bilidown. If verification fails, stop and ask me to open the extracted bilidown project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.",
+        "Customize this local bililearn workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is bililearn. If verification fails, stop and ask me to open the extracted bililearn project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.",
       copyCustomizationPrompt: "Copy edited prompt",
       localData: "Local data",
       localDataHelp:
@@ -139,7 +144,7 @@ const YTD_OPTIONS = (() => {
       saving: "Saving…",
       addSupadataKey: "Add a Supadata API key.",
       addMiniMaxKey: "Add a minimax API key.",
-      saved: "Settings saved and verified. bilidown will use them immediately.",
+      saved: "Settings saved and verified. bililearn will use them immediately.",
       saveFailed: "Could not save settings. Please try again.",
       copying: "Copying…",
       promptCopied: "Edited prompt copied.",
@@ -161,13 +166,13 @@ const YTD_OPTIONS = (() => {
       dirtyBanner: "Click “Save settings” — otherwise your changes will not be saved.",
       asrSectionTitle: "Speech recognition",
       asrSectionHelp:
-        "When a Bilibili video has no native subtitles, bilidown uses the engine selected below to generate timestamped subtitles.",
+        "When a Bilibili video has no native subtitles, bililearn uses the engine selected below to generate timestamped subtitles.",
       asrSelectAriaLabel: "Speech recognition service",
       asrOptionNone: "Off (Bilibili native subtitles only)",
       asrOptionWhisper: "Local Whisper",
       asrBailianKeyLabel: "Bailian API key",
       asrBailianHelp:
-        "bilidown downloads the Bilibili audio track, uploads it to Bailian's 48-hour temporary storage, and uses Fun-ASR to generate timestamped subtitles ",
+        "bililearn downloads the Bilibili audio track, uploads it to Bailian's 48-hour temporary storage, and uses Fun-ASR to generate timestamped subtitles ",
       asrBailianLink: "Get a Bailian API key",
       asrBailianHelpSuffix: ".",
       whisperSetupDownloadTitle:
@@ -217,7 +222,7 @@ const YTD_OPTIONS = (() => {
       optionalBadge: "optional",
       installRowTitle: "Download setup script",
       installDownloadedStatus:
-        "Downloaded bilidown_whisper_setup.bat (plain text — open it to review before running). It will: find Python → download and install faster-whisper + zhconv from the official PyPI (pypi.org) → verify imports. Click “Run” in the Windows prompt.",
+        "Downloaded bililearn_whisper_setup.bat (plain text — open it to review before running). It will: find Python → download and install faster-whisper + zhconv from the official PyPI (pypi.org) → verify imports. Click “Run” in the Windows prompt.",
       installDownloadFailStatus:
         "Download failed. Alternative: click “Check system” for the exact install command for this machine and paste it into a terminal yourself.",
       installRowOk:
@@ -255,9 +260,9 @@ const YTD_OPTIONS = (() => {
       diagAiKeyCustom: "Custom model: configure the key in the matching field",
     },
     "zh-CN": {
-      pageTitle: "bilidown 设置",
+      pageTitle: "bililearn 设置",
       languageGroupLabel: "界面语言",
-      heading: "bilidown 设置",
+      heading: "bililearn 设置",
       lede:
         "密钥仅保存在当前 Chrome 个人资料中。音频会发送给阿里云百炼进行语音识别，字幕和视频上下文会发送给 minimax 生成概览等内容。",
       transcriptProvider: "字幕服务",
@@ -291,11 +296,11 @@ const YTD_OPTIONS = (() => {
       glmApiTypeCoding: "Coding Plan（订阅）",
       glmApiTypeStandard: "Standard API（按量计费）",
       minimaxHelp:
-        "bilidown 使用 minimax 生成概览、解释内容、翻译字幕和润色笔记。",
+        "bililearn 使用 minimax 生成概览、解释内容、翻译字幕和润色笔记。",
       deepseekHelp:
-        "bilidown 使用 DeepSeek 生成概览、解释内容、翻译字幕和润色笔记。",
+        "bililearn 使用 DeepSeek 生成概览、解释内容、翻译字幕和润色笔记。",
       glmHelp:
-        "bilidown 使用 GLM（智谱 / Z.AI）生成概览、解释内容、翻译字幕和润色笔记。默认模型 glm-4.6。",
+        "bililearn 使用 GLM（智谱 / Z.AI）生成概览、解释内容、翻译字幕和润色笔记。默认模型 glm-4.6。",
       minimaxLink: "创建 minimax API 密钥",
       deepseekLink: "创建 DeepSeek API 密钥",
       glmLink: "创建智谱 API 密钥",
@@ -313,7 +318,7 @@ const YTD_OPTIONS = (() => {
       whisperLanguageLabel: "Whisper 语言（留空自动检测）",
       whisperSetupTitle: "本地环境准备（透明流程，不会自动装任何东西）",
       whisperSetupHint: "检查本机 Python + faster-whisper + 服务是否就绪",
-      whisperSetupStep1: "本机装有 Python 3.10+（bilidown 不自带 Python，也不会替你安装）",
+      whisperSetupStep1: "本机装有 Python 3.10+（bililearn 不自带 Python，也不会替你安装）",
       whisperSetupStep2: "安装 Whisper 依赖到你的 Python——检查后这里会给出针对本机的确切命令，装不装由你决定",
       whisperSetupStep3: "双击扩展文件夹里的 start_whisper_server.bat，保持窗口开着",
       whisperSetupStep4: "点「检查系统」，全部 ✓ 即就绪",
@@ -340,6 +345,10 @@ const YTD_OPTIONS = (() => {
       // 或 manage_whisper_server.bat。
       notifyPrefsHelp:
         "通知会显示视频标题，点击会聚焦已打开的视频标签页。关闭后任务仍正常运行，只是不再弹通知；随时可重新打开，下次完成时立即生效。",
+      // 2026-09-11: 与 options.html 中 #aiProviderNotifyBlock 的默认中文
+      // 逐字节一致（i18n 惯例：测试断言依赖原文）。
+      aiProviderNotifyHelp:
+        "任务完成后会弹系统级通知。点击通知会聚焦已打开的视频标签页；关闭通知只是不弹卡片，任务本体不受影响。总结和概览是同一类工作（都是对转录后的字幕做 LLM 处理），因此统一一个开关。",
 
       saveSettings: "保存设置",
       localRemix: "本地改造",
@@ -348,7 +357,7 @@ const YTD_OPTIONS = (() => {
       agentBadge: "可交给编程 Agent",
       customizationIntro: "你可以直接编辑提示词。复制前完成以下三步：",
       customizationStepFolder:
-        "在编程 Agent 中打开 bilidown 解压后的项目文件夹。",
+        "在编程 Agent 中打开 bililearn 解压后的项目文件夹。",
       customizationStepReplace:
         "把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。",
       customizationStepKeys:
@@ -358,7 +367,7 @@ const YTD_OPTIONS = (() => {
       customizationReminder:
         "复制前，请先把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。",
       customizationPrompt:
-        "请把当前本地 bilidown 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 bilidown。如果验证失败，请停止，并让我在编程 Agent 中打开 bilidown 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。minimax 专用的请求参数和重试逻辑继续只用于 minimax。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 Bilibili 视频上测试。",
+        "请把当前本地 bililearn 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 bililearn。如果验证失败，请停止，并让我在编程 Agent 中打开 bililearn 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。minimax 专用的请求参数和重试逻辑继续只用于 minimax。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 Bilibili 视频上测试。",
       copyCustomizationPrompt: "复制编辑后的提示词",
       localData: "本地数据",
       localDataHelp:
@@ -373,7 +382,7 @@ const YTD_OPTIONS = (() => {
       saving: "正在保存…",
       addSupadataKey: "请添加 Supadata API 密钥。",
       addMiniMaxKey: "请添加所选 AI 服务的 API 密钥。",
-      saved: "设置已保存并验证成功，bilidown 将立即使用新配置。",
+      saved: "设置已保存并验证成功，bililearn 将立即使用新配置。",
       saveFailed: "无法保存设置，请重试。",
       copying: "正在复制…",
       promptCopied: "已复制编辑后的提示词。",
@@ -389,13 +398,13 @@ const YTD_OPTIONS = (() => {
       // 值与改造前写死渲染的中文逐字节一致（测试断言依赖原文）。
       dirtyBanner: "请点击保存设置，否则您的修改将不被保存。",
       asrSectionTitle: "语音识别",
-      asrSectionHelp: "B 站没有原生字幕时，bilidown 会用下面选择的引擎给视频生成带时间戳的字幕。",
+      asrSectionHelp: "B 站没有原生字幕时，bililearn 会用下面选择的引擎给视频生成带时间戳的字幕。",
       asrSelectAriaLabel: "语音识别服务",
       asrOptionNone: "不使用（仅用 B 站原生字幕）",
       asrOptionWhisper: "本地 Whisper",
       asrBailianKeyLabel: "百炼 API Key",
       asrBailianHelp:
-        "bilidown 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。",
+        "bililearn 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。",
       asrBailianLink: "获取百炼 API Key",
       asrBailianHelpSuffix: "。",
       whisperSetupDownloadTitle:
@@ -443,7 +452,7 @@ const YTD_OPTIONS = (() => {
       optionalBadge: "可选",
       installRowTitle: "下载安装脚本",
       installDownloadedStatus:
-        "已下载 bilidown_whisper_setup.bat（内容是纯文本，运行前可先打开看）。它会：找 Python → 从官方源 PyPI（pypi.org）下载并安装 faster-whisper + zhconv → 验证导入。Windows 确认框里点“运行”即可。",
+        "已下载 bililearn_whisper_setup.bat（内容是纯文本，运行前可先打开看）。它会：找 Python → 从官方源 PyPI（pypi.org）下载并安装 faster-whisper + zhconv → 验证导入。Windows 确认框里点“运行”即可。",
       installDownloadFailStatus: "下载失败。备选：点「检查系统」拿针对本机的安装命令，自己粘贴到终端执行。",
       installRowOk:
         "脚本内容透明：自动找 Python → pip install faster-whisper zhconv（包从官方源 pypi.org 下载，来源会在脚本运行时打印）→ 验证导入；装到哪个 Python 会在脚本里打印",
@@ -495,16 +504,23 @@ const YTD_OPTIONS = (() => {
   function buildWhisperSetupBat() {
     const lines = [
       "@echo off",
-      "REM bilidown Whisper dependency one-click installer.",
-      "REM Generated by the bilidown options page. Safe to run from any",
+      "REM bililearn Whisper dependency one-click installer.",
+      "REM Generated by the bililearn options page. Safe to run from any",
       "REM directory - pip installs into Python itself, not a folder.",
-      "title bilidown Whisper setup",
+      "title bililearn Whisper setup",
       "setlocal",
       "",
       "set \"PYTHON_EXE=\"",
       "",
-      "if defined BILIDOWN_PYTHON (",
-      "  if exist \"%BILIDOWN_PYTHON%\" set \"PYTHON_EXE=%BILIDOWN_PYTHON%\"",
+      "if defined BILILEARN_PYTHON (",
+      "  if exist \"%BILILEARN_PYTHON%\" set \"PYTHON_EXE=%BILILEARN_PYTHON%\"",
+      ")",
+      "",
+      "REM Legacy override from before the bilidown->bililearn rename.",
+      "if not defined PYTHON_EXE (",
+      "  if defined BILIDOWN_PYTHON (",
+      "    if exist \"%BILIDOWN_PYTHON%\" set \"PYTHON_EXE=%BILIDOWN_PYTHON%\"",
+      "  )",
       ")",
       "",
       "if not defined PYTHON_EXE (",
@@ -582,7 +598,7 @@ const YTD_OPTIONS = (() => {
       // Capture the interpreter output so a failing traceback can be
       // re-printed AND pattern-matched for the ctranslate2 DLL failure,
       // which gets its own fix hint (missing VC++ runtime, fresh PCs).
-      "set \"VERIFY_LOG=%TEMP%\\bilidown_whisper_verify.log\"",
+      "set \"VERIFY_LOG=%TEMP%\\bililearn_whisper_verify.log\"",
       "\"%PYTHON_EXE%\" -c \"import faster_whisper, zhconv; print('OK: dependencies are ready')\" > \"%VERIFY_LOG%\" 2>&1",
       "if errorlevel 1 (",
       "  type \"%VERIFY_LOG%\"",
@@ -844,6 +860,14 @@ const YTD_OPTIONS = (() => {
     const deepseekApiKeyInput = doc.getElementById("deepseekApiKey");
     const glmApiKeyInput = doc.getElementById("glmApiKey");
     const glmApiTypeSelect = doc.getElementById("glmApiType");
+    // 2026-09-11: "other" provider's custom endpoint fields + the embedded
+    // AI-provider notify block. applyNotifyVisibility() is the single
+    // source of truth for that block's visibility (see the
+    // #aiProviderNotifyBlock comment in options.html) — it reads the LIVE
+    // input values, so these refs must exist before it is ever called.
+    const otherAiBaseUrlInput = doc.getElementById("otherAiBaseUrl");
+    const otherAiModelInput = doc.getElementById("otherAiModel");
+    const aiProviderNotifyBlock = doc.getElementById("aiProviderNotifyBlock");
     const providerFieldEls = [
       ...doc.querySelectorAll("[data-provider-field]"),
     ];
@@ -948,6 +972,30 @@ const YTD_OPTIONS = (() => {
       deepseek: deepseekApiKeyInput,
       glm: glmApiKeyInput,
     };
+
+    // 2026-09-11: the AI-provider notify block stays hidden until the
+    // selected provider is actually usable — built-in providers need
+    // their API key filled, "other" needs BOTH base URL and model,
+    // and "none" never qualifies (no AI jobs to notify about). Called
+    // from loadSettings, the provider change handler, and the five
+    // key/endpoint input listeners below.
+    function applyNotifyVisibility() {
+      if (!aiProviderNotifyBlock) return;
+      const active = settingsApi.normalizeProvider(aiProviderSelect.value);
+      let ready = false;
+      if (active === "other") {
+        ready = Boolean(
+          otherAiBaseUrlInput &&
+            otherAiBaseUrlInput.value.trim() &&
+            otherAiModelInput &&
+            otherAiModelInput.value.trim(),
+        );
+      } else {
+        const keyInput = providerKeyInputs[active];
+        ready = Boolean(keyInput && keyInput.value.trim());
+      }
+      aiProviderNotifyBlock.hidden = !ready;
+    }
     const providerDisplayNames = {
       minimax: "minimax",
       deepseek: "DeepSeek",
@@ -1120,13 +1168,28 @@ const YTD_OPTIONS = (() => {
       if (diagnosticsHasRun) void runDiagnostics();
     }
 
-    async function loadSettings() {
+    async function loadSettings(options = {}) {
       try {
         const stored = await storage.get(settingsApi.STORAGE_KEY);
         const migration = settingsApi.migrateLegacyCustom(
           stored[settingsApi.STORAGE_KEY],
         );
         const settings = migration.settings;
+        if (migration.migrated) {
+          await storage.set({ [settingsApi.STORAGE_KEY]: settings });
+          setStatus(saveStatus, "migrationWarning");
+        }
+        // 2026-09-12 (B2.5 race): this load is async — if the user already
+        // typed / toggled anything before storage.get resolves, applying
+        // stored values would silently clobber their edits. The dirty
+        // banner (input/change on the form) is the cheapest reliable
+        // "user was here" signal. resetAllData passes { force: true } so
+        // a reset always re-renders the cleared state.
+        const userEdited =
+          options.force !== true &&
+          dirtyBanner &&
+          !dirtyBanner.classList.contains("is-hidden");
+        if (userEdited) return;
 
         aiProviderSelect.value = settings.provider;
         currentProvider = settings.provider;
@@ -1135,7 +1198,12 @@ const YTD_OPTIONS = (() => {
         deepseekApiKeyInput.value = settings.deepseekApiKey;
         if (glmApiKeyInput) glmApiKeyInput.value = settings.glmApiKey;
         if (glmApiTypeSelect) glmApiTypeSelect.value = settings.glmApiType;
-        asrApiKeyInput.value = settings.asrApiKey;
+        // After the key inputs are populated from storage (not before):
+        // applyNotifyVisibility reads their live values, so calling it
+        // earlier would always see empty inputs and hide the block even
+        // for a fully configured returning user.
+        applyNotifyVisibility();
+        if (asrApiKeyInput) asrApiKeyInput.value = settings.asrApiKey;
         if (asrProviderSelect) {
           // A stored provider with no matching <option> (e.g. legacy
           // "bailian" while the option is hidden) renders a BLANK select
@@ -1172,10 +1240,6 @@ const YTD_OPTIONS = (() => {
         // checkbox in storage still renders CHECKED.
         if (notifyOnTranscribeInput) notifyOnTranscribeInput.checked = settings.notifyOnTranscribe !== false;
         if (notifyOnSummaryAndAnalysisInput) notifyOnSummaryAndAnalysisInput.checked = settings.notifyOnSummaryAndAnalysis !== false;
-        if (migration.migrated) {
-          await storage.set({ [settingsApi.STORAGE_KEY]: settings });
-          setStatus(saveStatus, "migrationWarning");
-        }
       } catch (_error) {
         setStatus(saveStatus, "settingsLoadFailed");
       }
@@ -1213,7 +1277,7 @@ const YTD_OPTIONS = (() => {
         deepseekApiKey: deepseekApiKeyInput.value,
         glmApiKey: glmApiKeyInput ? glmApiKeyInput.value : "",
         glmApiType: glmApiTypeSelect ? glmApiTypeSelect.value : "",
-        asrApiKey: asrApiKeyInput.value,
+        asrApiKey: asrApiKeyInput ? asrApiKeyInput.value : "",
         asrProvider: asrProviderSelect ? asrProviderSelect.value : "whisper",
         whisperUrl: whisperUrlText ? whisperUrlText.textContent.trim() : "",
         whisperModel: whisperModelSelect ? whisperModelSelect.value : "",
@@ -1542,7 +1606,9 @@ const YTD_OPTIONS = (() => {
 
     async function clearCachedSummaries() {
       const all = await storage.get(null);
-      const keys = Object.keys(all).filter((key) => key.startsWith("bilidown_"));
+      const keys = Object.keys(all).filter(
+        (key) => key.startsWith("bililearn_") || key.startsWith("bilidown_"),
+      );
       if (keys.length) await storage.remove(keys);
       setStatus(dataStatus, "clearedSummaries", { count: keys.length });
     }
@@ -1563,7 +1629,7 @@ const YTD_OPTIONS = (() => {
         settingsApi.STORAGE_KEY,
         currentLanguage,
       );
-      await loadSettings();
+      await loadSettings({ force: true });
       setStatus(dataStatus, "allDataDeleted");
     }
 
@@ -1595,10 +1661,15 @@ const YTD_OPTIONS = (() => {
         previousProvider &&
         previousProvider !== "none"
       ) {
+        // Hide the AI-provider notify block the moment "none" is picked
+        // (selecting none already disables AI jobs); restore it if the
+        // user cancels the downgrade dialog below.
+        applyNotifyVisibility();
         const confirmed = await promptDisableAi();
         if (!confirmed) {
           aiProviderSelect.value = previousProvider;
           applyProviderVisibility(previousProvider);
+          applyNotifyVisibility();
           return;
         }
         currentProvider = "none";
@@ -1607,12 +1678,25 @@ const YTD_OPTIONS = (() => {
       }
       currentProvider = nextProvider;
       applyProviderVisibility(nextProvider);
+      applyNotifyVisibility();
       if (!previousProvider || previousProvider === nextProvider) return;
       const keyInput = providerKeyInputs[previousProvider];
       if (!keyInput || !keyInput.value.trim()) return;
       const choice = await promptSwitchKeyChoice(previousProvider);
       if (choice === "clear") await clearProviderKey(previousProvider);
     });
+    // 2026-09-11: key / endpoint edits re-run the notify-visibility check
+    // so the embedded notify block appears the moment the selected
+    // provider becomes usable — and hides again if the value is deleted.
+    for (const input of [
+      minimaxApiKeyInput,
+      deepseekApiKeyInput,
+      glmApiKeyInput,
+      otherAiBaseUrlInput,
+      otherAiModelInput,
+    ]) {
+      if (input) input.addEventListener("input", applyNotifyVisibility);
+    }
     if (switchKeyKeepBtn) {
       switchKeyKeepBtn.addEventListener("click", () =>
         closeSwitchKeyDialog("keep"),
@@ -1958,7 +2042,7 @@ const YTD_OPTIONS = (() => {
     const installDepsBtn = doc.getElementById("installDepsBtn");
     if (installDepsBtn) {
       installDepsBtn.addEventListener("click", async () => {
-        const filename = "bilidown_whisper_setup.bat";
+        const filename = "bililearn_whisper_setup.bat";
         const batSource = buildWhisperSetupBat();
         let delivered = false;
 

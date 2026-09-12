@@ -44,7 +44,7 @@ let relayNoReceiverWarned = false;
 chrome.storage.local
   .setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
   .catch((error) =>
-    console.warn("[dk-bilidown] Could not restrict storage access:", error),
+    console.warn("[dk-bililearn] Could not restrict storage access:", error),
   );
 
 async function getSettings() {
@@ -100,7 +100,7 @@ async function requestAiCompletion({
   const activeKey = YTD_SETTINGS.activeApiKey(settings);
   if (!activeKey) {
     const error = new Error(
-      "AI provider API key not configured. Open bilidown Settings.",
+      "AI provider API key not configured. Open bililearn Settings.",
     );
     error.code = "NO_AI_KEY";
     throw error;
@@ -108,7 +108,7 @@ async function requestAiCompletion({
 
   // Debug logging for GLM troubleshooting
   if (settings.provider === "glm") {
-    console.log("[dk-bilidown] GLM config:", {
+    console.log("[dk-bililearn] GLM config:", {
       apiType: settings.glmApiType,
       baseUrl: settings.aiBaseUrl,
       model: settings.aiModel,
@@ -393,7 +393,7 @@ async function bootstrapWhisperJob() {
   const terminal = job.stage === WHISPER_STAGES.SUCCEEDED || job.stage === WHISPER_STAGES.FAILED;
   if (terminal) {
     // Don't re-run; let the sidepanel clear it via ackWhisperJobDone.
-    debugLog("[dk-bilidown BG] resuming in terminal state:", job.stage);
+    debugLog("[dk-bililearn BG] resuming in terminal state:", job.stage);
     return;
   }
   // If we crashed mid-stage, just keep the in-memory record so the
@@ -401,7 +401,7 @@ async function bootstrapWhisperJob() {
   // job from scratch would burn another 5+ minutes; the next user
   // action (closing/reopening panel) will trigger a manual retry.
   debugLog(
-    "[dk-bilidown BG] rehydrated in-flight whisper job at stage:",
+    "[dk-bililearn BG] rehydrated in-flight whisper job at stage:",
     job.stage,
     "for",
     job.videoId,
@@ -409,7 +409,7 @@ async function bootstrapWhisperJob() {
 }
 
 bootstrapWhisperJob().catch((err) =>
-  console.warn("[dk-bilidown BG] bootstrapWhisperJob failed:", err),
+  console.warn("[dk-bililearn BG] bootstrapWhisperJob failed:", err),
 );
 
 // Re-bootstrap on every cold start of the SW (e.g. after browser restart).
@@ -423,7 +423,7 @@ chrome.runtime.onStartup?.addListener(() => {
  * Keep the side panel scoped to Bilibili tabs only.
  *
  * Chrome side panels are "global" by default: once opened, the panel follows
- * you to every tab. To make dk-bilidown behave like a Bilibili-only tool, we
+ * you to every tab. To make dk-bililearn behave like a Bilibili-only tool, we
  * enable the panel on Bilibili tabs and disable it everywhere else. Disabling
  * on a tab makes Chrome hide/close the panel for that tab, so it never lingers
  * on a new tab or some other website.
@@ -714,7 +714,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "openSidePanel") {
     const tabId = sender.tab?.id;
-    debugLog("[dk-bilidown BG] openSidePanel requested from tab:", tabId);
+    debugLog("[dk-bililearn BG] openSidePanel requested from tab:", tabId);
 
     // Re-enable the panel (it may have been disabled by auto-close) and open it.
     // IMPORTANT: we call setOptions + open synchronously (no await between them)
@@ -729,15 +729,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chrome.sidePanel
         .open({ tabId })
         .then(() => {
-          // Broadcast to side panel to start bilidown (in case it's already open)
+          // Broadcast to side panel to start bililearn (in case it's already open)
           setTimeout(() => {
             chrome.runtime
-              .sendMessage({ action: "startBilidownFromButton" })
+              .sendMessage({ action: "startBililearnFromButton" })
               .catch(() => {});
           }, 300);
         })
         .catch((err) => {
-          console.error("[dk-bilidown BG] openSidePanel error:", err);
+          console.error("[dk-bililearn BG] openSidePanel error:", err);
         });
     } else {
       // Fallback: find the active tab
@@ -752,7 +752,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             chrome.sidePanel.open({ tabId: tabs[0].id }).catch((err) => {
               console.error(
-                "[dk-bilidown BG] openSidePanel fallback error:",
+                "[dk-bililearn BG] openSidePanel fallback error:",
                 err,
               );
             });
@@ -766,7 +766,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Relay messages from side panel to content script
   if (message.action === "relayToContent") {
-    debugLog("[dk-bilidown BG] Relay request:", message.payload?.action);
+    debugLog("[dk-bililearn BG] Relay request:", message.payload?.action);
     (async () => {
       try {
         // Query specifically for Bilibili tabs to avoid side panel context issues
@@ -776,7 +776,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           lastFocusedWindow: true,
         });
         debugLog(
-          "[dk-bilidown BG] Active tab in last focused window:",
+          "[dk-bililearn BG] Active tab in last focused window:",
           tabs.length,
           tabs[0]?.url,
         );
@@ -787,18 +787,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             url: "https://www.bilibili.com/video/*",
             active: true,
           });
-          debugLog("[dk-bilidown BG] Active Bilibili tabs:", tabs.length);
+          debugLog("[dk-bililearn BG] Active Bilibili tabs:", tabs.length);
         }
 
         // Still nothing? Try any Bilibili tab
         if (!tabs[0]) {
           tabs = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
-          debugLog("[dk-bilidown BG] Any Bilibili tabs:", tabs.length);
+          debugLog("[dk-bililearn BG] Any Bilibili tabs:", tabs.length);
         }
 
         if (tabs[0]) {
           debugLog(
-            "[dk-bilidown BG] Sending to tab:",
+            "[dk-bililearn BG] Sending to tab:",
             tabs[0].id,
             "URL:",
             tabs[0].url,
@@ -818,10 +818,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // only for fields the player didn't provide.
           // Bilibili metadata is read from the rendered page by content.js.
 
-          debugLog("[dk-bilidown BG] Got response from content:", response);
+          debugLog("[dk-bililearn BG] Got response from content:", response);
           sendResponse({ success: true, response });
         } else {
-          debugLog("[dk-bilidown BG] No Bilibili tab found");
+          debugLog("[dk-bililearn BG] No Bilibili tab found");
           sendResponse({ success: false, error: "No Bilibili tab found" });
         }
       } catch (err) {
@@ -840,15 +840,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!relayNoReceiverWarned) {
             relayNoReceiverWarned = true;
             console.warn(
-              "[dk-bilidown BG] Relay: content script not present. " +
+              "[dk-bililearn BG] Relay: content script not present. " +
                 "Further occurrences will be silent — this is normal " +
                 "for tabs where the script hasn't injected yet.",
             );
           } else {
-            debugLog("[dk-bilidown BG] Relay (silent):", message);
+            debugLog("[dk-bililearn BG] Relay (silent):", message);
           }
         } else {
-          console.error("[dk-bilidown BG] Relay error:", message);
+          console.error("[dk-bililearn BG] Relay error:", message);
         }
         sendResponse({ success: false, error: message });
       }
@@ -859,10 +859,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ============================================================
 // TRANSCRIPT FETCHING VIA BILIBILI API
-// ============================================================
-
-const BAILIAN_ASR_MODEL = "fun-asr";
-
 // ============================================================
 // WHISPER JOB STATE (persisted across sidepanel / SW restarts)
 // ============================================================
@@ -893,7 +889,7 @@ const WHISPER_STAGES = Object.freeze({
 // eviction so the watchdog below can recover the job from the server-
 // side cache. periodInMinutes 0.5 is the Chrome 120+ floor; older
 // builds clamp to 1min, which only slows recovery, never breaks it.
-const WHISPER_KEEPALIVE_ALARM = "bilidown-whisper-keepalive";
+const WHISPER_KEEPALIVE_ALARM = "bililearn-whisper-keepalive";
 
 // Transcribe queue (2026-08-29): whisper stays strictly single-job (parallel
 // int8 CPU inference starves both pipelines — see the re-entry guard in
@@ -907,12 +903,18 @@ const WHISPER_QUEUE_MAX = 10;
 
 function ensureWhisperKeepalive() {
   try {
+    // 2026-09-12: clear the old "bililearn-whisper-keepalive" name (if it
+    // exists from a prior install) so the renamed keepalive below is the
+    // only one Chrome sees. Without this, the user would carry an
+    // orphan alarm that fires every 30 s and never gets handled (the
+    // listener now matches the new name only).
+    chrome.alarms.clear("bililearn-whisper-keepalive");
     chrome.alarms.create(WHISPER_KEEPALIVE_ALARM, {
       delayInMinutes: 0.5,
       periodInMinutes: 0.5,
     });
   } catch (e) {
-    debugLog("[dk-bilidown BG] keepalive alarm create failed:", e);
+    debugLog("[dk-bililearn BG] keepalive alarm create failed:", e);
   }
 }
 
@@ -931,7 +933,7 @@ let whisperPipelineActive = false;
 chrome.alarms?.onAlarm?.addListener?.((alarm) => {
   if (alarm?.name !== WHISPER_KEEPALIVE_ALARM) return;
   whisperWatchdogTick().catch((e) =>
-    debugLog("[dk-bilidown BG] whisper watchdog tick failed:", e),
+    debugLog("[dk-bililearn BG] whisper watchdog tick failed:", e),
   );
 });
 
@@ -958,7 +960,7 @@ async function whisperWatchdogTick() {
     // Queue (2026-08-29): slot is free — if the SW died between a terminal
     // write and the pump, queued entries are still waiting.
     pumpWhisperQueue().catch((e) =>
-      debugLog("[dk-bilidown BG] watchdog queue pump failed:", e),
+      debugLog("[dk-bililearn BG] watchdog queue pump failed:", e),
     );
     return;
   }
@@ -969,7 +971,7 @@ async function whisperWatchdogTick() {
     // Leave terminal records alone — the sidepanel acks them on view.
     clearWhisperKeepalive();
     pumpWhisperQueue().catch((e) =>
-      debugLog("[dk-bilidown BG] watchdog terminal queue pump failed:", e),
+      debugLog("[dk-bililearn BG] watchdog terminal queue pump failed:", e),
     );
     return;
   }
@@ -1071,7 +1073,7 @@ async function recoverOrphanedWhisperJob(job) {
       });
     }
   } catch (e) {
-    debugLog("[dk-bilidown BG] watchdog cache poll failed:", e);
+    debugLog("[dk-bililearn BG] watchdog cache poll failed:", e);
   }
 }
 
@@ -1155,7 +1157,7 @@ async function notifyWhisperDone(job) {
     chrome.notifications.create(notifId, {
       type: "basic",
       iconUrl: "icons/icon128.png",
-      title: "bilidown · 转录完成",
+      title: "bililearn · 转录完成",
       message,
       priority: 2,
     }, () => {
@@ -1163,7 +1165,7 @@ async function notifyWhisperDone(job) {
       void chrome.runtime.lastError;
     });
   } catch (e) {
-    debugLog("[dk-bilidown BG] transcription-done notification failed:", e);
+    debugLog("[dk-bililearn BG] transcription-done notification failed:", e);
   }
 }
 
@@ -1220,7 +1222,7 @@ async function createCompletionNotification({
       },
     );
   } catch (e) {
-    debugLog(`[dk-bilidown BG] ${prefix} notification failed:`, e);
+    debugLog(`[dk-bililearn BG] ${prefix} notification failed:`, e);
   }
 }
 
@@ -1233,7 +1235,7 @@ async function notifySummaryDoneIfSlow(info) {
     // a user upgrading from a pre-merge build (defense in depth).
     settingKey: "notifyOnSummaryAndAnalysis",
     info,
-    title: "bilidown · AI 总结完成",
+    title: "bililearn · AI 总结完成",
     buildMessage: (i) => {
       const videoTitle = i.videoTitle || i.videoId || "视频";
       const channel = i.channelName ? ` · UP: ${i.channelName}` : "";
@@ -1254,7 +1256,7 @@ async function notifyAnalysisDoneIfSlow(info) {
     prefix: ANALYSIS_DONE_NOTIF_PREFIX,
     settingKey: "notifyOnSummaryAndAnalysis",
     info,
-    title: "bilidown · AI 概览完成",
+    title: "bililearn · AI 概览完成",
     buildMessage: (i) => {
       const videoTitle = i.videoTitle || i.videoId || "视频";
       const channel = i.channelName ? ` · UP: ${i.channelName}` : "";
@@ -1287,7 +1289,7 @@ chrome.notifications.onClicked.addListener((notifId) => {
         await chrome.tabs.create({ url: link.videoUrl });
       }
     } catch (e) {
-      debugLog("[dk-bilidown BG] notification click open failed:", e);
+      debugLog("[dk-bililearn BG] notification click open failed:", e);
     }
   })();
 });
@@ -1314,7 +1316,7 @@ function setWhisperJob(job) {
     // start the next queued transcription, if any. Fire-and-forget: the
     // terminal write itself must not block on the next job's startup.
     pumpWhisperQueue().catch((e) =>
-      debugLog("[dk-bilidown BG] queue pump after terminal failed:", e),
+      debugLog("[dk-bililearn BG] queue pump after terminal failed:", e),
     );
   } else {
     ensureWhisperKeepalive();
@@ -1443,7 +1445,7 @@ async function enqueueWhisperEntry(videoId, videoUrl, pageNumber, title) {
     queuedAt: Date.now(),
   });
   await saveWhisperQueue(queue);
-  debugLog("[dk-bilidown BG] queued transcription for", videoId, "position", queue.length);
+  debugLog("[dk-bililearn BG] queued transcription for", videoId, "position", queue.length);
   return { success: true, queued: true, position: queue.length };
 }
 
@@ -1480,7 +1482,7 @@ async function pumpWhisperQueue() {
       if (!queue.length) return;
       const [next, ...rest] = queue;
       await saveWhisperQueue(rest);
-      debugLog("[dk-bilidown BG] queue pump: starting next entry", next.videoId);
+      debugLog("[dk-bililearn BG] queue pump: starting next entry", next.videoId);
       let res = null;
       try {
         res = await handleTriggerWhisperTranscription(
@@ -1496,7 +1498,7 @@ async function pumpWhisperQueue() {
         return; // slot now occupied — its terminal write re-arms the pump
       }
       debugLog(
-        "[dk-bilidown BG] queue pump: entry failed to start:",
+        "[dk-bililearn BG] queue pump: entry failed to start:",
         res && res.error,
       );
       // Entry couldn't start (e.g. whisper no longer enabled) — drop it
@@ -1513,7 +1515,7 @@ async function pumpWhisperQueue() {
 // Top-level code runs on EVERY SW wake-up; the pump itself is a cheap no-op
 // when the queue is empty or a job is live.
 pumpWhisperQueue().catch((e) =>
-  debugLog("[dk-bilidown BG] startup queue pump failed:", e),
+  debugLog("[dk-bililearn BG] startup queue pump failed:", e),
 );
 
 function sendWhisperProgress(stage, title, subtitle, extras = {}) {
@@ -1725,7 +1727,7 @@ async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
       (Number(b.bandwidth) || Number.MAX_SAFE_INTEGER),
   );
   // Speech recognition does not benefit from Bilibili's highest audio bitrate.
-  // Selecting the smallest track cuts both the CDN download and Bailian upload.
+  // Selecting the smallest track cuts the CDN download.
   const audio = audioTracks[0];
   const candidates = [audio?.baseUrl, audio?.base_url, ...(audio?.backupUrl || []), ...(audio?.backup_url || [])].filter(Boolean);
   if (!candidates.length) {
@@ -1773,7 +1775,7 @@ async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
         attemptError = error;
         attempt += 1;
         debugLog(
-          `[dk-bilidown BG] audio fetch attempt ${attempt} failed (${url.slice(0, 80)}…):`,
+          `[dk-bililearn BG] audio fetch attempt ${attempt} failed (${url.slice(0, 80)}…):`,
           error?.message,
         );
       }
@@ -1792,107 +1794,10 @@ async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
   );
 }
 
-async function uploadAudioToBailian(blob, apiKey, videoId) {
-  const policyResponse = await fetch(
-    `https://dashscope.aliyuncs.com/api/v1/uploads?action=getPolicy&model=${encodeURIComponent(BAILIAN_ASR_MODEL)}`,
-    { headers: { Authorization: `Bearer ${apiKey}` } },
-  );
-  const policyPayload = await policyResponse.json();
-  if (!policyResponse.ok || !policyPayload.data) {
-    throw new Error(policyPayload.message || "无法获取百炼临时上传凭证。");
-  }
-  const policy = policyPayload.data;
-  const filename = `${videoId}-${Date.now()}.m4a`;
-  const key = `${policy.upload_dir}/${filename}`;
-  const form = new FormData();
-  form.append("OSSAccessKeyId", policy.oss_access_key_id);
-  form.append("Signature", policy.signature);
-  form.append("policy", policy.policy);
-  form.append("x-oss-object-acl", policy.x_oss_object_acl);
-  form.append("x-oss-forbid-overwrite", policy.x_oss_forbid_overwrite);
-  form.append("key", key);
-  form.append("success_action_status", "200");
-  form.append("file", blob, filename);
-  const uploadResponse = await fetch(policy.upload_host, { method: "POST", body: form });
-  if (!uploadResponse.ok) throw new Error(`音频上传百炼失败（${uploadResponse.status}）。`);
-  return `oss://${key}`;
-}
-
-async function pollBailianAsrTask(taskId, apiKey) {
-  for (let attempt = 0; attempt < 180; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const response = await fetch(
-      `https://dashscope.aliyuncs.com/api/v1/tasks/${encodeURIComponent(taskId)}`,
-      { headers: { Authorization: `Bearer ${apiKey}` } },
-    );
-    const payload = await response.json();
-    const status = payload.output?.task_status;
-    if (status === "FAILED" || status === "CANCELED") {
-      throw new Error(payload.output?.message || payload.message || "百炼语音识别失败。");
-    }
-    if (status !== "SUCCEEDED") continue;
-    const result = payload.output?.results?.[0];
-    if (result?.subtask_status && result.subtask_status !== "SUCCEEDED") {
-      throw new Error(result.message || "百炼语音识别子任务失败。");
-    }
-    if (!result?.transcription_url) throw new Error("百炼未返回转写结果地址。");
-    const transcriptionResponse = await fetch(result.transcription_url);
-    if (!transcriptionResponse.ok) throw new Error("无法下载百炼转写结果。");
-    return transcriptionResponse.json();
-  }
-  throw new Error("百炼语音识别超时，请稍后重试。");
-}
-
-function normalizeBailianTranscript(data) {
-  const sentences = data.transcripts?.flatMap((item) => item.sentences || []) || data.sentences || [];
-  const transcript = sentences
-    .map((sentence) => ({
-      text: String(sentence.text || "").trim(),
-      start: Math.max(0, Number(sentence.begin_time || 0) / 1000),
-      duration: Math.max(0, (Number(sentence.end_time || sentence.begin_time || 0) - Number(sentence.begin_time || 0)) / 1000),
-      language: sentence.language || "zh",
-    }))
-    .filter((sentence) => sentence.text);
-  if (!transcript.length) throw new Error("百炼返回了空转写结果。");
-  let plain = "";
-  let timestamped = "";
-  for (const sentence of transcript) {
-    const minutes = Math.floor(sentence.start / 60);
-    const seconds = Math.floor(sentence.start % 60);
-    plain += `${sentence.text} `;
-    timestamped += `[${minutes}:${String(seconds).padStart(2, "0")}] ${sentence.text}\n`;
-  }
-  return {
-    success: true,
-    transcript,
-    transcriptText: plain.trim(),
-    transcriptTextTimestamped: timestamped.trim(),
-    language: "zh",
-    source: "aliyun-fun-asr",
-  };
-}
-
-async function transcribeWithBailian(videoId, cid, apiKey, viewPayload) {
-  chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在下载B站音轨", subtitle: "转录在后台进行，可随意切换页面" }).catch(() => {});
-  const blob = await fetchBilibiliAudioBlob(videoId, cid, viewPayload);
-  chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在上传音轨", subtitle: "上传至阿里云百炼临时空间" }).catch(() => {});
-  const fileUrl = await uploadAudioToBailian(blob, apiKey, videoId);
-  const taskResponse = await fetch("https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "X-DashScope-Async": "enable",
-      "X-DashScope-OssResourceResolve": "enable",
-    },
-    body: JSON.stringify({ model: BAILIAN_ASR_MODEL, input: { file_urls: [fileUrl] }, parameters: { language_hints: ["zh", "en"] } }),
-  });
-  const taskPayload = await taskResponse.json();
-  const taskId = taskPayload.output?.task_id;
-  if (!taskResponse.ok || !taskId) throw new Error(taskPayload.message || "无法提交百炼语音识别任务。");
-  chrome.runtime.sendMessage({ action: "transcriptProgress", title: "正在识别语音", subtitle: "长视频通常需要几分钟" }).catch(() => {});
-  return normalizeBailianTranscript(await pollBailianAsrTask(taskId, apiKey));
-}
+// Cloud ASR path was retired 2026-09-11. See git history for the removed
+// implementation. Users who configured a key in a previous build will
+// silently fall through to local Whisper / official Bilibili subtitle paths;
+// no migration needed.
 
 /**
  * Fetches the transcript for a Bilibili video using Supadata API.
@@ -1987,7 +1892,7 @@ async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
   if (data.error) {
     throw new Error(`Whisper server error: ${data.error}`);
   }
-  // Normalise to the same shape as transcribeWithBailian so the rest of the
+  // Normalise to the canonical transcript shape so the rest of the
   // pipeline (timestamp validation, AI correction, downstream consumers)
   // works unchanged.
   const rawSegments = (data.segments || []).map((seg) => ({
@@ -2037,7 +1942,7 @@ async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
     };
   } catch (correctionError) {
     debugLog(
-      "[dk-bilidown BG] whisper correction failed, returning raw:",
+      "[dk-bililearn BG] whisper correction failed, returning raw:",
       correctionError,
     );
     return {
@@ -2078,7 +1983,7 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.md`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.txt`);
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.srt`);
-    // .json covers the bilidown-written Whisper cache (also saved with
+    // .json covers the bililearn-written Whisper cache (also saved with
     // the {date}_{title}_{UP}.json convention since 2026-08-22 so the
     // local-file path and the cache path agree on the same filename).
     possibleFilenames.push(`${pubDate}_${cleanTitle}_${cleanChannel}.json`);
@@ -2120,7 +2025,7 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
     );
     if (response.status === 404) return null;
     if (!response.ok) {
-      debugLog("[dk-bilidown BG] local file lookup failed:", response.status);
+      debugLog("[dk-bililearn BG] local file lookup failed:", response.status);
       return null;
     }
     const data = await response.json();
@@ -2137,7 +2042,7 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
       cachePath: `${dir}/${filename}`,
     };
   } catch (error) {
-    debugLog("[dk-bilidown BG] local file load error:", error);
+    debugLog("[dk-bililearn BG] local file load error:", error);
     return null;
   }
 }
@@ -2400,7 +2305,7 @@ async function loadCachedTranscript(bvid, cid, settings, videoTitle, channelName
     if (!data || !data.ok || !data.payload) return null;
     return { ...data.payload, cachePath };
   } catch (error) {
-    debugLog("[dk-bilidown BG] cache load failed:", error);
+    debugLog("[dk-bililearn BG] cache load failed:", error);
     return null;
   }
 }
@@ -2431,7 +2336,7 @@ async function saveCachedTranscript(bvid, cid, payload, settings, videoTitle, ch
     if (!response.ok) return null;
     return await response.json();
   } catch (error) {
-    debugLog("[dk-bilidown BG] cache write failed:", error);
+    debugLog("[dk-bililearn BG] cache write failed:", error);
     return null;
   }
 }
@@ -2498,7 +2403,7 @@ async function handleTriggerWhisperTranscription(
 ) {
   const settings = await getSettings();
   if (settings.asrProvider !== "whisper") {
-    throw new Error("Local Whisper is not enabled. Open bilidown Settings.");
+    throw new Error("Local Whisper is not enabled. Open bililearn Settings.");
   }
   const requestedPageNumber = Math.max(1, Number(requestedPage) || 1);
 
@@ -2525,10 +2430,10 @@ async function handleTriggerWhisperTranscription(
         existing.videoId === videoId &&
         Number(existing.pageNumber || 1) === requestedPageNumber;
       if (sameVideo) {
-        debugLog("[dk-bilidown BG] trigger blocked: job already running for", videoId);
+        debugLog("[dk-bililearn BG] trigger blocked: job already running for", videoId);
         return { success: true, alreadyRunning: true };
       }
-      debugLog("[dk-bilidown BG] trigger queued behind running job for", existing.videoId, "→", videoId);
+      debugLog("[dk-bililearn BG] trigger queued behind running job for", existing.videoId, "→", videoId);
       // Queue (2026-08-29): different video while busy → enqueue instead of
       // refusing. Whisper stays single-job; the pump starts this entry when
       // the current one reaches a terminal state.
@@ -2572,7 +2477,7 @@ async function handleTriggerWhisperTranscription(
   // 落 storage 再 sendResponse，sidepanel 收到 started 后会立即
   // maybeResumeWhisperJob，两者颠倒了会resume到旧记录。
   runWhisperPipeline(videoId, videoUrl, requestedPageNumber, settings).catch(
-    (e) => debugLog("[dk-bilidown BG] whisper pipeline detached error:", e?.message || e),
+    (e) => debugLog("[dk-bililearn BG] whisper pipeline detached error:", e?.message || e),
   );
   return { success: true, started: true };
 }
@@ -2867,25 +2772,22 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
       return result;
     };
 
-    // When configured, ASR is the source of truth. This avoids incorrect
-    // Bilibili ai-zh tracks and also covers videos without subtitle tracks.
-    const settings = await getSettings();
-    if (settings.asrApiKey) {
-      return withVideoMeta(
-        await transcribeWithBailian(videoId, page.cid, settings.asrApiKey),
-      );
-    }
+    // Cloud ASR key support retired 2026-09-11. Users with a leftover key in
+    // chrome.storage keep the field (so the settings UI does not change shape
+    // on them) but it is ignored here. Fall straight through to the B-station
+    // official subtitle path.
+    void (await getSettings());
 
     // B站官方字幕 (human or ai-zh) 优先于本地文件。本地字幕（up-master-report
     // 之类）可能跟视频实际内容对不上号（标题错配、bvid 错位），所以 B站自己有
-    // 就别看本地。Bailian key 不影响这个顺序——只要 key 配了就走 Bailian。
+    // 就别看本地。
     const bilibiliSubtitle = await fetchBilibiliOfficialSubtitle(videoId, page.cid);
     if (bilibiliSubtitle) {
       return withVideoMeta(bilibiliSubtitle);
     }
 
     // 本地文件 fallback：B站没字幕时才看本地（whisper 旧 cache / up-master-report
-    // / bilidown 自己生成的 .md/.txt/.srt）
+    // / bililearn 自己生成的 .md/.txt/.srt）
     if (settings.whisperUrl && settings.subtitlesDir) {
       const localFile = await loadLocalSubtitleFile(
         videoId,
@@ -3128,7 +3030,7 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "AI provider API key not configured. Open bilidown Settings.",
+        message: "AI provider API key not configured. Open bililearn Settings.",
       };
     }
 
@@ -3182,7 +3084,7 @@ async function handleAnalyzeTranscript(
       promptVariables,
     );
 
-    debugLog("[dk-bilidown] Requesting video analysis", settings.aiModel);
+    debugLog("[dk-bililearn] Requesting video analysis", settings.aiModel);
     const { text: responseText } = await requestAiCompletion({
       maxTokens: 8192,
       responseFormat: { type: "json_object" },
@@ -3265,7 +3167,7 @@ async function handleSummarizeTranscript(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "AI provider API key not configured. Open bilidown Settings.",
+        message: "AI provider API key not configured. Open bililearn Settings.",
       };
     }
 
@@ -3285,7 +3187,7 @@ async function handleSummarizeTranscript(
       promptVariables,
     );
 
-    debugLog("[dk-bilidown] Requesting transcript summary", settings.aiModel);
+    debugLog("[dk-bililearn] Requesting transcript summary", settings.aiModel);
     const { text: responseText } = await requestAiCompletion({
       maxTokens: 8192,
       messages: [
@@ -3455,19 +3357,24 @@ async function handleSaveNote(
     const canonicalVideoUrl = `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
 
-    // First, try to get the transcript from the bilidown cache. The side panel
+    // First, try to get the transcript from the bililearn cache. The side panel
     // saves analyses to chrome.storage.LOCAL — this used to look in
     // storage.session (the wrong store), so it missed every time and
     // refetched the transcript from Supadata on every saved note.
     let transcript = null;
     try {
-      const cached = await chrome.storage.local.get(`bilidown_${videoId}`);
-      if (cached[`bilidown_${videoId}`]?.transcript) {
-        transcript = cached[`bilidown_${videoId}`].transcript;
-        debugLog("[dk-bilidown] Using cached transcript for note");
+      // Read under both the current prefix and the legacy (pre-rename)
+      // prefix; sidepanel.loadFromCache handles the actual migration.
+      const newKey = `bililearn_${videoId}`;
+      const legacyKey = `bilidown_${videoId}`;
+      const cached = await chrome.storage.local.get([newKey, legacyKey]);
+      const entry = cached[newKey] || cached[legacyKey];
+      if (entry?.transcript) {
+        transcript = entry.transcript;
+        debugLog("[dk-bililearn] Using cached transcript for note");
       }
     } catch (e) {
-      debugLog("[dk-bilidown] No cached transcript, fetching...");
+      debugLog("[dk-bililearn] No cached transcript, fetching...");
     }
 
     // If no cached transcript, fetch it
@@ -3588,7 +3495,7 @@ async function handleSaveNote(
 
     return { success: true, note };
   } catch (error) {
-    console.error("[dk-bilidown] Save note error:", error);
+    console.error("[dk-bililearn] Save note error:", error);
     return { success: false, error: error.message };
   }
 }
@@ -3634,7 +3541,7 @@ async function handleSaveSummaryNote(videoId, videoTitle, channelName, summaryTe
 
     return { success: true, note };
   } catch (error) {
-    console.error("[dk-bilidown] Save summary note error:", error);
+    console.error("[dk-bililearn] Save summary note error:", error);
     return { success: false, error: error.message };
   }
 }
@@ -3657,7 +3564,7 @@ async function cleanupNoteText(
   }
 
   try {
-    debugLog("[dk-bilidown] Requesting note cleanup");
+    debugLog("[dk-bililearn] Requesting note cleanup");
     const variables = {
       videoTitle: videoTitle || "Unknown",
       fullContext,
@@ -3694,7 +3601,7 @@ async function cleanupNoteText(
       }
     } catch (parseError) {
       console.warn(
-        "[dk-bilidown] JSON parse failed for note, stripping preambles:",
+        "[dk-bililearn] JSON parse failed for note, stripping preambles:",
         parseError,
       );
       result = result.replace(
@@ -3712,7 +3619,7 @@ async function cleanupNoteText(
 
     return result.slice(0, 3000);
   } catch (e) {
-    console.error("[dk-bilidown] Cleanup error:", e);
+    console.error("[dk-bililearn] Cleanup error:", e);
   }
 
   // Return combined raw text if cleanup fails
@@ -3799,7 +3706,7 @@ async function handleExplainSelection(
       variables,
     );
 
-    debugLog("[dk-bilidown] Requesting selection explanation");
+    debugLog("[dk-bililearn] Requesting selection explanation");
     const { text: explanation } = await requestAiCompletion({
       maxTokens: 1024,
       messages: [
@@ -3994,7 +3901,7 @@ async function handleTranslateContent(
     }
     return { success: true, translatedContent: aligned };
   } catch (error) {
-    console.error("[dk-bilidown] Translation error:", error);
+    console.error("[dk-bililearn] Translation error:", error);
     return { success: false, error: error.message || "Translation failed" };
   }
 }

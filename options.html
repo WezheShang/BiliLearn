@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title data-i18n="htmlTitle">bilidown settings</title>
+    <title data-i18n="htmlTitle">bililearn settings</title>
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
     <main class="settings-shell">
       <header>
         <div class="settings-heading-row">
-          <div class="eyebrow">bilidown</div>
+          <div class="eyebrow">bililearn</div>
           <div
             class="language-switch"
             role="group"
@@ -35,7 +35,7 @@
             </button>
           </div>
         </div>
-        <h1 data-i18n="heading">bilidown 设置</h1>
+        <h1 data-i18n="heading">bililearn 设置</h1>
         <p class="lede" data-i18n="lede">
           密钥保存在当前 Chrome 配置中，只在使用 AI 功能时发送给 minimax。
           本扩展没有开发者服务器或数据分析。
@@ -47,92 +47,289 @@
           请点击保存设置，否则您的修改将不被保存。
         </p>
 
+        <!-- 2026-09-10: first-run setup banner. Shown by default on a
+             fresh install; clicking "Got it" persists a flag in
+             chrome.storage so the banner never appears again. The
+             banner explains (a) the default behaviour (B-station
+             native subs only — no local whisper required by
+             default), (b) what to do if a video has no official
+             subs (pick a speech recognition model), and (c) the
+             LLM requirement for summaries / overviews. -->
+        <section
+          id="firstRunBanner"
+          class="card first-run-banner"
+          role="region"
+          aria-label="First-run setup"
+          hidden
+        >
+          <h2 data-i18n="firstRunHeading">欢迎使用 bililearn — 快速上手</h2>
+          <ol class="first-run-steps">
+            <li data-i18n="firstRunStep1">
+              <strong>默认行为</strong> — 当前只会加载并显示 B 站官方字幕（人工或 AI 翻译）。没有官方字幕的视频不会自动转写。
+            </li>
+            <li data-i18n="firstRunStep2">
+              <strong>想要本地转录？</strong> — 当你打开一段没有官方字幕的视频时，请到下方「语音识别」切到 Whisper（或接入其他模型）。首次启用 Whisper 需要本机装 Python + Visual C++ 运行时 + faster-whisper，详情点「检查系统」看分步指引。
+            </li>
+            <li data-i18n="firstRunStep3">
+              <strong>想要 AI 总结/概览？</strong> — 需要在下方「AI provider」里选一个模型并填入 API key。没有配的话，bililearn 只能给你看字幕，不会总结。
+            </li>
+          </ol>
+          <div class="first-run-actions">
+            <button
+              id="firstRunDismiss"
+              type="button"
+              class="secondary"
+              data-i18n="firstRunDismiss"
+            >
+              知道了，不再提醒
+            </button>
+          </div>
+        </section>
+
+        <!-- 2026-09-10: AI provider moved to the top of the page.
+             User feedback: the typical workflow is "pick an LLM
+             first, then worry about speech recognition" — the
+             AI model unlocks the most-used features (summary +
+             overview), so it sits at the top. -->
+        <section class="card" id="aiProviderCard">
+          <h2 data-i18n="aiProvider">AI provider</h2>
+          <p class="help" data-i18n="aiProviderHelp">
+            用于视频总结 + 概览。选择一个模型并填入 API key。
+            没有配的话，bililearn 只能给你看字幕，不会总结。
+          </p>
+          <label for="aiProvider" data-i18n="aiProviderSelectLabel"
+            >Choose a model</label
+          >
+          <select id="aiProvider" name="aiProvider">
+            <option value="minimax" data-i18n="providerOptionMinimax"
+              >minimax (MiniMax-M3)</option
+            >
+            <option value="deepseek" data-i18n="providerOptionDeepseek"
+              >DeepSeek</option
+            >
+            <option value="glm" data-i18n="providerOptionGlm"
+              >GLM (Zhipu)</option
+            >
+            <option value="other" data-i18n="providerOptionOther"
+              >Other model</option
+            >
+            <option value="none" data-i18n="providerOptionNone"
+              >No AI model</option
+            >
+          </select>
+          <div class="provider-fields" data-provider-field="minimax">
+            <label for="minimaxApiKey" data-i18n="minimaxKeyLabel"
+              >minimax API key</label
+            >
+            <input
+              type="password"
+              autocomplete="off"
+              id="minimaxApiKey"
+              name="minimaxApiKey"
+            />
+          </div>
+          <div class="provider-fields" data-provider-field="deepseek">
+            <label for="deepseekApiKey" data-i18n="deepseekKeyLabel"
+              >DeepSeek API key</label
+            >
+            <input
+              type="password"
+              autocomplete="off"
+              id="deepseekApiKey"
+              name="deepseekApiKey"
+            />
+          </div>
+          <div class="provider-fields" data-provider-field="glm">
+            <label for="glmApiKey" data-i18n="glmKeyLabel">GLM API key</label>
+            <input
+              type="password"
+              autocomplete="off"
+              id="glmApiKey"
+              name="glmApiKey"
+            />
+            <div class="provider-fields provider-fields-other">
+              <label for="glmApiType" data-i18n="glmApiTypeLabel">GLM 接入点</label>
+              <select id="glmApiType" name="glmApiType">
+                <option value="standard" data-i18n="glmApiTypeStandard">标准 (open.bigmodel.cn/api/paas/v4)</option>
+                <option value="coding" data-i18n="glmApiTypeCoding">编程 (open.bigmodel.cn/api/coding/paas/v4)</option>
+              </select>
+            </div>
+          </div>
+          <div class="provider-fields" data-provider-field="other">
+            <label for="otherAiBaseUrl" data-i18n="otherAiBaseUrlLabel"
+              >Custom OpenAI-compatible base URL</label
+            >
+            <input
+              type="text"
+              autocomplete="off"
+              id="otherAiBaseUrl"
+              name="otherAiBaseUrl"
+              placeholder="https://api.example.com/v1"
+            />
+            <label for="otherAiModel" data-i18n="otherAiModelLabel"
+              >Custom model name</label
+            >
+            <input
+              type="text"
+              autocomplete="off"
+              id="otherAiModel"
+              name="otherAiModel"
+              placeholder="e.g. gpt-4o, claude-3.5-sonnet, qwen-max"
+            />
+            <p class="help" data-i18n="localRemixHelp">
+              用你自己的代理：把请求发到一个 OpenAI-compatible 的 endpoint，
+              自行替换 <code>{"{{model}}"}</code> / <code>{"{{baseUrl}}"}</code> 之类的占位符。
+              不会上传你的 key 到任何官方服务。
+            </p>
+
+            <!-- 2026-09-10: customization-prompt block is back in the
+                 "Other" provider field. This is the LOCAL REMIX helper
+                 (it lives under the AI provider card, not the local-env
+                 whisper setup panel) — the user copies an editable
+                 prompt into their coding agent to wire up an unsupported
+                 provider. Keep it as a real <textarea> + Copy button so
+                 option 2 ("Other model") is actually usable. -->
+            <div class="local-remix-header">
+              <div class="local-remix-header-copy">
+                <span class="eyebrow" data-i18n="localRemix">Local remix</span>
+                <span class="customization-title" data-i18n="customizationTitle"
+                  >Want to use another AI model?</span
+                >
+                <span
+                  class="customization-purpose"
+                  data-i18n="customizationPurpose"
+                  >Edit and copy a safe prompt for your coding agent</span
+                >
+              </div>
+              <span class="agent-badge" data-i18n="agentBadge"
+                >Coding agent ready</span
+              >
+            </div>
+            <p class="help customization-intro" data-i18n="customizationIntro">
+              You can edit the prompt directly. Complete these three steps before
+              copying:
+            </p>
+            <ol class="customization-steps">
+              <li data-i18n="customizationStepFolder">
+                Open the extracted bililearn project folder in your coding
+                agent.
+              </li>
+              <li data-i18n="customizationStepReplace">
+                Replace [PROVIDER] and [MODEL] with the service and model you want
+                to use.
+              </li>
+              <li data-i18n="customizationStepKeys">
+                Never include API keys in the prompt or chat. Enter them yourself
+                after the code is ready.
+              </li>
+            </ol>
+            <label
+              for="customizationPrompt"
+              data-i18n="customizationPromptLabel"
+              >Editable customization prompt</label
+            >
+            <div
+              id="customizationPromptReminder"
+              class="prompt-reminder"
+              role="note"
+              aria-label="Prompt reminder"
+              data-i18n-aria-label="customizationReminderLabel"
+            >
+              <span data-i18n="customizationReminder"
+                >Before copying, replace [PROVIDER] and [MODEL] with the provider
+                and model you want to use.</span
+              >
+            </div>
+            <textarea
+              id="customizationPrompt"
+              rows="12"
+              aria-describedby="customizationPromptReminder"
+            >Customize this local bililearn workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is bililearn. If verification fails, stop and ask me to open the extracted bililearn project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.</textarea>
+            <div class="copy-actions">
+              <button
+                id="copyCustomizationPromptBtn"
+                class="secondary"
+                type="button"
+                data-i18n="copyCustomizationPrompt"
+              >
+                Copy edited prompt
+              </button>
+              <span
+                id="copyStatus"
+                role="status"
+                aria-live="polite"
+              ></span>
+            </div>
+          </div>
+
+          <div class="privacy-note" data-i18n="privacyNote">
+            When you use AI features, the selected provider receives the
+            video transcript and relevant video context. Review the active
+            provider's terms and pricing before saving.
+          </div>
+
+          <!-- 2026-09-11: notification for AI-side tasks is attached to
+               the AI provider card, only visible AFTER the user has
+               actually configured the provider (selected + filled the
+               API key, or for "other" provider, filled base URL + model).
+               The old standalone #notificationsCard is gone. No
+               data-provider-field attribute here on purpose: visibility
+               is driven by applyNotifyVisibility() in options.js so the
+               "is this provider ready?" check covers both the standard
+               key inputs and the "other" custom fields. -->
+          <div
+            id="aiProviderNotifyBlock"
+            class="provider-notify-block"
+            hidden
+          >
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                id="notifyOnSummaryAndAnalysis"
+                name="notifyOnSummaryAndAnalysis"
+              />
+              <span data-i18n="notifyOnSummaryAndAnalysisLabel"
+                >总结和概览完成时发送浏览器通知</span
+              >
+            </label>
+            <p class="help" data-i18n="aiProviderNotifyHelp">
+              任务完成后会弹系统级通知。点击通知会聚焦已打开的视频标签页；
+              关闭通知只是不弹卡片，任务本体不受影响。总结和概览是同一类工作
+              （都是对转录后的字幕做 LLM 处理），因此统一一个开关。
+            </p>
+          </div>
+        </section>
+
         <section class="card" id="asrSection">
           <h2 data-i18n="asrSectionTitle">语音识别</h2>
           <p class="help" data-i18n="asrSectionHelp">
-            B 站没有原生字幕时，bilidown 会用下面选择的引擎给视频生成带时间戳的字幕。
+            B 站没有原生字幕时，bililearn 会用下面选择的引擎给视频生成带时间戳的字幕。
           </p>
 
           <select id="asrProvider" name="asrProvider" aria-label="语音识别服务" data-i18n-aria-label="asrSelectAriaLabel">
             <option value="none" data-i18n="asrOptionNone">不使用（仅用 B 站原生字幕）</option>
-            <!-- HIDE: aliyun bailian (Fun-ASR) — feature not debugged yet, re-enable later
-            <option value="bailian">阿里云百炼（Fun-ASR）</option>
-            -->
             <option value="whisper" data-i18n="asrOptionWhisper">本地 Whisper</option>
           </select>
 
-          <div data-asr-field="bailian" class="is-hidden">
-            <label for="asrApiKey" data-i18n="asrBailianKeyLabel">百炼 API Key</label>
-            <input
-              id="asrApiKey"
-              name="asrApiKey"
-              type="password"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="sk-..."
-            />
-            <p class="help">
-              <span data-i18n="asrBailianHelp"
-                >bilidown 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。</span
-              >
-              <a
-                href="https://bailian.console.aliyun.com/?apiKey=1"
-                target="_blank"
-                rel="noreferrer"
-                data-i18n="asrBailianLink"
-                >获取百炼 API Key</a
-              ><span data-i18n="asrBailianHelpSuffix">。</span>
-            </p>
-          </div>
 
           <div id="whisperSettings" data-asr-field="whisper" class="is-hidden">
             <p class="help" data-i18n="whisperHelp">
-              启动 <code>start_whisper_server.bat</code> 后，bilidown 会下载音轨
-              交给本地 Whisper 转写，再调用 AI 校正专有名词。
+              B 站视频有官方字幕时会自动使用——你**不需要**装 Whisper。
+              本设置仅在你需要转录**没有官方字幕**的视频时使用；按需安装即可。
             </p>
 
-            <!-- 2026-08-30 transparency rework: the setup flow is fully
-                 visible and read-only until the user acts. No silent
-                 installs: steps are listed, the check button only READS
-                 /health, and the exact install command (targeting the
-                 detected python) is shown only after a check reports
-                 something missing. The user decides whether to run it. -->
-            <div class="setup-panel" id="whisperSetupPanel">
-              <details class="setup-panel-collapse" data-default-collapsed="true">
-                <summary class="setup-panel-title">
-                  <span class="summary-title" data-i18n="whisperSetupTitle">本地环境准备</span>
-                  <span class="summary-hint" data-i18n="whisperSetupHint">检查本机 Python / 依赖 / 服务是否就绪</span>
-                </summary>
-              <ol class="setup-steps">
-                <li data-i18n="whisperSetupStep1">
-                  本机装有 Python 3.10+（bilidown 不自带 Python，也不会替你安装）
-                </li>
-                <li data-i18n="whisperSetupStep2">
-                  安装 Whisper 依赖到你的 Python——检查后这里会给出针对本机的确切命令，装不装由你决定
-                </li>
-                <li>
-                  <!-- 2026-08-31: the setup-panel link is the ONLY affordance
-                       that works before the server has ever run (a web page
-                       may not execute a local .bat, and the sandbox cannot
-                       see the on-disk install path). The deep link opens this
-                       extension's entry on chrome://extensions, where Chrome
-                       shows the folder path. -->
-                  <span data-i18n="whisperSetupStep3"
-                    >双击扩展文件夹里的 <code>start_whisper_server.bat</code
-                    >，保持窗口开着</span
-                  >
-                  <a
-                    href="#"
-                    id="extFolderLink"
-                    data-i18n="whisperExtFolderLink"
-                    data-i18n-title="whisperExtFolderTitle"
-                    >打开扩展管理页，查看文件夹路径</a
-                  >
-                </li>
-                <li data-i18n="whisperSetupStep4">
-                  点「检查系统」，全部 ✓ 即就绪
-                </li>
-              </ol>
+            <!-- 2026-09-07: only the live "检查系统" check stays. The
+                 previous "本地环境准备" 4-step manual is gone — per
+                 user feedback, the check is the only place the user
+                 needs to look: it surfaces every missing dep with
+                 its concrete install instructions, and the bat path
+                 shows up in the offline row + ready bar. No
+                 separate "manual" block. -->
+            <div class="whisper-check-section" id="whisperCheckSection">
+              <p class="help" data-i18n="whisperCheckSectionHelp">
+                为了确保 whisper 可以正常工作，你需要按顺序装好以下依赖。
+                点击「检查系统」检测你的环境；没装好的依赖会列出对应说明，已经装好的不会重复显示。
+              </p>
               <div class="diagnostics-actions">
                 <button
                   id="whisperCheckBtn"
@@ -175,7 +372,6 @@
                 role="status"
                 hidden
               ></div>
-              </details>
             </div>
 
                         <label data-i18n="whisperUrlLabel">Whisper server URL</label>
@@ -207,6 +403,29 @@
               placeholder="zh / en / ja ..."
             />
 
+            <!-- 2026-09-11: Whisper-side notification moved here from
+                 the old #notificationsCard. Visible only when the user
+                 has actually picked local Whisper (asrProvider=whisper)
+                 — the parent whisperSettings block handles that
+                 visibility. The other notification (summary/overview)
+                 lives in the AI provider card. Default ON. -->
+            <div class="whisper-notify-block">
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  id="notifyOnTranscribe"
+                  name="notifyOnTranscribe"
+                />
+                <span data-i18n="notifyOnTranscribeLabel"
+                  >Whisper 转录完成时发送浏览器通知</span
+                >
+              </label>
+              <p class="help" data-i18n="whisperNotifyHelp">
+                任务完成后会弹系统级通知，点击会聚焦已打开的视频标签页；
+                关闭通知只是不弹卡片，任务本体不受影响。
+              </p>
+            </div>
+
             <label for="subtitlesDir" data-i18n="subtitlesDirLabel"
               >字幕缓存目录</label
             >
@@ -227,240 +446,6 @@
                  to a single store value (notifyOnSummaryAndAnalysis) —
                  the user can only opt in/out of both together. The
                  individual checkboxes are mirrored on the same boolean. -->
-          </div>
-        </section>
-
-        <section class="card" id="notificationsCard">
-          <h2 data-i18n="notificationsHeading">通知</h2>
-          <p class="help" data-i18n="notificationsHelp">
-            任务完成后弹系统级通知。任务本体不受影响——关闭后只是不弹卡片。
-          </p>
-          <fieldset class="notify-prefs" id="notifyPrefs">
-            <legend data-i18n="notifyPrefsLegend">完成后弹通知</legend>
-            <label class="checkbox-row">
-              <input
-                type="checkbox"
-                id="notifyOnTranscribe"
-                name="notifyOnTranscribe"
-              />
-              <span data-i18n="notifyOnTranscribeLabel"
-                >转录完成时（Whisper）</span
-              >
-            </label>
-            <label class="checkbox-row">
-              <input
-                type="checkbox"
-                id="notifyOnSummaryAndAnalysis"
-                name="notifyOnSummaryAndAnalysis"
-              />
-              <span data-i18n="notifyOnSummaryAndAnalysisLabel"
-                >总结和概览完成时（一起开关）</span
-              >
-            </label>
-            <p class="help" data-i18n="notifyPrefsHelp">
-              通知会显示视频标题，点击会聚焦已打开的视频标签页。
-              总结和概览是同一类工作（都是对转录后的字幕做 LLM 处理），
-              因此统一一个开关。
-            </p>
-          </fieldset>
-        </section>
-
-        <section class="card" id="aiProviderCard">
-          <h2 data-i18n="aiProvider">AI provider</h2>
-
-          <label for="aiProvider" data-i18n="aiProviderSelectLabel"
-            >Provider</label
-          >
-          <select id="aiProvider" name="aiProvider">
-            <option value="none" data-i18n="providerOptionNone"
-              >不使用 AI 模型</option
-            >
-            <option value="minimax" data-i18n="providerOptionMinimax"
-              >minimax (MiniMax-M3)</option
-            >
-            <option value="deepseek" data-i18n="providerOptionDeepseek"
-              >DeepSeek</option
-            >
-            <option value="glm" data-i18n="providerOptionGlm"
-              >GLM (Zhipu)</option
-            >
-            <option value="other" data-i18n="providerOptionOther"
-              >Other model</option
-            >
-          </select>
-
-          <div class="provider-fields" data-provider-field="minimax">
-            <label for="minimaxApiKey" data-i18n="minimaxApiKeyLabel"
-              >minimax API key</label
-            >
-            <input
-              id="minimaxApiKey"
-              name="minimaxApiKey"
-              type="password"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Paste your minimax key"
-            />
-            <p class="help">
-              <span data-i18n="minimaxHelp"
-                >bilidown uses minimax for overviews, explanations,
-                translation, and note polishing.</span
-              >
-              <a
-                href="https://platform.minimaxi.com/user-center/basic-information/interface-key"
-                target="_blank"
-                rel="noreferrer"
-                data-i18n="minimaxLink"
-                >Create a minimax API key</a
-              ><span data-i18n="minimaxHelpSuffix">.</span>
-            </p>
-          </div>
-
-          <div class="provider-fields" data-provider-field="deepseek">
-            <label for="deepseekApiKey" data-i18n="deepseekApiKeyLabel"
-              >DeepSeek API key</label
-            >
-            <input
-              id="deepseekApiKey"
-              name="deepseekApiKey"
-              type="password"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Paste your DeepSeek key"
-            />
-            <p class="help">
-              <span data-i18n="deepseekHelp"
-                >bilidown uses DeepSeek for overviews, explanations,
-                translation, and note polishing.</span
-              >
-              <a
-                href="https://platform.deepseek.com/api_keys"
-                target="_blank"
-                rel="noreferrer"
-                data-i18n="deepseekLink"
-                >Create a DeepSeek API key</a
-              ><span data-i18n="deepseekHelpSuffix">.</span>
-            </p>
-          </div>
-
-          <div class="provider-fields" data-provider-field="glm">
-            <label for="glmApiKey" data-i18n="glmApiKeyLabel"
-              >GLM API key</label
-            >
-            <input
-              id="glmApiKey"
-              name="glmApiKey"
-              type="password"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Paste your Zhipu / Z.AI key"
-            />
-            <label for="glmApiType" data-i18n="glmApiTypeLabel"
-              >API type</label
-            >
-            <select id="glmApiType" name="glmApiType">
-              <option value="coding" data-i18n="glmApiTypeCoding"
-                >Coding Plan (subscription)</option
-              >
-              <option value="standard" data-i18n="glmApiTypeStandard"
-                >Standard API (pay-as-you-go)</option
-              >
-            </select>
-            <p class="help">
-              <span data-i18n="glmHelp"
-                >bilidown uses GLM (Zhipu / Z.AI) for overviews, explanations,
-                translation, and note polishing. Default model: glm-4.6.
-                Pick the API type that matches your key — the two endpoints
-                have different keys that are NOT interchangeable.</span
-              >
-              <a
-                href="https://open.bigmodel.cn/usercenter/apikeys"
-                target="_blank"
-                rel="noreferrer"
-                data-i18n="glmLink"
-                >Create a Zhipu API key</a
-              ><span data-i18n="glmHelpSuffix">.</span>
-            </p>
-          </div>
-
-          <div class="provider-fields provider-fields-other" data-provider-field="other">
-            <div class="local-remix-header">
-              <div class="local-remix-header-copy">
-                <span class="eyebrow" data-i18n="localRemix">Local remix</span>
-                <span class="customization-title" data-i18n="customizationTitle"
-                  >Want to use another AI model?</span
-                >
-                <span
-                  class="customization-purpose"
-                  data-i18n="customizationPurpose"
-                  >Edit and copy a safe prompt for your coding agent</span
-                >
-              </div>
-              <span class="agent-badge" data-i18n="agentBadge"
-                >Coding agent ready</span
-              >
-            </div>
-            <p class="help customization-intro" data-i18n="customizationIntro">
-              You can edit the prompt directly. Complete these three steps before
-              copying:
-            </p>
-            <ol class="customization-steps">
-              <li data-i18n="customizationStepFolder">
-                Open the extracted bilidown project folder in your coding
-                agent.
-              </li>
-              <li data-i18n="customizationStepReplace">
-                Replace [PROVIDER] and [MODEL] with the service and model you want
-                to use.
-              </li>
-              <li data-i18n="customizationStepKeys">
-                Never include API keys in the prompt or chat. Enter them yourself
-                after the code is ready.
-              </li>
-            </ol>
-            <label
-              for="customizationPrompt"
-              data-i18n="customizationPromptLabel"
-              >Editable customization prompt</label
-            >
-            <div
-              id="customizationPromptReminder"
-              class="prompt-reminder"
-              role="note"
-              aria-label="Prompt reminder"
-              data-i18n-aria-label="customizationReminderLabel"
-            >
-              <span data-i18n="customizationReminder"
-                >Before copying, replace [PROVIDER] and [MODEL] with the provider
-                and model you want to use.</span
-              >
-            </div>
-            <textarea
-              id="customizationPrompt"
-              rows="12"
-              aria-describedby="customizationPromptReminder"
-            >Customize this local bilidown workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is bilidown. If verification fails, stop and ask me to open the extracted bilidown project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep minimax-only request fields and retry behavior isolated to minimax. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real Bilibili video.</textarea>
-            <div class="copy-actions">
-              <button
-                id="copyCustomizationPromptBtn"
-                class="secondary"
-                type="button"
-                data-i18n="copyCustomizationPrompt"
-              >
-                Copy edited prompt
-              </button>
-              <span
-                id="copyStatus"
-                role="status"
-                aria-live="polite"
-              ></span>
-            </div>
-          </div>
-
-          <div class="privacy-note" data-i18n="privacyNote">
-            When you use AI features, the selected provider receives the
-            video transcript and relevant video context. Review the active
-            provider's terms and pricing before saving.
           </div>
         </section>
 

@@ -1,6 +1,6 @@
 # Privacy
 
-bilidown has no account system, analytics, telemetry, advertising, or developer-operated server.
+bililearn has no account system, analytics, telemetry, advertising, or developer-operated server.
 
 - The extension reads public video metadata and available subtitle tracks from Bilibili.
 - Your minimax API key, notes, settings, and recent cache entries are stored in `chrome.storage.local`.

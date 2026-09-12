@@ -109,16 +109,15 @@ var YTD_SETTINGS = (() => {
       .filter(Boolean),
   );
 
-  // Chrome extensions cannot read $HOME / %USERPROFILE% directly, so we
-  // keep a small lookup of the common homes for `~`-prefixed paths.
-  // expandExportPath() picks the entry whose path exists on disk, falling
-  // back to the first one. Update these if you move the extension to a
-  // different machine or account.
-  const KNOWN_HOMES = Object.freeze([
-    "C:/Users/username",
-    "/Users/username",
-    "/home/username",
-  ]);
+  // Chrome extensions cannot read $HOME / %USERPROFILE% directly, so
+  // `~`-prefixed paths can only be expanded against an explicit list of
+  // homes. This list is intentionally EMPTY (2026-09-12): baking a real
+  // username into the source leaks the build machine's layout and is
+  // wrong for every other install. expandExportPath() returns "" when no
+  // home is configured, so an unresolvable `~/...` value falls back to
+  // the browser's default download directory instead of a broken path.
+  // Populate locally (never commit) if you rely on `~/...` shorthand.
+  const KNOWN_HOMES = Object.freeze([]);
 
   const DEFAULTS = Object.freeze({
     provider: DEFAULT_PROVIDER,
@@ -129,15 +128,16 @@ var YTD_SETTINGS = (() => {
     aiBaseUrl: PROVIDER_PRESETS[DEFAULT_PROVIDER].baseUrl,
     aiModel: PROVIDER_PRESETS[DEFAULT_PROVIDER].model,
     // Which speech-to-text engine to fall back on when B-station has no
-    // usable native subtitles. "none" disables ASR entirely, "bailian"
-    // uses Alibaba Bailian Fun-ASR (cloud, requires a key; its <option>
-    // is currently hidden in options.html), "whisper" uses the local
-    // faster-whisper server (whisper_server.py). The default MUST be an
-    // engine the dropdown actually offers: "bailian" left a fresh
-    // install with a blank select while the hidden bailian block still
-    // rendered (user report 2026-08-31, new machine first run).
-    asrProvider: "whisper",
-    asrApiKey: "",
+    // usable native subtitles. "none" disables ASR entirely — the user
+    // just sees B-station's own subtitles (or no transcript at all
+    // for videos without one). The only ASR engines that exist now
+    // options.html). "whisper" uses the local faster-whisper server
+    // (whisper_server.py). 2026-09-10: default flipped to "none" so a
+    // fresh install does not silently require the user to set up a
+    // local whisper server before they can use the extension — the
+    // first-run banner in options.html explains how to turn whisper
+    // on if they need it.
+    asrProvider: "none",
     supadataApiKey: "",
     // Local Whisper configuration (only used when asrProvider === "whisper").
     whisperUrl: "http://127.0.0.1:7860",
@@ -150,11 +150,19 @@ var YTD_SETTINGS = (() => {
     // start empty; the options page blocks saving until the user picks a
     // directory, and background consumers treat "" as "cache disabled".
     subtitlesDir: "",
-    // Where exported notes / summaries / reports are written. Defaults to
-    // the system Downloads folder; the user can change it to any writable
-    // directory (e.g. a project folder or the subtitles cache). Supports
-    // `~/...` paths which the client expands using KNOWN_HOMES below.
-    exportDir: "C:/Users/username/Downloads",
+    // Where exported notes / summaries / reports are written. Intentionally
+    // NO hardcoded default path (2026-09-12, same rationale as
+    // subtitlesDir above): a baked-in absolute path would leak this build
+    // machine's layout onto every other install, and Chrome MV3 has no
+    // API for $HOME. An empty value means "export into the DEFAULT
+    // EXPORT SUBFOLDER of the browser's default download directory" —
+    // the consumer passes a relative `BiliSubs/<file>` filename to
+    // chrome.downloads.download(), which resolves it against the
+    // browser-configured Downloads folder (Windows/macOS/Linux alike)
+    // and creates the subfolder automatically on first export. Users who
+    // want a fixed folder elsewhere set it once in options; `~/...`
+    // values expand via KNOWN_HOMES only when that list is populated.
+    exportDir: "",
     // Desktop completion notifications. Default ON (2026-09-02): all three
     // pop unconditionally when their job finishes — whisper transcription
     // fires on every SUCCEEDED job (no slow-run threshold anymore — keep
@@ -171,6 +179,13 @@ var YTD_SETTINGS = (() => {
     // before doesn't get surprise notifications when this build lands.
     notifyOnTranscribe: true,
     notifyOnSummaryAndAnalysis: true,
+    // 2026-09-10: first-run onboarding banner. `false` on a fresh
+    // install — the options page reveals the banner and the user
+    // clicks "got it" to flip this to `true`. Strict boolean default
+    // (mirrors the notification-prefs pattern): undefined / 0 / "false"
+    // all land on the show-banner side. Once dismissed the banner is
+    // suppressed for the lifetime of this profile; no auto-reset.
+    firstRunDismissed: false,
   });
 
   const WHISPER_MODELS = Object.freeze([
@@ -259,7 +274,7 @@ var YTD_SETTINGS = (() => {
         !PRESET_MODELS.has(input.aiModel.trim())
           ? input.aiModel.trim()
           : preset.model,
-      asrProvider: ["bailian", "whisper", "none"].includes(input.asrProvider)
+      asrProvider: ["whisper", "none"].includes(input.asrProvider)
         ? input.asrProvider
         : DEFAULTS.asrProvider,
       asrApiKey:
@@ -298,6 +313,9 @@ var YTD_SETTINGS = (() => {
         input.notifyOnAnalysis === false
           ? false
           : true,
+      // 2026-09-10: first-run onboarding banner flag. Strict true
+      // check; anything else means "fresh install, show the banner".
+      firstRunDismissed: input.firstRunDismissed === true,
     };
   }
 
@@ -307,7 +325,6 @@ var YTD_SETTINGS = (() => {
     if (input && input.asrProvider == null) {
       let asrProvider = DEFAULTS.asrProvider;
       if (input.whisperEnabled === true) asrProvider = "whisper";
-      else if (input.asrApiKey) asrProvider = "bailian";
       input = { ...input, asrProvider };
     }
     return {
@@ -355,7 +372,7 @@ var YTD_SETTINGS = (() => {
 
   // Resolve a deterministic, user-namespaced cache filename for a B-station
   // video, in the same `{date}_{title}_{UP}.{ext}` convention the manual
-  // Markdown export + up-master-report use. This keeps the bilidown-written
+  // Markdown export + up-master-report use. This keeps the bililearn-written
   // Whisper cache discoverable by the same lookup logic that finds .md /
   // .txt / .srt files in `loadLocalSubtitleFile`, instead of being its
   // own ad-hoc `bvid_cid.json` namespace.
@@ -401,22 +418,19 @@ var YTD_SETTINGS = (() => {
   }
 
   // Expand a `~`-prefixed path using KNOWN_HOMES. Returns the input
-  // unchanged if it doesn't start with `~` or no home is configured.
-  // Chrome MV3 has no API for $HOME / %USERPROFILE%, so we keep an
-  // explicit list of homes we trust on this machine.
+  // unchanged if it doesn't start with `~`. When no home is configured
+  // (the default — see KNOWN_HOMES), returns "" so the caller falls back
+  // to the browser's default download directory rather than writing to a
+  // literal `~/...` path that no filesystem understands.
   function expandExportPath(value) {
     if (typeof value !== "string" || !value.startsWith("~")) return value || "";
     const rest = value.replace(/^~+/, ""); // drop the leading ~
     const sep = rest.startsWith("/") || rest.startsWith("\\") ? "" : "/";
-    // Prefer the entry whose path actually exists on disk (the whisper
-    // server can validate this for us via the filesystem, but the client
-    // can also probe via fetch on a known sentinel — we keep it simple
-    // and just pick the first configured home).
     for (const home of KNOWN_HOMES) {
       if (!home) continue;
       return `${home}${sep}${rest}`;
     }
-    return value;
+    return "";
   }
 
   // Resolve the chat-completions URL from the live settings, not DEFAULTS,

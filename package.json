@@ -1,0 +1,13 @@
+{
+  "name": "bililearn",
+  "version": "1.0.0",
+  "private": true,
+  "description": "bililearn - Bilibili video AI summary extension. npm is dev-only (tests); the extension itself runs without a build step.",
+  "license": "ISC",
+  "scripts": {
+    "test": "node tests/bilibili-errors.test.js && node tests/whisper-progress.e2e.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}
