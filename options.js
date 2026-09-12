@@ -17,6 +17,18 @@ const YTD_OPTIONS = (() => {
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
       aiProvider: "AI provider",
+      // 2026-09-13: the following 7 keys were referenced by options.html
+      // data-i18n hooks but missing from COPY — translate() returned "" and
+      // applyLanguage wiped the labels/help to invisible. Added verbatim
+      // from the hardcoded HTML text.
+      htmlTitle: "bililearn settings",
+      aiProviderHelp:
+        "Powers video summaries + overviews. Pick a model and enter its API key. Without one, bililearn can only show subtitles — no summaries.",
+      minimaxKeyLabel: "minimax API key",
+      deepseekKeyLabel: "DeepSeek API key",
+      glmKeyLabel: "GLM API key",
+      otherAiBaseUrlLabel: "Custom OpenAI-compatible base URL",
+      otherAiModelLabel: "Custom model name",
       aiProviderSelectLabel: "Choose a model",
       providerOptionMinimax: "minimax (MiniMax-M3)",
       providerOptionDeepseek: "DeepSeek",
@@ -75,6 +87,8 @@ const YTD_OPTIONS = (() => {
       whisperExtFolderLink: "Open the extensions page to copy the folder path",
       whisperExtFolderTitle:
         "A web page is not allowed to run a local .bat by clicking a link, and the extension cannot see its own install folder. The extensions page shows it under “path” — click to copy, paste into File Explorer's address bar, then double-click start_whisper_server.bat there.",
+      whisperCheckSectionHelp:
+        "Local Whisper needs the dependencies below, installed in order. Click “Check system”: every dependency gets a row — installed ones ✓ with their version, missing ones ✗ with the exact fix.",
       whisperCheckBtn: "Check system",
       whisperCopyCmdBtn: "Copy install command",
       whisperSetupDownloadBtn: "Download setup script",
@@ -90,12 +104,11 @@ const YTD_OPTIONS = (() => {
       // merged into a single store value (notifyOnSummaryAndAnalysis) —
       // summary and analysis are the same kind of LLM work over the
       // transcript, so the user opts in/out of both together.
-      notificationsHeading: "Notifications",
-      notificationsHelp:
-        "Desktop notifications pop when a job finishes. Disabling a toggle only suppresses the popup — the underlying job still runs.",
-      notifyPrefsLegend: "Notify when complete",
+      // 2026-09-10: notificationsHeading + notifyPrefsLegend removed with
+      // the standalone #notificationsCard — each embedded notify block now
+      // carries its own inline label + help.
       notifyOnTranscribeLabel: "When a Whisper transcription finishes",
-      notifyOnSummaryAndAnalysisLabel: "When a summary or overview finishes (toggled together)",
+      notifyOnSummaryAndAnalysisLabel: "Send a browser notification when a summary or overview finishes (toggled together)",
       // 2026-09-04: the "开机自启 Whisper server" block has been removed
       // from the options page entirely. The setup script
       // (setup_whisper_autostart_system.ps1) and the manage menu
@@ -110,6 +123,24 @@ const YTD_OPTIONS = (() => {
       // why summary + overview share one toggle.
       aiProviderNotifyHelp:
         "A desktop notification pops when the job finishes; clicking it focuses the open video tab. Disabling it only suppresses the pop-up — the underlying job still runs. Summary and overview are the same kind of work (both are LLM passes over the transcript), so they share one toggle.",
+      // 2026-09-10: help for the notify block embedded in the whisper
+      // settings card (.whisper-notify-block). Mirrors aiProviderNotifyHelp
+      // but scoped to the transcription job.
+      whisperNotifyHelp:
+        "A desktop notification pops when a Whisper transcription finishes; clicking it focuses the open video tab. Disabling it only suppresses the pop-up — the underlying job still runs.",
+      // 2026-09-10: first-run onboarding banner copy (revealed by
+      // revealFirstRunBannerOnce). zh values are byte-identical to the
+      // options.html defaults; a language switch replaces the <strong>
+      // markup with plain text — accepted tradeoff, the page starts in
+      // the user's language either way.
+      firstRunHeading: "Welcome to bililearn — quick start",
+      firstRunStep1:
+        "Default behaviour — only Bilibili's official subtitles (human or AI-translated) load. Videos without official subtitles are not auto-transcribed.",
+      firstRunStep2:
+        "Want local transcription? — For a video with no official subtitles, switch the Speech recognition section below to Whisper (or wire another engine). First-time Whisper use needs local Python + the Visual C++ runtime + faster-whisper; click “Check system” for the step-by-step guide.",
+      firstRunStep3:
+        "Want AI summaries / overviews? — Pick a model under AI provider below and enter its API key. Without one, bililearn shows subtitles only — no summaries.",
+      firstRunDismiss: "Got it — don't show again",
 
       saveSettings: "Save settings",
       localRemix: "Local remix",
@@ -210,13 +241,33 @@ const YTD_OPTIONS = (() => {
       whisperVcRedistHint:
         "faster-whisper imports fine, but ctranslate2.dll can't load — your Windows is missing the Microsoft Visual C++ 2015-2022 x64 redistributable. This is an OS-level dependency, NOT a pip package. Download and install it from Microsoft's site, then restart this PC and re-open the bat.",
       whisperVcRedistLink: "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+      // 2026-09-13 per-dep rows: VC++ has a row even when fine / untestable.
+      whisperVcRedistOk: "Runtime present — ctranslate2.dll loads",
+      whisperVcRedistPending: "Verifiable once faster-whisper is installed",
       whisperLimitedStatusVcRedist:
         "Server is up but the local Python can't load ctranslate2.dll. Install the Visual C++ 2015-2022 x64 redistributable (link above) and restart, then re-open the bat — pip alone can't fix this.",
-      whisperReadyBarCore:
-        "Environment ready. The first transcription with a model downloads and caches that model's weights (base ≈ 150 MB); transcripts are cached by BV id in the subtitle cache directory above — the same video is never transcribed twice.",
+      whisperReadyBarCore: ({ batHint }) =>
+        `Environment ready · launcher: ${batHint}. The first transcription with a model downloads and caches that model's weights (base ≈ 150 MB); transcripts are cached by BV id in the subtitle cache directory above — the same video is never transcribed twice.`,
       whisperReadyBarZhconvSuffix:
         " (zhconv optional, not installed: subtitles may be Traditional; transcription is unaffected — install command in the zhconv row above, relaunch the bat afterwards)",
       whisperReadyStatus: "Ready",
+      // 2026-09-05: step-guide labels — each names one install step of the
+      // whisper setup path (the missing-only "检查系统" report points the
+      // user at the exact step per row). The python.org URL is the real
+      // download link rendered as an anchor via renderDiagnosticsItemTo's
+      // opts.html branch.
+      whisperStepPython: "Install Python (3.10 or newer)",
+      whisperStepVcRedist: "Install the Visual C++ 2015-2022 x64 redistributable",
+      whisperStepFasterWhisper: "Install faster-whisper",
+      whisperStepZhconv: "Install zhconv (optional — Traditional→Simplified conversion)",
+      whisperStepServer: "Start the local Whisper server (double-click the bat)",
+      whisperStepPythonLink: "https://www.python.org/downloads/",
+      whisperStepPythonMissing: "Python not found on PATH",
+      whisperStepFasterWhisperMissing: "faster-whisper not installed",
+      whisperStepServerNotRunning: "Local Whisper server not running",
+      whisperAllReady: "All set — environment ready",
+      whisperReadySummary: "Ready",
+      whisperLimitedStatusZhconvOnly: "Online · limited mode: zhconv not installed — subtitles may stay Traditional; transcription is unaffected",
       whisperCopied: ({ cmd }) => `Copied: ${cmd}`,
       whisperCopyFail: "Copy failed — select the command text and copy it manually",
       optionalBadge: "optional",
@@ -247,17 +298,8 @@ const YTD_OPTIONS = (() => {
       diagWhisperNotEnabledSuffix: "(local Whisper is not enabled — no impact)",
       diagWhisperDownSuffix:
         "(not running? double-click start_whisper_server.bat in the extension folder)",
-      diagAsrLabel: "ASR provider",
-      diagAsrNone: "None / Bilibili native subtitles only",
-      diagAsrBailian: "Aliyun Bailian Fun-ASR",
-      diagAsrWhisper: "Local Whisper",
-      diagAiKeyLabel: "AI provider key",
-      diagAiKeyNone:
-        "No AI model enabled (summaries/overviews unavailable; subtitles unaffected)",
-      diagAiKeyConfigured: "configured",
-      diagAiKeyMissing:
-        "not configured (needed for overviews/summaries; subtitles unaffected)",
-      diagAiKeyCustom: "Custom model: configure the key in the matching field",
+      // 2026-09-13: diagAsr*/diagAiKey* rows removed from runDiagnostics —
+      // they only echoed the settings form above (user: "脱裤子放屁").
     },
     "zh-CN": {
       pageTitle: "bililearn 设置",
@@ -271,6 +313,17 @@ const YTD_OPTIONS = (() => {
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",
+      // 2026-09-13: 下面 7 个键被 options.html 的 data-i18n 引用但 COPY 里
+      // 一直缺失——translate() 回落为 ""，applyLanguage 一跑标签/帮助文案
+      // 就被清空成不可见。按 options.html 里的原文补齐。
+      htmlTitle: "bililearn 设置",
+      aiProviderHelp:
+        "用于视频总结 + 概览。选择一个模型并填入 API key。没有配的话，bililearn 只能给你看字幕，不会总结。",
+      minimaxKeyLabel: "minimax API key",
+      deepseekKeyLabel: "DeepSeek API key",
+      glmKeyLabel: "GLM API key",
+      otherAiBaseUrlLabel: "自定义 OpenAI 兼容 base URL",
+      otherAiModelLabel: "自定义模型名",
       aiProviderSelectLabel: "选择模型",
       providerOptionMinimax: "minimax（MiniMax-M3）",
       providerOptionDeepseek: "DeepSeek",
@@ -325,6 +378,8 @@ const YTD_OPTIONS = (() => {
       whisperExtFolderLink: "打开扩展管理页，查看文件夹路径",
       whisperExtFolderTitle:
         "浏览器不允许网页直接运行本地 bat，扩展也看不到自己的安装位置。扩展管理页会显示本扩展在磁盘上的文件夹（「路径」一栏）：点击复制 → 粘贴到资源管理器地址栏回车 → 在打开的文件夹里双击 start_whisper_server.bat。",
+      whisperCheckSectionHelp:
+        "本地 Whisper 需要按顺序装好以下依赖。点击「检查系统」检测环境：每个依赖各占一行——装好的打 ✓（带版本），缺的标红并给出对应的安装办法。",
       whisperCheckBtn: "检查系统",
       whisperCopyCmdBtn: "复制安装命令",
       whisperSetupDownloadBtn: "下载安装脚本",
@@ -333,10 +388,7 @@ const YTD_OPTIONS = (() => {
         "Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。再次打开同一视频会直接读缓存，不再跑 Whisper。",
       subtitlesDirRequired:
         "字幕缓存目录为空，无法保存。Whisper 需要本机一个可写目录来缓存转写结果。请填写上方目录后再保存。",
-      // 2026-09-02: 通知块拆成独立 section；总结+概览绑定 1 toggle
-      notificationsHeading: "通知",
-      notificationsHelp: "任务完成后弹系统级通知。任务本体不受影响——关闭后只是不弹卡片。",
-      notifyPrefsLegend: "完成后弹通知",
+      // 2026-09-10: 独立 #notificationsCard 删除后 heading/legend/help 不再需要。
       notifyOnTranscribeLabel: "Whisper 转录完成时",
       notifyOnSummaryAndAnalysisLabel: "总结和概览完成时（一起开关）",
       // 2026-09-04:「开机自启 Whisper server」块已从设置页整体删除，
@@ -349,6 +401,20 @@ const YTD_OPTIONS = (() => {
       // 逐字节一致（i18n 惯例：测试断言依赖原文）。
       aiProviderNotifyHelp:
         "任务完成后会弹系统级通知。点击通知会聚焦已打开的视频标签页；关闭通知只是不弹卡片，任务本体不受影响。总结和概览是同一类工作（都是对转录后的字幕做 LLM 处理），因此统一一个开关。",
+      // 2026-09-10: whisper 设置卡内嵌通知块（.whisper-notify-block）的帮助
+      // 文案，与 options.html 默认中文一致。
+      whisperNotifyHelp:
+        "任务完成后会弹系统级通知，点击会聚焦已打开的视频标签页；关闭通知只是不弹卡片，任务本体不受影响。",
+      // 2026-09-10: 首次运行引导横幅文案（revealFirstRunBannerOnce 显示）。
+      // 值与 options.html 默认中文逐字节一致（i18n 惯例：测试断言依赖原文）。
+      firstRunHeading: "欢迎使用 bililearn — 快速上手",
+      firstRunStep1:
+        "默认行为 — 当前只会加载并显示 B 站官方字幕（人工或 AI 翻译）。没有官方字幕的视频不会自动转写。",
+      firstRunStep2:
+        "想要本地转录？ — 当你打开一段没有官方字幕的视频时，请到下方「语音识别」切到 Whisper（或接入其他模型）。首次启用 Whisper 需要本机装 Python + Visual C++ 运行时 + faster-whisper，详情点「检查系统」看分步指引。",
+      firstRunStep3:
+        "想要 AI 总结/概览？ — 需要在下方「AI provider」里选一个模型并填入 API key。没有配的话，bililearn 只能给你看字幕，不会总结。",
+      firstRunDismiss: "知道了，不再提醒",
 
       saveSettings: "保存设置",
       localRemix: "本地改造",
@@ -439,14 +505,31 @@ const YTD_OPTIONS = (() => {
       whisperVcRedistHint:
         "faster-whisper 装好了，但加载 ctranslate2.dll 失败——你的 Windows 缺「Microsoft Visual C++ 2015-2022 x64 Redistributable」。这是系统级依赖，不是 pip 包。从微软官网下载安装，重启电脑后重开 bat。",
       whisperVcRedistLink: "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+      // 2026-09-13 每依赖一行：VC++ 正常/暂时无法验证时也有一行。
+      whisperVcRedistOk: "运行库就位 — ctranslate2.dll 可正常加载",
+      whisperVcRedistPending: "装好 faster-whisper 后才能实测",
       whisperLimitedStatusVcRedist:
         "server 起来了，但本地 Python 加载 ctranslate2.dll 失败。先装上方的 Visual C++ 2015-2022 x64 重启电脑后重开 bat —— pip 装不了这个，是系统级依赖。",
-      whisperReadyBarCore:
-        "环境就绪。首次用某个模型转写时会自动下载该模型权重并缓存（base 约 150MB）；" +
-        "转写结果按 BV 号缓存在上方「字幕缓存目录」，同一视频不会重复转写。",
+      whisperReadyBarCore: ({ batHint }) =>
+        `环境就绪 · 启动脚本：${batHint}。首次用某个模型转写时会自动下载该模型权重并缓存（base 约 150MB）；转写结果按 BV 号缓存在上方「字幕缓存目录」，同一视频不会重复转写。`,
       whisperReadyBarZhconvSuffix:
         "（zhconv 可选未装：字幕可能是繁体，不影响转写；安装命令见上方 zhconv 行，装完重开 bat）",
       whisperReadyStatus: "环境就绪",
+      // 2026-09-05: 分步安装指引标签 — 每条对应 Whisper 环境的一步，
+      // missing-only「检查系统」报告按行指向对应步骤。python.org 链接
+      // 通过 renderDiagnosticsItemTo 的 opts.html 分支渲染成真实锚点。
+      whisperStepPython: "安装 Python（3.10 或更新）",
+      whisperStepVcRedist: "安装 Visual C++ 2015-2022 x64 运行库",
+      whisperStepFasterWhisper: "安装 faster-whisper",
+      whisperStepZhconv: "安装 zhconv（可选 — 繁体转简体）",
+      whisperStepServer: "启动本地 Whisper 服务器（双击 bat）",
+      whisperStepPythonLink: "https://www.python.org/downloads/",
+      whisperStepPythonMissing: "PATH 中找不到 Python",
+      whisperStepFasterWhisperMissing: "faster-whisper 未安装",
+      whisperStepServerNotRunning: "本地 Whisper 服务器未运行",
+      whisperAllReady: "一切就绪 — 环境已准备好",
+      whisperReadySummary: "就绪",
+      whisperLimitedStatusZhconvOnly: "在线 · 受限模式：zhconv 未安装 — 字幕可能保持繁体；转录不受影响",
       whisperCopied: ({ cmd }) => `已复制：${cmd}`,
       whisperCopyFail: "复制失败——手动选中文本里的命令复制",
       optionalBadge: "可选",
@@ -472,15 +555,8 @@ const YTD_OPTIONS = (() => {
       diagWhisperLimitedSuffix: "（上方「检查系统」里有针对本机的安装命令）",
       diagWhisperNotEnabledSuffix: "（当前未启用本地 Whisper，无影响）",
       diagWhisperDownSuffix: "（未运行？双击扩展目录里的 start_whisper_server.bat）",
-      diagAsrLabel: "ASR 提供方",
-      diagAsrNone: "不使用 / 仅 B 站原生字幕",
-      diagAsrBailian: "阿里云百炼 Fun-ASR",
-      diagAsrWhisper: "本地 Whisper",
-      diagAiKeyLabel: "AI 提供方 Key",
-      diagAiKeyNone: "未启用 AI 模型（总结/概览不可用；字幕功能不受影响）",
-      diagAiKeyConfigured: "已配置",
-      diagAiKeyMissing: "未配置（概览/总结需要；字幕功能不受影响）",
-      diagAiKeyCustom: "自定义模型：请在对应字段配置 Key",
+      // 2026-09-13: diagAsr*/diagAiKey* 行已从 runDiagnostics 移除——
+      // 只是复读上方设置表单（用户原话："脱裤子放屁"）。
     },
   };
 
@@ -919,6 +995,13 @@ const YTD_OPTIONS = (() => {
     const saveStatus = doc.getElementById("saveStatus");
     const dataStatus = doc.getElementById("dataStatus");
     const dirtyBanner = doc.getElementById("dirtyBanner");
+    // 2026-09-10: first-run onboarding banner — revealed by
+    // revealFirstRunBannerOnce() at the END of loadOptions (the test
+    // suite's deterministic boot sentinel) and dismissed for good via
+    // a persisted storage flag.
+    const firstRunBanner = doc.getElementById("firstRunBanner");
+    const firstRunDismissBtn = doc.getElementById("firstRunDismiss");
+    const FIRST_RUN_DISMISSED_KEY = "ytd_options_first_run_dismissed";
 
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
     const statusStates = new Map();
@@ -1216,15 +1299,9 @@ const YTD_OPTIONS = (() => {
           const asrValue = offered ? settings.asrProvider : "whisper";
           asrProviderSelect.value = asrValue;
           applyAsrProviderVisibility(asrValue);
-          // 2026-09-04 (user instruction "切换到whisper时要默认启动
-          // 环境监测，不满足时折叠部分要展开"): on first load, if the
-          // saved provider is whisper, kick off the same auto-check
-          // the change handler uses. Falsy when the saved value is
-          // "none" / "bailian" so we don't burn a /health roundtrip
-          // for users who never pick whisper.
-          if (asrValue === "whisper") {
-            void autoCheckWhisperAndExpand();
-          }
+          // 2026-09-05 (user instruction "我就是按需"): no auto env check on
+          // page load — the user clicks "检查系统" when they want it. The
+          // autoCheckWhisperAndExpand helper was removed with this.
         }
         if (whisperUrlText) {
           // 2026-08-29: the URL is fixed (start_whisper_server.bat binds
@@ -1245,6 +1322,22 @@ const YTD_OPTIONS = (() => {
       }
     }
 
+    // 2026-09-10: show the onboarding banner exactly once per profile —
+    // only after the whole init chain (language + settings) settled, so
+    // the page doesn't repaint under it. Hidden again for good once the
+    // user clicks 知道了 (flag persisted in chrome.storage.local).
+    async function revealFirstRunBannerOnce() {
+      if (!firstRunBanner) return;
+      try {
+        const stored = await storage.get(FIRST_RUN_DISMISSED_KEY);
+        if (stored && stored[FIRST_RUN_DISMISSED_KEY]) return;
+        firstRunBanner.hidden = false;
+      } catch (_error) {
+        // Storage unavailable (rare): showing it once more is harmless.
+        firstRunBanner.hidden = false;
+      }
+    }
+
     async function loadOptions() {
       try {
         applyLanguage(await readPreferredLanguage(storage));
@@ -1258,6 +1351,7 @@ const YTD_OPTIONS = (() => {
       // rows — folding it hides the only settings the user might want to
       // touch, which is worse than the vertical space it saves. Left open.
       await loadSettings();
+      await revealFirstRunBannerOnce();
     }
 
     async function saveSettings(event) {
@@ -1386,59 +1480,6 @@ const YTD_OPTIONS = (() => {
       renderWhisperCheckResults((r && r.data) || null);
     }
 
-    // 2026-09-04: auto-check + auto-expand behavior for the whisper
-    // option. Triggered when the user (a) loads the page with whisper
-    // already selected, or (b) flips the ASR provider dropdown to
-    // "whisper". Runs runWhisperCheck (which paints the standard
-    // ✓/✗ report), then opens the local-env <details> and scrolls it
-    // into view ONLY if the check shows the environment isn't ready.
-    // If everything is green we keep the panel folded — there's no
-    // need to surface the install steps when nothing is broken.
-    async function autoCheckWhisperAndExpand() {
-      if (!whisperCheckResults) return;
-      try {
-        await runWhisperCheck();
-      } catch (_err) {
-        // The check is best-effort. A network error here should still
-        // expand the panel so the user can see the manual install
-        // instructions rather than staring at a blank report.
-        expandSetupPanelIfPresent();
-        return;
-      }
-      const h = lastWhisperHealthData || {};
-      const deps = h.deps || {};
-      const ready =
-        h.ok !== false &&
-        (deps.faster_whisper === true || deps.faster_whisper === "1.2.1");
-      if (!ready) {
-        expandSetupPanelIfPresent();
-      }
-    }
-
-    function expandSetupPanelIfPresent() {
-      const details = doc.querySelector("details.setup-panel-collapse");
-      if (!details) return;
-      if (!details.open) {
-        details.open = true;
-      }
-      // Only scroll if the panel isn't already mostly visible, so we
-      // don't yank the page if the user is already reading something
-      // else in the whisper block. JSDOM and some older browsers throw
-      // on scrollIntoView (no-op, missing impl, or the options object
-      // form) — guard the whole call rather than each branch.
-      if (typeof details.scrollIntoView === "function") {
-        try {
-          details.scrollIntoView({ block: "start", behavior: "smooth" });
-        } catch (_e1) {
-          try {
-            details.scrollIntoView();
-          } catch (_e2) {
-            // No-op: env (e.g. JSDOM) doesn't implement scroll at all.
-          }
-        }
-      }
-    }
-
     // Pure renderer for the check flow (2026-08-31 i18n rework): called by
     // runWhisperCheck after a fetch AND by applyLanguage when the UI
     // language changes, so the rendered report always follows the selected
@@ -1489,6 +1530,8 @@ const YTD_OPTIONS = (() => {
       // Case 2: OLD server (pre-2026-08-30 /health) — online, maybe even
       // ok:true, but it reports no python block, so the diagnostics here
       // are incomplete. NEVER call this "ready"; the fix is a restart.
+      // Exactly ONE row — no per-dep rows can be rendered without a
+      // python block.
       if (!pyExe) {
         renderCheckItem(
           list,
@@ -1496,60 +1539,129 @@ const YTD_OPTIONS = (() => {
           false,
           translate(currentLanguage, "whisperOldServerDetail", { batHint }),
         );
-        renderCheckItem(
-          list,
-          translate(currentLanguage, "whisperDepsLabel"),
-          null,
-          translate(currentLanguage, "whisperOldServerDepsNote"),
-        );
         whisperTestStatus.textContent = translate(currentLanguage, "whisperOldServerStatus");
         return;
       }
 
-      renderCheckItem(list, "Python", true, (py.version || "?") + " · " + pyExe);
       const deps = d.deps || {};
+      // 2026-09-13 per-dependency contract (user directive, replaces the
+      // 2026-09-07 missing-only rule): EVERY dependency gets a row —
+      // installed ones show ✓ with their version, missing ones ✗ with the
+      // install instructions. The TODO list is still derivable at a
+      // glance (the red/amber rows), but the user always sees the whole
+      // environment, including what is already fine.
+      const fwMissing = deps.faster_whisper == null;
       const zhconvOk = deps.zhconv != null;
+      const missingList = Array.isArray(d.missing) ? d.missing : [];
+      const vcRedistMissing = missingList.indexOf("vc_redist") !== -1;
 
-      // Case 3: limited mode — required deps missing. The command targets
-      // the DETECTED python; installing is the user's call.
-      if (d.ok === false) {
-        const missingList = Array.isArray(d.missing) ? d.missing : [];
-        renderCheckItem(list, "Whisper server", false, translate(currentLanguage, "whisperLimitedDetail"));
-        if (deps.faster_whisper == null) {
-          renderCheckItem(list, "faster-whisper", false, translate(currentLanguage, "whisperMissingRequired"));
-        }
-        // 2026-09-04: detect the "ctranslate2.dll not loadable" case
-        // (VC++ 2015-2022 x64 redistributable missing on Windows).
-        // The server tags this as missing="vc_redist" — it is NOT a
-        // pip-installable package, so the regular pip-install button
-        // would mislead the user. We hide the install button and
-        // surface a direct download link instead.
-        const vcRedistMissing = missingList.indexOf("vc_redist") !== -1;
-        if (vcRedistMissing) {
-          const link = translate(currentLanguage, "whisperVcRedistLink");
-          renderCheckItem(
-            list,
-            "Visual C++ 2015-2022 x64",
-            false,
-            translate(currentLanguage, "whisperVcRedistHint"),
-            { html: `<a href="${link}" target="_blank" rel="noreferrer">${link}</a>` },
-          );
-        }
+      // pip-installable missing deps in canonical order; the command
+      // never re-installs what is already there.
+      const pipMissing = [];
+      if (fwMissing) pipMissing.push("faster-whisper");
+      if (!zhconvOk) pipMissing.push("zhconv");
+      // quoting rule: see pyCmdRef above (PowerShell paste fix).
+      const cmd = pipMissing.length
+        ? pyCmdRef + " -m pip install " + pipMissing.join(" ")
+        : "";
+
+      // Row 1: Python — the server reports the interpreter it actually
+      // runs under; reaching this branch means it exists.
+      renderCheckItem(
+        list,
+        "Python",
+        true,
+        (py.version || "?") + " — " + pyExe,
+      );
+
+      // Row 2: Visual C++ 2015-2022 x64. The server only flags it when
+      // it is BROKEN (vc_redist in missing — ctranslate2.dll can't load);
+      // a successful faster-whisper import proves the runtime is there.
+      // While faster-whisper itself is missing there is nothing to probe,
+      // so the row stays neutral instead of faking a ✓.
+      if (vcRedistMissing) {
+        const link = translate(currentLanguage, "whisperVcRedistLink");
+        renderCheckItem(
+          list,
+          "Visual C++ 2015-2022 x64",
+          false,
+          translate(currentLanguage, "whisperVcRedistHint"),
+          { html: `<a href="${link}" target="_blank" rel="noreferrer">${link}</a>` },
+        );
+      } else if (fwMissing) {
+        renderCheckItem(
+          list,
+          "Visual C++ 2015-2022 x64",
+          null,
+          translate(currentLanguage, "whisperVcRedistPending"),
+        );
+      } else {
+        renderCheckItem(
+          list,
+          "Visual C++ 2015-2022 x64",
+          true,
+          translate(currentLanguage, "whisperVcRedistOk"),
+        );
+      }
+
+      // Row 3: faster-whisper (the required transcription engine).
+      if (fwMissing) {
+        renderCheckItem(list, "faster-whisper", false, translate(currentLanguage, "whisperMissingRequired"));
+      } else {
+        renderCheckItem(
+          list,
+          "faster-whisper",
+          true,
+          deps.faster_whisper || d.version || translate(currentLanguage, "whisperInstalled"),
+        );
+      }
+
+      // Row 4: zhconv — optional enhancement, badge shown either way.
+      if (zhconvOk) {
         renderCheckItem(
           list,
           translate(currentLanguage, "whisperZhconvLabel"),
-          zhconvOk,
-          zhconvOk ? deps.zhconv : translate(currentLanguage, "whisperZhconvMissingLimited"),
+          true,
+          deps.zhconv,
           { optional: true },
         );
+      } else {
+        renderCheckItem(
+          list,
+          translate(currentLanguage, "whisperZhconvLabel"),
+          false,
+          translate(
+            currentLanguage,
+            fwMissing ? "whisperZhconvMissingLimited" : "whisperZhconvMissingHint",
+            { pyExe: pyCmdRef },
+          ),
+          { optional: true },
+        );
+      }
+
+      // Row 5: Whisper server — it answered /health, which is exactly
+      // what this row certifies. In limited mode the missing dep rows
+      // above carry the action items; the detail says transcription is
+      // unavailable until they are fixed.
+      renderCheckItem(
+        list,
+        "Whisper server",
+        true,
+        d.ok === false
+          ? translate(currentLanguage, "whisperLimitedDetail")
+          : translate(currentLanguage, "whisperOnlineReady", { batPath }),
+      );
+
+      // Required readiness = faster-whisper importable (vc_redist gates
+      // the DLL it loads). Readiness ignores the optional zhconv.
+      const requiredReady = !fwMissing && !vcRedistMissing;
+      if (!requiredReady) {
         if (vcRedistMissing) {
           // OS-level fix, not pip — do not show the pip install button.
           whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatusVcRedist");
         } else {
-          // quoting rule: see pyCmdRef above (PowerShell paste fix).
-          const cmd = pyCmdRef + " -m pip install faster-whisper zhconv";
           whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatus", { cmd });
-          if (whisperCopyCmdBtn) {
+          if (whisperCopyCmdBtn && cmd) {
             whisperCopyCmdBtn.hidden = false;
             whisperCopyCmdBtn.dataset.cmd = cmd;
           }
@@ -1558,35 +1670,26 @@ const YTD_OPTIONS = (() => {
         return;
       }
 
-      // Case 4: fully ready (new server + all required deps reported).
-      renderCheckItem(
-        list,
-        "Whisper server",
-        true,
-        translate(currentLanguage, "whisperOnlineReady", { batPath }),
-      );
-      renderCheckItem(
-        list,
-        "faster-whisper",
-        true,
-        deps.faster_whisper || d.version || translate(currentLanguage, "whisperInstalled"),
-      );
-      renderCheckItem(
-        list,
-        translate(currentLanguage, "whisperZhconvLabel"),
-        zhconvOk,
-        zhconvOk
-          ? deps.zhconv
-          : translate(currentLanguage, "whisperZhconvMissingHint", { pyExe: pyCmdRef }),
-        { optional: true },
-      );
+      // Required deps ready: the ready bar (carrying the FULL launcher
+      // path — user ask: 文案中给全路径) plus, at most, the optional
+      // zhconv gap row above.
       if (whisperReadyBar) {
         whisperReadyBar.hidden = false;
         whisperReadyBar.textContent =
-          translate(currentLanguage, "whisperReadyBarCore") +
+          translate(currentLanguage, "whisperReadyBarCore", { batHint: batPath || batHint }) +
           (zhconvOk ? "" : translate(currentLanguage, "whisperReadyBarZhconvSuffix"));
       }
-      whisperTestStatus.textContent = translate(currentLanguage, "whisperReadyStatus");
+      if (zhconvOk) {
+        whisperTestStatus.textContent = translate(currentLanguage, "whisperReadyStatus");
+      } else {
+        // Server up + transcription usable — still surface the optional
+        // zhconv install command so closing the gap is one paste away.
+        whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatus", { cmd });
+        if (whisperCopyCmdBtn && cmd) {
+          whisperCopyCmdBtn.hidden = false;
+          whisperCopyCmdBtn.dataset.cmd = cmd;
+        }
+      }
     }
 
     async function copyWhisperInstallCmd() {
@@ -1697,6 +1800,17 @@ const YTD_OPTIONS = (() => {
     ]) {
       if (input) input.addEventListener("input", applyNotifyVisibility);
     }
+    if (firstRunDismissBtn) {
+      firstRunDismissBtn.addEventListener("click", async () => {
+        if (firstRunBanner) firstRunBanner.hidden = true;
+        try {
+          await storage.set({ [FIRST_RUN_DISMISSED_KEY]: true });
+        } catch (_error) {
+          // Already hidden for this session; the banner returns next
+          // load if storage stays unavailable.
+        }
+      });
+    }
     if (switchKeyKeepBtn) {
       switchKeyKeepBtn.addEventListener("click", () =>
         closeSwitchKeyDialog("keep"),
@@ -1751,16 +1865,9 @@ const YTD_OPTIONS = (() => {
       asrProviderSelect.addEventListener("change", () => {
         const v = asrProviderSelect.value;
         applyAsrProviderVisibility(v);
-        // 2026-09-04: auto-run the env check on every switch to whisper.
-        // If the check reports anything other than "fully ready",
-        // expand the local-env setup panel + scroll it into view so
-        // the user lands on the install instructions immediately,
-        // without having to click "检查系统" first and then chase
-        // the dropdown. Skipped for "none" / "bailian" because the
-        // whisper block isn't even visible there.
-        if (v === "whisper") {
-          void autoCheckWhisperAndExpand();
-        }
+        // 2026-09-05 (user instruction "我就是按需"): switching the dropdown
+        // no longer auto-runs the env check — the user clicks "检查系统"
+        // themselves. The autoCheckWhisperAndExpand helper was removed.
       });
     }
     if (extFolderLink) {
@@ -1864,7 +1971,14 @@ const YTD_OPTIONS = (() => {
       if (detail) {
         const small = doc.createElement("span");
         small.className = "diagnostics-detail";
-        small.textContent = " — " + detail;
+        // opts.html (trusted COPY-owned markup, e.g. the VC++ download
+        // link) renders as real HTML; anything else stays textContent
+        // so untrusted detail strings can never inject markup.
+        if (opts && opts.html) {
+          small.innerHTML = " — " + opts.html;
+        } else {
+          small.textContent = " — " + detail;
+        }
         text.appendChild(small);
       }
       li.appendChild(mark);
@@ -1980,41 +2094,11 @@ const YTD_OPTIONS = (() => {
         );
       }
 
-      // 4. ASR provider awareness (live form value, seeded by loadSettings)
-      const asrMap = {
-        none: translate(currentLanguage, "diagAsrNone"),
-        bailian: translate(currentLanguage, "diagAsrBailian"),
-        whisper: translate(currentLanguage, "diagAsrWhisper"),
-      };
-      const asrLabel = asrMap[asrNow] || asrNow;
-      renderDiagnosticsItem(translate(currentLanguage, "diagAsrLabel"), true, asrLabel);
-
-      // 5. AI provider key presence (live form value; key never displayed)
-      const providerNow = (aiProviderSelect && aiProviderSelect.value) || saved.provider || "minimax";
-      const keyInput = providerNow === "minimax" ? minimaxApiKeyInput
-        : providerNow === "deepseek" ? deepseekApiKeyInput
-        : providerNow === "glm" ? glmApiKeyInput
-        : null;
-      if (providerNow === "none") {
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagAiKeyLabel"),
-          null,
-          translate(currentLanguage, "diagAiKeyNone"),
-        );
-      } else if (keyInput) {
-        const hasKey = Boolean(String(keyInput.value || "").trim());
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagAiKeyLabel"),
-          hasKey,
-          // NOTE: keep inner quotes single/curly — an unescaped ASCII double
-          // quote here broke the whole options.js parse (shipped in 79148a3,
-          // caught 2026-08-29: options page JS fully dead, whisper fields
-          // never appeared when selecting 本地 Whisper).
-          hasKey ? translate(currentLanguage, "diagAiKeyConfigured") : translate(currentLanguage, "diagAiKeyMissing"),
-        );
-      } else {
-        renderDiagnosticsItem(translate(currentLanguage, "diagAiKeyLabel"), null, translate(currentLanguage, "diagAiKeyCustom"));
-      }
+      // 2026-09-13: the old steps 4-5 ("ASR 提供方" + "AI Key" rows) were
+      // removed — both just echoed the settings form a screen above (user
+      // report: "前面不都有么？脱裤子放屁"). The diagnostics card sticks to
+      // facts the page can't already show: version, stored settings, and
+      // whether the local whisper server answers.
 
       if (diagnosticsStatus) diagnosticsStatus.textContent = translate(currentLanguage, "diagDone");
       runDiagnosticsBtn.disabled = false;

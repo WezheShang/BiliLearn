@@ -319,16 +319,14 @@
             </p>
 
             <!-- 2026-09-07: only the live "检查系统" check stays. The
-                 previous "本地环境准备" 4-step manual is gone — per
-                 user feedback, the check is the only place the user
-                 needs to look: it surfaces every missing dep with
-                 its concrete install instructions, and the bat path
-                 shows up in the offline row + ready bar. No
-                 separate "manual" block. -->
+                 previous "本地环境准备" 4-step manual is gone. 2026-09-13
+                 (user directive): EVERY dependency gets a row — installed
+                 ✓ with version, missing ✗ with its concrete fix — so the
+                 user always sees the whole environment at a glance. -->
             <div class="whisper-check-section" id="whisperCheckSection">
               <p class="help" data-i18n="whisperCheckSectionHelp">
-                为了确保 whisper 可以正常工作，你需要按顺序装好以下依赖。
-                点击「检查系统」检测你的环境；没装好的依赖会列出对应说明，已经装好的不会重复显示。
+                本地 Whisper 需要按顺序装好以下依赖。点击「检查系统」检测环境：每个依赖各占一行——装好的打
+                ✓（带版本），缺的标红并给出对应的安装办法。
               </p>
               <div class="diagnostics-actions">
                 <button
