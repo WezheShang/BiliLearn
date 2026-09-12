@@ -683,7 +683,16 @@ async function checkCurrentTab() {
       return;
     }
 
-    if (!/^https:\/\/www\.bilibili\.com\/video\//.test(url)) {
+    // 2026-09-12: 「稍后再看」/收藏夹播放页（https://www.bilibili.com/list/
+    // watchlater?oid=...&bvid=BV...）也是真实播放器 — 只要带 bvid 就放行，
+    // 由 extractVideoId 从 query 里取视频号。
+    const isListPlaybackPage =
+      /^https:\/\/www\.bilibili\.com\/list\//.test(url) &&
+      /[?&]bvid=BV[A-Za-z0-9]{10}(&|$)/.test(url);
+    if (
+      !/^https:\/\/www\.bilibili\.com\/video\//.test(url) &&
+      !isListPlaybackPage
+    ) {
       showWelcome(
         "当前页面不是 B 站视频。\n当前页面: " + url +
         "\n提示：bililearn 只会显示 B 站视频的字幕。请打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
@@ -758,6 +767,16 @@ function extractVideoId(url) {
     if (urlObj.hostname.endsWith("bilibili.com") && match) {
       const part = Math.max(1, Number(urlObj.searchParams.get("p")) || 1);
       return `${match[1]}@p${part}`;
+    }
+
+    // 「稍后再看」/收藏夹播放页：视频号在 query 里，不在 pathname 里。
+    // https://www.bilibili.com/list/watchlater?oid=...&bvid=BV1mdYj6yEf1
+    if (
+      urlObj.hostname.endsWith("bilibili.com") &&
+      /^\/list\//.test(urlObj.pathname)
+    ) {
+      const bvid = (urlObj.searchParams.get("bvid") || "").trim();
+      if (/^BV[A-Za-z0-9]{10}$/.test(bvid)) return `${bvid}@p1`;
     }
 
     return null;
@@ -2275,7 +2294,26 @@ function renderSummaryResults(markdown) {
       '<div class="summary-placeholder" style="color: var(--text-muted);">没有生成内容。</div>';
     return;
   }
-  summaryContent.innerHTML = renderMarkdown(markdown);
+  summaryContent.innerHTML = renderMarkdown(markdown, { jumpLinks: true });
+  // Chapter-title timestamps jump to that point in the video (same
+  // interaction as the Overview tab; first-level titles only). Clamp to the
+  // known video duration so a hallucinated stamp can't seek past the end.
+  summaryContent.querySelectorAll(".md-jump").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = Number(btn.dataset.seconds);
+      if (!Number.isFinite(target)) return;
+      const max = Number(currentVideoDuration) || 0;
+      const seconds =
+        max > 0 ? Math.min(Math.max(0, target), Math.max(0, max - 1)) : target;
+      debugLog(
+        "[dk-bililearn Panel] Summary chapter jump:",
+        btn.dataset.seconds,
+        "→",
+        seconds,
+      );
+      seekTo(seconds);
+    });
+  });
 }
 
 /**
@@ -2288,7 +2326,7 @@ function renderSummaryResults(markdown) {
  * GFM pipe tables (with :---/---:/:---: alignment), line breaks and
  * paragraphs.
  */
-function renderMarkdown(markdown) {
+function renderMarkdown(markdown, opts = {}) {
   if (!markdown) return "";
   let lines = String(markdown).replace(/\r\n/g, "\n").split("\n");
 
@@ -2308,6 +2346,16 @@ function renderMarkdown(markdown) {
         /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
         '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
       );
+
+  // "[M:SS]" / "[H:MM:SS]" → seconds; null when malformed. Feeds the summary
+  // chapter-title jump chips (see the heading branch below).
+  const timestampToSeconds = (ts) => {
+    const parts = ts.split(":").map(Number);
+    if (parts.some((n) => !Number.isFinite(n))) return null;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return null;
+  };
 
   // ---- GFM table helpers ----
   // Split "| a | b |" into ["a","b"]; strips the outer pipes and honors
@@ -2421,8 +2469,27 @@ function renderMarkdown(markdown) {
     if (headingMatch) {
       closeList();
       const level = headingMatch[1].length;
+      let headingText = headingMatch[2];
+      let jumpHtml = "";
+      // Summary chapter titles carry the section's start time
+      // ("## 一、会议概览与开场 [3:25]"). With jumpLinks on (summary tab),
+      // the trailing stamp renders as a jump chip instead of literal text;
+      // deeper levels and other surfaces keep it verbatim.
+      const tsMatch =
+        opts.jumpLinks && level === 2
+          ? headingText.match(/\[(\d{1,3}:\d{2}(?::\d{2})?)\]\s*$/)
+          : null;
+      if (tsMatch) {
+        const seconds = timestampToSeconds(tsMatch[1]);
+        if (seconds !== null) {
+          jumpHtml =
+            `<button type="button" class="md-jump" data-seconds="${seconds}"` +
+            ` title="跳转到 ${tsMatch[1]}">▶ ${tsMatch[1]}</button>`;
+          headingText = headingText.slice(0, tsMatch.index).replace(/\s+$/, "");
+        }
+      }
       html.push(
-        `<h${level}>${inline(escapeHtml(headingMatch[2]))}</h${level}>`,
+        `<h${level}>${inline(escapeHtml(headingText))}${jumpHtml}</h${level}>`,
       );
       continue;
     }

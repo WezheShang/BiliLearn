@@ -1644,6 +1644,31 @@ body {
 .summary-content h3 { font-size: 14.5px; }
 .summary-content h4 { font-size: 13.5px; }
 
+/* Chapter-title jump chip: click → seek the video (summary tab only).
+   Mirrors the .chapter-timestamp look from the Overview tab. */
+.summary-content .md-jump {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 2px 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.summary-content .md-jump:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+
+.summary-content .md-jump:active {
+  transform: translateY(1px);
+}
+
 .summary-content p {
   margin: 6px 0;
 }

@@ -2776,7 +2776,12 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     // chrome.storage keep the field (so the settings UI does not change shape
     // on them) but it is ignored here. Fall straight through to the B-station
     // official subtitle path.
-    void (await getSettings());
+    // 2026-09-12 regression fix: this call was `void (await getSettings())`,
+    // which stopped assigning the settings object — every video without an
+    // official subtitle then died below with `settings is not defined`
+    // (ReferenceError) instead of reaching the local-file / whisper-cache
+    // lookups and the WHISPER_NEEDED prompt.
+    const settings = await getSettings();
 
     // B站官方字幕 (human or ai-zh) 优先于本地文件。本地字幕（up-master-report
     // 之类）可能跟视频实际内容对不上号（标题错配、bvid 错位），所以 B站自己有
