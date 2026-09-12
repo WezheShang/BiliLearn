@@ -377,8 +377,11 @@ async function maybeResumeWhisperJob() {
  */
 async function readActiveBilibiliVideoId() {
   try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const url = tabs && tabs[0] && tabs[0].url;
+    // 2026-09-12: panel-window scoped (see queryPanelActiveTab) — the old
+    // lastFocusedWindow query misjudged "current view" whenever another
+    // window held focus and skipped/attached the wrong whisper job.
+    const tab = await queryPanelActiveTab();
+    const url = tab && tab.url;
     if (!url) return "";
     const match = url.match(/bilibili\.com\/video\/([A-Za-z0-9]+)/);
     return match ? match[1] : "";
@@ -501,9 +504,46 @@ let panelWindowId = null;
 // fight us otherwise). Starts true so the cold-start first switch also
 // scrolls to top.
 let tabScrollTopArmed = true;
+// 2026-09-12: the tab the user last viewed on each video (recorded in
+// switchTab). Restored when that video comes back from cache, so
+// returning to a video you left on 总结 doesn't land you on whatever
+// tab the previous video's whisper wizard left active.
+const lastTabByVideo = new Map();
 chrome.windows.getCurrent().then((w) => {
   panelWindowId = w.id;
 });
+
+/**
+ * The active tab of THIS panel's window — never `lastFocusedWindow`.
+ * (2026-09-12) checkCurrentTab and readActiveBilibiliVideoId both used
+ * lastFocusedWindow, so any check that fired while a DIFFERENT window
+ * held OS focus (panel init, the page-button relay, the nav refresh
+ * timer) judged the wrong window's tab and rendered 「当前页面不是
+ * B 站视频」 for e.g. a localhost dev tab; nothing re-checked on pure
+ * window refocus either (no tabs.onActivated fires), so the panel stayed
+ * stuck on that error after the user switched back to their B站 tab.
+ * Scope every "what's in front of me" query to the window hosting this
+ * panel.
+ */
+async function queryPanelActiveTab() {
+  let scopeWindowId = panelWindowId;
+  if (scopeWindowId === null) {
+    // Panel just opened: the module-scope windows.getCurrent() promise
+    // may not have resolved yet. From a sidepanel page getCurrent()
+    // returns the window hosting the panel.
+    try {
+      scopeWindowId = (await chrome.windows.getCurrent()).id;
+    } catch {
+      scopeWindowId = null;
+    }
+  }
+  const tabs = await chrome.tabs.query(
+    scopeWindowId !== null
+      ? { active: true, windowId: scopeWindowId }
+      : { active: true, lastFocusedWindow: true }, // unreachable in practice; startup safety net
+  );
+  return tabs && tabs[0] ? tabs[0] : null;
+}
 
 function scheduleBililearnRefresh() {
   // Small delay lets Bilibili finish rendering the new video's title and
@@ -563,6 +603,18 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
   } catch (e) {
     // Tab closed before we could read it — nothing to do.
   }
+});
+
+// 2026-09-12: refocusing THIS window without changing tabs (alt-tab /
+// taskbar / title-bar click) fires no tabs.onActivated, so the panel
+// used to stay stuck on a stale 「当前页面不是 B 站视频」 error that was
+// rendered while another window was focused. Re-check when our window
+// gains focus; scheduleBililearnRefresh's 600ms debounce absorbs focus
+// churn.
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  if (panelWindowId !== null && windowId !== panelWindowId) return;
+  scheduleBililearnRefresh();
 });
 
 function setupEventListeners() {
@@ -667,11 +719,7 @@ async function checkCurrentTab() {
     // the sidebar display the wrong video's subtitles after the user
     // switched away (e.g. opened a chat tab). Now we show a clear
     // "not on a Bilibili video" state instead.
-    const tabs = await chrome.tabs.query({
-      active: true,
-      lastFocusedWindow: true,
-    });
-    const tab = tabs[0] || null;
+    const tab = await queryPanelActiveTab();
     const url = tab?.url || "";
 
     debugLog("[dk-bililearn Panel] Active tab:", tab?.id, url);
@@ -902,6 +950,14 @@ async function startBililearn(videoId, videoUrl) {
 
     showState("results");
     document.getElementById("tabsNav").style.display = "flex";
+
+    // 2026-09-12: restore the tab the user last viewed on THIS video —
+    // e.g. they left on 总结, then transcribed another video elsewhere
+    // whose wizard switched this panel to transcript; coming back should
+    // reopen 总结, not the wizard's leftover tab. Runs BEFORE the scroll
+    // arm below so the user's next manual switch still scrolls to top.
+    const rememberedTab = lastTabByVideo.get(videoId);
+    if (rememberedTab) switchTab(rememberedTab);
 
     // Arm the "next tab switch scrolls to top" flag — this branch has
     // already rendered transcript/analysis/summary into the panels, so
@@ -2049,6 +2105,11 @@ function switchTab(tabName) {
     panel.classList.toggle("active", panel.dataset.panel === tabName);
   });
 
+  // 2026-09-12: remember this video's last-viewed tab so a later return
+  // from cache restores the view the user left (see startBililearn's
+  // cache branch).
+  if (currentVideoId) lastTabByVideo.set(currentVideoId, tabName);
+
   // If a new video just rendered, the first switchTab should land the
   // user at the top of the new tab — not where the previous video's
   // scroll position was (which would put the user somewhere in the
@@ -2295,8 +2356,8 @@ function renderSummaryResults(markdown) {
     return;
   }
   summaryContent.innerHTML = renderMarkdown(markdown, { jumpLinks: true });
-  // Chapter-title timestamps jump to that point in the video (same
-  // interaction as the Overview tab; first-level titles only). Clamp to the
+  // Chapter/section-title timestamps jump to that point in the video (same
+  // interaction as the Overview tab; h2 chapters + h3 sections). Clamp to the
   // known video duration so a hallucinated stamp can't seek past the end.
   summaryContent.querySelectorAll(".md-jump").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2471,12 +2532,13 @@ function renderMarkdown(markdown, opts = {}) {
       const level = headingMatch[1].length;
       let headingText = headingMatch[2];
       let jumpHtml = "";
-      // Summary chapter titles carry the section's start time
-      // ("## 一、会议概览与开场 [3:25]"). With jumpLinks on (summary tab),
-      // the trailing stamp renders as a jump chip instead of literal text;
-      // deeper levels and other surfaces keep it verbatim.
+      // Summary chapter AND section titles carry the section's start time
+      // ("## 一、会议概览与开场 [3:25]" / "### 开场数据 [3:25]"). With
+      // jumpLinks on (summary tab), the trailing stamp renders as a jump
+      // chip instead of literal text; other levels and surfaces keep it
+      // verbatim.
       const tsMatch =
-        opts.jumpLinks && level === 2
+        opts.jumpLinks && (level === 2 || level === 3)
           ? headingText.match(/\[(\d{1,3}:\d{2}(?::\d{2})?)\]\s*$/)
           : null;
       if (tsMatch) {
