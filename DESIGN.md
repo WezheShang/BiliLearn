@@ -1,7 +1,7 @@
 # bililearn 设计风格规范
 
 > 适用范围：bililearn Chrome 扩展 options 页 + 任何后续要做 / 复用的产品。
-> 最后更新：2026-09-02（v1）
+> 最后更新：2026-09-12（v4）
 
 ---
 
@@ -312,14 +312,80 @@ button.danger:hover { background:#fff; border-color: var(--accent); }
 
 ---
 
-## 14. 检查清单（新页面交付前）
+## 14. Info Page 统一契约（引导 / 说明 / 错误页，2026-09-12）
+
+> 用户原话：「first run wizard 的那个页面 follow 这个风格（欢迎页）。
+> 所有的 info 页面都用这个风格，info 页面我指的是对用户有引导作用的
+> 页面包括说明，和错误等。」
+
+**所有「对用户有引导作用」的页面统一用 sidepanel 欢迎页（「开始整理视频」）
+的居中 hero 风格。** 风格基准 = 品牌色 squircle 图标 + 大标题 + 居中说明 +
+灰底信息框 + 居中 accent 胶囊按钮。
+
+### 14.1 适用页面（「info 页面」的定义）
+
+| 页面 | 位置 | 状态 |
+|---|---|---|
+| 欢迎页（无视频） | sidepanel `#welcomeState` | **基准** |
+| first-run 快速上手 | sidepanel overlay + options banner | 2026-09-12 已改 |
+| 标准错误页 | sidepanel `#errorState` + `.error-hero-page` | 2026-08-30 已合规 |
+| 三个 setup wizard | sidepanel `.wizard`（ASR / Whisper / AI key） | 2026-08-29 已合规 |
+| 以后新增的任何引导 / 说明 / 错误页 | — | 必须走本契约 |
+
+不在范围内：loading 过渡态（spinner + 进度文字，不是引导）、设置表单、
+结果 tabs（字幕 / 概览 / 总结 / 笔记本体）。
+
+### 14.2 Hero 解剖（从上到下）
+
+1. **品牌 tile**：84px squircle（圆角 `--r-xl`），terracotta 渐变
+   `linear-gradient(145deg, #d2735a, #bd5740)` + 粉色弥散阴影
+   `0 12px 30px rgba(251,114,153,.3)`，白色 play 三角（CSS border 画，非图片）。
+   options 页可缩到 64px。
+2. **标题**：display 字体、`font-weight: 600`、22–26px、居中、`var(--text)`。
+   欢迎页 26px，错误页 / first-run 22px，wizard 20px。
+3. **说明文字**：reading 字体、13.5px、`var(--text-secondary)`、居中、
+   行高 1.6–1.7、`max-width` 限宽（≈270–280px）。
+4. **灰底信息框**（长文本 / URL / 步骤列表专用）：`rgba(0,0,0,0.04)` 底、
+   无边框、8–10px 圆角、`padding: 10px 12px`（诊断信息）或 `14px 16px`
+   （onboarding 步骤）、**框内左对齐**、字号 11.5px（诊断）或 12.5–13px
+   （引导步骤）、`word-break: break-all`（含 URL 时）。
+   基准类：sidepanel `.welcome-hint` / `.first-run-steps`。
+5. **行动按钮**：居中、accent 实色胶囊（`--accent` 底 + 白字 + 粉阴影），
+   hover 加深 `--accent-hover` + 上浮 1px。基准类：`.error-btn` /
+   `.wizard-btn`。
+
+### 14.3 禁止出现的形态（info 页面反模式）
+
+- 小白卡片 + 细边框 + 编号列表直接铺在卡片 padding 上（2026-09-12 之前的
+  first-run banner 就长这样——已改）
+- 左上对齐的说明文字块（info 页面的主文案必须居中；只有信息框**内部**左对齐）
+- 右对齐的关闭 / 知道了按钮（行动按钮永远居中）
+- 信息框 / 错误详情用 alert 色块（红底 / 粉左边条）——2026-08-30 已废
+- 用 emoji 当页面主视觉（wizard 的 emoji `::before` 是既有过渡形态；
+  新页面一律用 CSS 画的品牌 tile 或几何图形）
+
+### 14.4 与既有规则的关系
+
+- **§5.2「全页一个 primary」对 info 页面豁免**：引导页自己的行动按钮
+  （重试 / 前往设置 / 知道了）渲染为 accent 胶囊，不占用表单页的 primary 名额
+  （options 页的「保存设置」仍是全页唯一表单 primary）。
+- options 页的 info 块保留 `.card` 表面（页面层级需要），但**内部布局**
+  必须是 hero 解剖（tile + 居中标题 + 灰底信息框）；sidepanel 的 info 页
+  直接铺在页面背景上，无卡片框。
+- §13「标准错误页接管整个 tab」不变——接管后的样子就是本契约的 hero。
+
+---
+
+## 15. 检查清单（新页面交付前）
 
 - [ ] 所有非主操作按钮是 `.secondary`（白底浅灰边）
 - [ ] 危险操作（删除/重置/清空）是 `.danger`（白底浅灰边+红字）
-- [ ] 全页只有一个 `.primary`（dialog 内的 Keep / Cancel 例外）
+- [ ] 全页只有一个 `.primary`（dialog 内的 Keep / Cancel、info 页行动按钮例外，见 §14.4）
 - [ ] 高级块用 `<details>` 折叠
 - [ ] 通知 / 概览 / 总结用「单 toggle 一起开关」模式
 - [ ] 所有用户可见文案在 en + zh 块都有对应 key
 - [ ] sidepanel 失败请求会切到标准错误页（不留 loading 占位）
 - [ ] 切视频会清掉旧 tab 的标准错误页标记
-- [ ] 跑全量回归 24/24 +0 fail
+- [ ] **引导 / 说明 / 错误页符合 §14 info-page hero 契约**
+      （tile + 居中标题 + 灰底信息框 + 居中 accent 胶囊；无卡片框@sidepanel）
+- [ ] 跑全量回归 25/25 +0 fail

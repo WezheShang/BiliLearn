@@ -2132,7 +2132,12 @@ body {
    anything before reading the 3-step quick-start. Dismiss persists
    firstRunDismissed in chrome.storage; the same flag is honored by
    the options page so dismissing in one place hides the banner in
-   both. */
+   both.
+   2026-09-12 restyle: info-page hero contract (DESIGN.md §14) — the
+   banner now mirrors the welcome page (brand tile + display title +
+   muted info box + centered accent pill) instead of a boxed card
+   with a numbered list. No card box: it sits directly on the warm
+   overlay background, like the wizards do. */
 .first-run-overlay {
   position: fixed;
   inset: 0;
@@ -2148,37 +2153,81 @@ body {
   display: none;
 }
 .first-run-card {
+  /* margin:auto centers vertically AND stays correct when the card
+     grows taller than the viewport (unlike align-items:center, which
+     clips the top of scrollable flex children). */
+  margin: auto;
   width: 100%;
-  max-width: 360px;
-  background: #fff;
-  border: 1px solid var(--border, #e7d8c9);
-  border-radius: 10px;
-  padding: 18px 18px 16px;
-  box-shadow: 0 8px 24px rgba(60, 30, 10, 0.08);
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 30px 0 24px;
+  text-align: center;
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 .first-run-title {
-  margin: 0 0 10px;
-  font: 700 16px/1.3 var(--font-body, system-ui);
-  color: var(--text, #2b1f17);
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 22px;
+  letter-spacing: -0.3px;
+  color: var(--text);
 }
+/* Steps live in the muted info box (the .welcome-hint treatment,
+   sized up for onboarding text): grey fill, no border, left-aligned. */
 .first-run-steps {
-  margin: 0 0 14px;
-  padding: 0 0 0 18px;
-  font: 400 12.5px/1.55 var(--font-body, system-ui);
-  color: var(--text, #2b1f17);
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 16px 14px 32px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 10px;
+  font-family: var(--font-reading);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  text-align: left;
 }
 .first-run-steps li {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
 }
 .first-run-steps li:last-child {
   margin-bottom: 0;
 }
 .first-run-steps strong {
   font-weight: 700;
-  color: var(--accent, #c45a3a);
+  color: var(--text);
 }
 .first-run-actions {
   display: flex;
-  justify-content: flex-end;
-  margin-top: 4px;
+  justify-content: center;
+  width: 100%;
+  margin-top: 2px;
+}
+/* The dismiss button carries class="secondary" (options-page naming),
+   but sidepanel.css defines no .secondary — style it here as the
+   info-page accent pill, same family as .wizard-btn / .error-btn. */
+.first-run-actions button,
+.first-run-actions .secondary {
+  padding: 12px 28px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  box-shadow: 0 4px 14px rgba(251, 114, 153, 0.26);
+}
+.first-run-actions button:hover,
+.first-run-actions .secondary:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
 }

@@ -734,3 +734,86 @@ details > summary::before {
   flex: 0 0 auto;
   margin-right: 6px;
 }
+/* ============================================================
+   2026-09-12: FIRST-RUN BANNER — info-page hero contract
+   (DESIGN.md §14). All guidance / explanation / error surfaces
+   follow the sidepanel welcome page anatomy: brand tile + display
+   title + muted info box + one accent pill action. The banner keeps
+   the options card surface, but its inner layout is the hero —
+   centered tile, centered heading, grey info box for the steps —
+   instead of a plain bullet list on card padding.
+   ============================================================ */
+.first-run-banner {
+  text-align: center;
+}
+
+/* Brand tile: same terracotta squircle + play glyph as the sidepanel
+   welcome screen (.welcome-icon), slightly smaller for the options
+   page scale. Pure CSS — no image assets. */
+.first-run-brand {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 14px;
+  border-radius: 18px;
+  background: linear-gradient(145deg, #d2735a, #bd5740);
+  box-shadow: 0 10px 24px rgba(251, 114, 153, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0;
+  position: relative;
+}
+.first-run-brand::after {
+  content: "";
+  border-style: solid;
+  border-width: 12px 0 12px 20px;
+  border-color: transparent transparent transparent #fff;
+  margin-left: 5px;
+}
+
+.first-run-banner h2 {
+  margin: 0 0 14px;
+}
+
+/* Steps in the muted info box — the .welcome-hint treatment sized up
+   for onboarding text: grey fill, no border, left-aligned reading
+   text so long zh/en steps stay scannable. */
+.first-run-banner .first-run-steps {
+  margin: 0 auto 16px;
+  max-width: 620px;
+  padding: 14px 18px 14px 36px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  text-align: left;
+}
+.first-run-banner .first-run-steps li {
+  margin: 0 0 10px;
+}
+.first-run-banner .first-run-steps li:last-child {
+  margin-bottom: 0;
+}
+.first-run-banner .first-run-steps strong {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.first-run-banner .first-run-actions {
+  display: flex;
+  justify-content: center;
+}
+/* The dismiss button is the banner's single accent action. Info-page
+   actions are exempt from the "one .primary per page" rule (§5.2):
+   the guidance surface's own call-to-action renders as the accent
+   pill for the same family look as sidepanel wizard buttons. */
+.first-run-banner .first-run-actions .secondary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.first-run-banner .first-run-actions .secondary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
