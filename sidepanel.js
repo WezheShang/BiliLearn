@@ -44,9 +44,16 @@ let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
 let currentPubDate = ""; // YYYY-MM-DD string from B站's metadata, used in export filenames
-let isAnalysisLoading = false; // Track if analysis is in progress
+// 2026-09-12 cross-video race fix: in-flight LLM calls are tracked PER
+// VIDEO, not as a single global boolean. The old globals (isAnalysisLoading
+// / isSummaryLoading) blocked the NEXT video's lazy load while the
+// PREVIOUS video's call was still running, and the triggers saved their
+// result under whichever video was CURRENT at completion time — rendering
+// video A's summary into video B's panel and poisoning B's cache entry
+// permanently (user report 2026-09-12: 巴克莱 header + 中金铜矿 summary).
+const analysisInFlight = new Set(); // videoId → analysis call running
+const summaryInFlight = new Set();  // videoId → summary call running
 let currentSummary = null; // Full-note summary (Markdown text) for this video
-let isSummaryLoading = false; // Track if summary is in progress
 let bilibiliTabId = null; // Store the Bilibili tab ID for reliable messaging
 let errorAction = null;
 
@@ -874,8 +881,26 @@ function renderVideoInfoHeader() {
 
 async function startBililearn(videoId, videoUrl) {
   const gen = ++generation;
-  // Check if we already have this video loaded in memory
-  if (videoId === currentVideoId && currentAnalysis) {
+  // Check if we already have this video loaded in memory. Focus-change
+  // re-checks (chrome.windows.onFocusChanged → scheduleBililearnRefresh →
+  // checkCurrentTab) and tab-URL events land here REPEATEDLY for the SAME
+  // video. Falling through re-runs the whole cache load: it re-renders
+  // every panel (the "概览页面不停刷新" flicker) and — before the per-video
+  // in-flight sets — re-fired the lazy LLM triggers on every focus event
+  // (2026-09-13 "后台还在不停调用AI" report). The panel already holds this
+  // video's digest when the transcript is in memory AND any of: analysis
+  // done, summary done, or an LLM call for THIS video still in flight
+  // (its completion renders/parks itself; nothing to reload).
+  // Note: transcript-only (no analysis/summary yet) intentionally falls
+  // through — the poisoned-cache self-heal path relies on a full refetch.
+  if (
+    videoId === currentVideoId &&
+    currentTranscriptTimestamped &&
+    (currentAnalysis ||
+      currentSummary ||
+      analysisInFlight.has(videoId) ||
+      summaryInFlight.has(videoId))
+  ) {
     showState("results");
     return;
   }
@@ -916,7 +941,9 @@ async function startBililearn(videoId, videoUrl) {
     currentTranscriptLanguage = cached.transcriptLanguage || null;
     currentTranscriptSource = cached.transcriptSource || null;
     updateTranscriptLanguageModes();
-    isAnalysisLoading = false;
+    // (2026-09-12) per-video in-flight sets make a manual reset here
+    // unnecessary: entries self-clean when their call completes, and a
+    // reset would have hidden a genuinely running call for this video.
 
     // 2026-08-31 stale-title fix: the cache entry was written FOR this
     // video, so its title/channel beat the racy page-DOM read from
@@ -983,7 +1010,8 @@ async function startBililearn(videoId, videoUrl) {
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
   currentTranscriptSource = null;
-  isAnalysisLoading = false;
+  // (2026-09-12) no loading-flag reset needed — in-flight tracking is
+  // per video now (see analysisInFlight / summaryInFlight).
 
   // Wipe stale DOM from the previous video on every panel (2026-08-23).
   // renderTranscript() bails early when currentTranscript is null,
@@ -2134,12 +2162,12 @@ function switchTab(tabName) {
   updateAiKeyWizard(tabName);
 
   // Lazy-load LLM analysis when user switches to Overview tab
-  if (tabName === "overview" && !currentAnalysis && !isAnalysisLoading && !aiKeyMissing) {
+  if (tabName === "overview" && !currentAnalysis && !analysisInFlight.has(currentVideoId) && !aiKeyMissing) {
     triggerAnalysis();
   }
 
   // Lazy-load LLM summary when user switches to Summary tab
-  if (tabName === "summary" && !currentSummary && !isSummaryLoading && !aiKeyMissing) {
+  if (tabName === "summary" && !currentSummary && !summaryInFlight.has(currentVideoId) && !aiKeyMissing) {
     triggerSummary();
   }
 }
@@ -2226,15 +2254,23 @@ function showPanelError(panelName, message, retryFn) {
  * This saves tokens by not running analysis until needed.
  */
 async function triggerAnalysis() {
-  if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
+  if (!currentTranscriptTimestamped || analysisInFlight.has(currentVideoId) || currentAnalysis)
     return;
+
+  // 2026-09-12 cross-video race fix: this LLM call can outlive the user's
+  // stay on this video. Capture WHO the result belongs to; on completion
+  // either render (still here) or park it in the ORIGINAL video's cache
+  // (user moved on) — never render or save into the wrong video.
+  const videoIdAtStart = currentVideoId;
+  // Click-through pair for the slow-run notification (see triggerSummary).
+  const videoUrlAtStart = currentVideoUrl;
 
   // State honesty (DESIGN.md): a new load must never start behind a stale
   // error page from a previous video/attempt — and its loaders must land
   // in VISIBLE sections (see triggerSummary for the 2026-08-30 report).
   hidePanelError("overview");
   restoreLlmSections();
-  isAnalysisLoading = true;
+  analysisInFlight.add(videoIdAtStart);
 
   // Show loading indicators in the Overview tab
   const chapterList = document.getElementById("chapterList");
@@ -2255,10 +2291,22 @@ async function triggerAnalysis() {
       channelName: currentChannelName,
       videoDescription: currentVideoDescription,
       videoDuration: currentVideoDuration,
-      // 2026-09-02: slow-run (>1min) completion notification click-through.
-      videoId: currentVideoId || "",
-      videoUrl: currentVideoUrl || "",
+      // 2026-09-02: slow-run (>1min) completion notification click-through,
+      // captured at call start so id+url always name the owning video.
+      videoId: videoIdAtStart || "",
+      videoUrl: videoUrlAtStart || "",
     });
+
+    if (videoIdAtStart !== currentVideoId) {
+      // User switched away mid-call: park the result in the ORIGINAL
+      // video's cache so returning to it is a free cache hit — no
+      // re-render, no save into the CURRENT video's entry.
+      if (analysisResult && analysisResult.success && analysisResult.analysis) {
+        await mergeLlmResultToCache(videoIdAtStart, { analysis: analysisResult.analysis });
+      }
+      debugLog("[dk-bililearn Panel] analysis finished after video switch; parked in cache for", videoIdAtStart);
+      return;
+    }
 
     if (!analysisResult.success) {
       showPanelError(
@@ -2266,7 +2314,6 @@ async function triggerAnalysis() {
         `Analysis failed: ${analysisResult.error || "Unknown error"}`,
         triggerAnalysis,
       );
-      isAnalysisLoading = false;
       return;
     }
 
@@ -2274,14 +2321,19 @@ async function triggerAnalysis() {
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
 
-    // Save to cache now that we have analysis
-    await saveToCache(currentVideoId);
+    // Save to cache now that we have analysis. videoIdAtStart ===
+    // currentVideoId here, and saveToCache builds its entry synchronously
+    // before its first await — the entry cannot pick up a newer video's
+    // state even if the user switches during the storage write.
+    await saveToCache(videoIdAtStart);
   } catch (error) {
     console.error("[dk-bililearn Panel] Analysis error:", error);
-    showPanelError("overview", `Error: ${error.message}`, triggerAnalysis);
+    if (videoIdAtStart === currentVideoId) {
+      showPanelError("overview", `Error: ${error.message}`, triggerAnalysis);
+    }
+  } finally {
+    analysisInFlight.delete(videoIdAtStart);
   }
-
-  isAnalysisLoading = false;
 }
 
 /**
@@ -2289,8 +2341,17 @@ async function triggerAnalysis() {
  * Converts the full transcript into a complete, structured study note.
  */
 async function triggerSummary() {
-  if (!currentTranscriptTimestamped || isSummaryLoading || currentSummary)
+  if (!currentTranscriptTimestamped || summaryInFlight.has(currentVideoId) || currentSummary)
     return;
+
+  // 2026-09-12 cross-video race fix (same as triggerAnalysis): the LLM
+  // call can outlive the user's stay; the result belongs to the video that
+  // STARTED the call, not whichever video is on screen when it returns.
+  const videoIdAtStart = currentVideoId;
+  // Click-through target for the slow-run notification must match the
+  // OWNING video too (videoId+videoUrl captured as a pair, so a mid-call
+  // switch can't make the notification open the wrong video's page).
+  const videoUrlAtStart = currentVideoUrl;
 
   // State honesty (DESIGN.md): a new load must never start behind a stale
   // error page from a previous video/attempt — and its loader must land in
@@ -2302,7 +2363,7 @@ async function triggerSummary() {
   // error-aware and skips panels whose error page is still up.
   hidePanelError("summary");
   restoreLlmSections();
-  isSummaryLoading = true;
+  summaryInFlight.add(videoIdAtStart);
   const summaryContent = document.getElementById("summaryContent");
 
   if (summaryContent) {
@@ -2316,10 +2377,22 @@ async function triggerSummary() {
       transcriptText: currentTranscriptTimestamped,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
-      // Slow-run (>1min) completion notification click-through target.
-      videoId: currentVideoId || "",
-      videoUrl: currentVideoUrl || "",
+      // Slow-run (>1min) completion notification click-through target,
+      // captured at call start so it always names the owning video.
+      videoId: videoIdAtStart || "",
+      videoUrl: videoUrlAtStart || "",
     });
+
+    if (videoIdAtStart !== currentVideoId) {
+      // User switched away mid-call: park the finished summary in the
+      // ORIGINAL video's cache (so returning to it is a free cache hit,
+      // not another LLM call) and never render it into the wrong panel.
+      if (summaryResult && summaryResult.success && summaryResult.markdown) {
+        await mergeLlmResultToCache(videoIdAtStart, { summary: summaryResult.markdown });
+      }
+      debugLog("[dk-bililearn Panel] summary finished after video switch; parked in cache for", videoIdAtStart);
+      return;
+    }
 
     if (!summaryResult.success) {
       showPanelError(
@@ -2327,21 +2400,24 @@ async function triggerSummary() {
         `Summary failed: ${summaryResult.error || "Unknown error"}`,
         triggerSummary,
       );
-      isSummaryLoading = false;
       return;
     }
 
     currentSummary = summaryResult.markdown || "";
     renderSummaryResults(currentSummary);
 
-    // Save to cache now that we have summary
-    await saveToCache(currentVideoId);
+    // Save to cache now that we have summary. videoIdAtStart ===
+    // currentVideoId here; saveToCache builds its entry synchronously
+    // before its first await, so it cannot capture a newer video's state.
+    await saveToCache(videoIdAtStart);
   } catch (error) {
     console.error("[dk-bililearn Panel] Summary error:", error);
-    showPanelError("summary", `Error: ${error.message}`, triggerSummary);
+    if (videoIdAtStart === currentVideoId) {
+      showPanelError("summary", `Error: ${error.message}`, triggerSummary);
+    }
+  } finally {
+    summaryInFlight.delete(videoIdAtStart);
   }
-
-  isSummaryLoading = false;
 }
 
 /**
@@ -3052,6 +3128,31 @@ function getTranscriptContext(selectedText) {
 // ============================================================
 // CACHING
 // ============================================================
+
+/**
+ * 2026-09-12 cross-video race fix: parks an LLM result (analysis/summary)
+ * into the cache entry of the video that STARTED the call, after the user
+ * has already switched to a different video. Reads that video's existing
+ * entry from storage (never the in-memory globals — they belong to the
+ * CURRENT video now), patches in the result, writes it back. Best-effort:
+ * a missing/evicted entry just drops the result; it must never be written
+ * into another video's slot.
+ */
+async function mergeLlmResultToCache(videoId, patch) {
+  if (!videoId || !patch) return;
+  try {
+    const entry = await loadFromCache(videoId);
+    if (!entry) {
+      debugLog("[dk-bililearn Panel] mergeLlmResultToCache: no cache entry for", videoId, "— dropping result");
+      return;
+    }
+    Object.assign(entry, patch, { timestamp: Date.now() });
+    await chrome.storage.local.set({ [`${CACHE_KEY_PREFIX}${videoId}`]: entry });
+    debugLog("Parked LLM result into cache for", videoId, Object.keys(patch).join(","));
+  } catch (error) {
+    console.error("[dk-bililearn Panel] mergeLlmResultToCache error:", error);
+  }
+}
 
 /**
  * Saves the current digest results to persistent local storage.
