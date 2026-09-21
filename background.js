@@ -516,7 +516,14 @@ async function readStreamedAiCompletion(response, onActivity) {
  * test on a normal http(s) page.
  */
 try {
-  chrome.action.onClicked.addListener((tab) => {
+  // 2026-09-21 (Irene directive, new-device repro): chrome.action.onClicked
+  // can be undefined on some Chromium builds (notably the user's other
+  // machine where Chrome had set up the action button differently or the
+  // API surface was reduced). Without optional chaining the SW
+  // startup crashes here and Chrome shows the generic "could not load
+  // extension" status — exactly the symptom reported after the most
+  // recent commit.
+  chrome.action?.onClicked?.addListener((tab) => {
     try {
       // Re-enable + open without awaiting — preserves user gesture context
       chrome.sidePanel?.setOptions({
