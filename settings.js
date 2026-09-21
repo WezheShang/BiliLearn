@@ -82,7 +82,12 @@ var YTD_SETTINGS = (() => {
     return GLM_API_TYPES.includes(input) ? input : DEFAULT_GLM_API_TYPE;
   }
   const PROVIDER_IDS = Object.freeze(Object.keys(PROVIDER_PRESETS));
-  const DEFAULT_PROVIDER = "minimax";
+  // 2026-09-13: fresh installs default to "none" (No AI model). The
+  // options page must not imply a provider the user never picked — the
+  // sidepanel's configure-AI wizard guides them to choose one when they
+  // want summaries. The old default "minimax" only survives via the
+  // legacy migration in normalize() (pre-dropdown installs).
+  const DEFAULT_PROVIDER = "none";
 
   // Known preset values, used to detect provider-switch residue in a
   // stored aiBaseUrl / aiModel (see normalize). A stored value that
@@ -130,25 +135,45 @@ var YTD_SETTINGS = (() => {
     // Which speech-to-text engine to fall back on when B-station has no
     // usable native subtitles. "none" disables ASR entirely — the user
     // just sees B-station's own subtitles (or no transcript at all
-    // for videos without one). The only ASR engines that exist now
-    // options.html). "whisper" uses the local faster-whisper server
-    // (whisper_server.py). 2026-09-10: default flipped to "none" so a
-    // fresh install does not silently require the user to set up a
-    // local whisper server before they can use the extension — the
-    // first-run banner in options.html explains how to turn whisper
-    // on if they need it.
+    // for videos without one). "whisper" uses the local faster-whisper
+    // server (whisper_server.py). "minimax" uses the cloud MiniMax ASR
+    // API at https://api.minimax.chat/v1/audio/transcriptions (multipart
+    // upload, model `speech-01` family, billed per character). 2026-09-10:
+    // default flipped to "none" so a fresh install does not silently
+    // require the user to set up a local whisper server before they can
+    // use the extension — the first-run banner in options.html explains
+    // how to turn whisper on (or pick minimax cloud ASR) if they need it.
     asrProvider: "none",
     supadataApiKey: "",
+    // 2026-09-17 (Irene directive, refined per official MiniMax docs):
+    // Used only when asrProvider === "minimax". The key and the model
+    // field are both kept (the form still offers model selection on the
+    // options page in case MiniMax ships more models) but the only
+    // currently supported value is "asr-1.0" — earlier drafts offered
+    // speech-01 / turbo / hd, which do not exist on the actual endpoint.
+    minimaxAsrApiKey: "",
+    minimaxAsrModel: "asr-1.0",
     // Local Whisper configuration (only used when asrProvider === "whisper").
     whisperUrl: "http://127.0.0.1:7860",
     whisperModel: "base",
     whisperLanguage: "",
     // Where Whisper outputs and AI-corrected transcripts are cached on disk
     // so the user does not re-transcribe the same video on a later visit.
-    // Intentionally NO default path (2026-08-31): a hardcoded fallback would
-    // leak this build machine's layout onto other installs. Fresh installs
-    // start empty; the options page blocks saving until the user picks a
-    // directory, and background consumers treat "" as "cache disabled".
+    // 2026-09-16 (Irene directive, replaces 2026-09-13 "BiliSubs" default):
+    // the previous default was the relative path "BiliSubs" — but the
+    // whisper_server is a separate Python process that resolved it against
+    // its own CWD, which almost never matched the user's Downloads folder,
+    // so cache lookups silently missed on a fresh install. The background
+    // script now resolves an ABSOLUTE default by sniffing
+    // chrome.downloads (history → probe download), caches the result in
+    // chrome.storage.local under "downloadsRootCache", and joins
+    // "BiliSubs" onto it before the settings object is handed to
+    // whisper_server. DEFAULTS stays empty here — leaving the field
+    // empty is the signal for the background to do that resolution.
+    // A user who sets a custom absolute path keeps it; a legacy user
+    // who stored the relative "BiliSubs" value (pre-2026-09-16) is
+    // migrated back to empty in normalize() below so the same resolver
+    // path runs for them too.
     subtitlesDir: "",
     // Where exported notes / summaries / reports are written. Intentionally
     // NO hardcoded default path (2026-09-12, same rationale as
@@ -215,7 +240,17 @@ var YTD_SETTINGS = (() => {
     // before the provider dropdown shipped aren't silently broken.
     const legacyAiKey =
       typeof input.aiApiKey === "string" ? input.aiApiKey.trim() : "";
-    const provider = normalizeProvider(input.provider);
+    // 2026-09-13 default flip: fresh installs (no provider field) land on
+    // DEFAULT_PROVIDER "none" — but pre-dropdown installs that stored the
+    // old single aiApiKey field (or the old "custom" provider marker)
+    // must keep working, so those legacy signals still resolve to
+    // minimax exactly as before the flip.
+    const legacyProviderSignal =
+      !!legacyAiKey || input.provider === "custom";
+    const provider =
+      legacyProviderSignal && !PROVIDER_IDS.includes(input.provider)
+        ? "minimax"
+        : normalizeProvider(input.provider);
     const preset = PROVIDER_PRESETS[provider];
     const glmApiType = normalizeGlmApiType(input.glmApiType);
     // Migration: earlier builds saved minimax's base URL without the /v1
@@ -274,11 +309,20 @@ var YTD_SETTINGS = (() => {
         !PRESET_MODELS.has(input.aiModel.trim())
           ? input.aiModel.trim()
           : preset.model,
-      asrProvider: ["whisper", "none"].includes(input.asrProvider)
+      asrProvider: ["whisper", "minimax", "none"].includes(input.asrProvider)
         ? input.asrProvider
         : DEFAULTS.asrProvider,
       asrApiKey:
         typeof input.asrApiKey === "string" ? input.asrApiKey.trim() : "",
+      // 2026-09-17: MiniMax cloud ASR — same shape as asrApiKey above,
+      // but kept under its own key so the LLM key (minimax / deepseek /
+      // glm / other) and the ASR key can be rotated independently.
+      minimaxAsrApiKey:
+        typeof input.minimaxAsrApiKey === "string" ? input.minimaxAsrApiKey.trim() : "",
+      minimaxAsrModel:
+        typeof input.minimaxAsrModel === "string" && input.minimaxAsrModel.trim()
+          ? input.minimaxAsrModel.trim()
+          : DEFAULTS.minimaxAsrModel,
       supadataApiKey: "",
       whisperUrl:
         typeof input.whisperUrl === "string" && input.whisperUrl.trim()
@@ -291,10 +335,18 @@ var YTD_SETTINGS = (() => {
         typeof input.whisperLanguage === "string"
           ? input.whisperLanguage.trim()
           : "",
-      subtitlesDir:
-        typeof input.subtitlesDir === "string" && input.subtitlesDir.trim()
-          ? input.subtitlesDir.trim().replace(/[\\/]+$/, "")
-          : DEFAULTS.subtitlesDir,
+      subtitlesDir: (() => {
+        const raw = typeof input.subtitlesDir === "string" ? input.subtitlesDir.trim() : "";
+        // 2026-09-16 (Irene directive): legacy "BiliSubs" (the relative
+        // default pre-2026-09-16) is no longer usable — whisper_server
+        // resolved it against its own CWD and silently missed the
+        // user's Downloads folder. Collapse it back to empty so the
+        // background resolver can fill in an absolute path. User-set
+        // paths (anything else, including absolute paths the user
+        // typed) pass through untouched.
+        if (raw && raw !== "BiliSubs") return raw.replace(/[\\/]+$/, "");
+        return DEFAULTS.subtitlesDir;
+      })(),
       exportDir:
         typeof input.exportDir === "string" && input.exportDir.trim()
           ? input.exportDir.trim().replace(/[\\/]+$/, "")
@@ -417,6 +469,21 @@ var YTD_SETTINGS = (() => {
     return `${dir}/${filename}`;
   }
 
+  // 2026-09-13 (Irene directive): the *effective* subtitles dir used at
+  // write/read time. If the stored value is empty, the consumer should
+  // fall back to the default "BiliSubs" (relative) — chrome.downloads
+  // resolves that to <Downloads>/BiliSubs and creates the folder on
+  // first write. Callers that need a guaranteed non-empty path use this;
+  // callers that need to distinguish "user has not set anything" use
+  // settings.subtitlesDir directly.
+  function effectiveSubtitlesDir(settings) {
+    const raw = settings && typeof settings.subtitlesDir === "string"
+      ? settings.subtitlesDir.trim()
+      : "";
+    if (raw) return raw.replace(/[\\/]+$/, "");
+    return DEFAULTS.subtitlesDir; // "BiliSubs"
+  }
+
   // Expand a `~`-prefixed path using KNOWN_HOMES. Returns the input
   // unchanged if it doesn't start with `~`. When no home is configured
   // (the default — see KNOWN_HOMES), returns "" so the caller falls back
@@ -472,6 +539,7 @@ var YTD_SETTINGS = (() => {
     chatCompletionsUrl,
     canonicalBilibiliUrl,
     whisperCachePath,
+    effectiveSubtitlesDir,
     expandExportPath,
     KNOWN_HOMES,
   };

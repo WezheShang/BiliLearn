@@ -40,6 +40,20 @@ const YTD_OPTIONS = (() => {
         "Without an AI model you will not be able to use summaries or the overview. Disable it anyway?",
       disableAiConfirmBtn: "Disable",
       disableAiCancelBtn: "Cancel",
+      // 2026-09-16 (Irene directive): modal shown when the user clicks
+      // the Whisper-server row's "Start Whisper server" button while
+      // the server is offline. Names the absolute path of the bat so
+      // the user can find it without guessing what "the extension
+      // folder" means.
+      batModalTitle: "Start the Whisper server",
+      batModalIntro:
+        "The local Whisper server isn't running yet. Double-click the start_whisper_server.bat below, keep the black console window open, then come back here and click “Check system”.",
+      batModalPathLabel: "Absolute path to the bat:",
+      batModalCopyBtn: "Copy path",
+      batModalOpenFolderBtn: "Open folder",
+      batModalCloseBtn: "Close",
+      batModalCopied: "Path copied to the clipboard — paste it into File Explorer's address bar.",
+      batModalOpenFailed: "Could not open the folder automatically. Paste this path into File Explorer's address bar instead:",
       providerNeedsKey: ({ provider }) =>
         `${provider} is selected but no API key was filled in — nothing was saved. Fill in the key, or pick ‘No AI model’.`,
       switchKeyDialogTitle: "Switch model",
@@ -94,7 +108,15 @@ const YTD_OPTIONS = (() => {
       whisperSetupDownloadBtn: "Download setup script",
       subtitlesDirLabel: "Subtitle cache directory",
       subtitlesDirHelp:
-        "Whisper transcripts (and AI-corrected versions) are stored here, indexed by BV id. Re-opening the same video reads the cache instead of re-transcribing.",
+        "Whisper transcripts (and AI-corrected versions) are stored here, indexed by BV id. Re-opening the same video reads the cache instead of re-transcribing. Empty field = the extension auto-resolves your browser's Downloads folder on first use (and writes the resolved absolute path back here); fill in a custom absolute path to override.",
+      // 2026-09-16 (Irene directive): the empty field used to be a hard
+      // save error (see the M-section tests). It is now a valid choice:
+      // leaving the field empty means the background resolves the
+      // browser's Downloads directory at first use and silently fills in
+      // the absolute path. The previous hard-block was masking the fact
+      // that we never bothered to compute a real default.
+      subtitlesDirRequired:
+        "(unused — empty field means \"auto-resolve browser Downloads folder on first use\")",
       subtitlesDirRequired:
         "Subtitle cache directory is empty — nothing was saved. Whisper needs a writable folder on this computer for its transcript cache. Fill in the field above and save again.",
       // 2026-09-02: desktop completion notification toggles. The two
@@ -201,6 +223,21 @@ const YTD_OPTIONS = (() => {
       asrSelectAriaLabel: "Speech recognition service",
       asrOptionNone: "Off (Bilibili native subtitles only)",
       asrOptionWhisper: "Local Whisper",
+      asrOptionMinimax: "MiniMax cloud ASR",
+      // 2026-09-17 (Irene directive): minimax ASR settings block.
+      // Same billing surface as the AI provider dropdown above — the
+      // same key (or a separate one) auths both. Block carries the API
+      // key + a model select between speech-01 (default), speech-01-turbo
+      // (faster), and speech-01-hd (higher quality).
+      minimaxAsrHelp:
+        "Uses MiniMax's cloud ASR to generate timestamped subtitles for videos that don't have official B-station captions. Audio is uploaded to MiniMax and processed remotely; billing is per character (see your MiniMax dashboard). Nothing local runs.",
+      minimaxAsrKeyLabel: "MiniMax API key",
+      minimaxAsrKeyPlaceholder: "eyJ...",
+      minimaxAsrModelLabel: "ASR model",
+      minimaxAsrModelAriaLabel: "MiniMax ASR model",
+      minimaxAsrModelAsr10: "asr-1.0 (only available model)",
+      minimaxAsrCostHint:
+        "MiniMax currently publishes only the asr-1.0 model — pick it. The dropdown will auto-add new models when they ship.",
       asrBailianKeyLabel: "Bailian API key",
       asrBailianHelp:
         "bililearn downloads the Bilibili audio track, uploads it to Bailian's 48-hour temporary storage, and uses Fun-ASR to generate timestamped subtitles ",
@@ -220,6 +257,13 @@ const YTD_OPTIONS = (() => {
       whisperOfflineDetail: ({ batHint }) =>
         `Not running — do step 3 first: double-click ${batHint} and keep the window open`,
       whisperOfflineStatus: "Server not running (this check is read-only and changes nothing)",
+      // 2026-09-15 (Irene directive): when the server is down, the MV3
+      // service worker has no way to introspect Python / VC++ /
+      // faster-whisper / zhconv. We render those rows neutral with
+      // this copy — the row-level install button carries the actual
+      // next step.
+      whisperUntestedUntilServerUp:
+        "Untestable while the server is down — start the bat first, or click the row's button to install now",
       whisperOldServerDetail: ({ batHint }) =>
         `Online, but running an old build — diagnostics are incomplete. Close the console window, double-click ${batHint} again, then click “Check system” once more`,
       whisperDepsLabel: "Dependency details",
@@ -231,6 +275,12 @@ const YTD_OPTIONS = (() => {
       whisperZhconvLabel: "zhconv — Traditional→Simplified conversion",
       whisperZhconvMissingLimited:
         "Not installed → subtitles stay Traditional; transcription is unaffected",
+      whisperInstallVcRedistBtn: "Download VC++",
+      whisperInstallPythonBtn: "Install Python",
+      whisperInstallFasterWhisperBtn: "Install faster-whisper",
+      whisperStartServerBtn: "Start Whisper server",
+      whisperInstallZhconvBtn: "Install zhconv",
+      whisperZhconvOptionalHint: "Optional — only affects Traditional→Simplified conversion",
       whisperLimitedStatus: ({ cmd }) =>
         `Missing dependencies. Install command (running it is your call): ${cmd}; afterwards close the console window and relaunch the bat`,
       whisperOnlineReady: ({ batPath }) =>
@@ -280,24 +330,16 @@ const YTD_OPTIONS = (() => {
         "Script is transparent: finds Python → pip install faster-whisper zhconv (packages come from the official PyPI, printed while the script runs) → verifies imports; which Python it installed into is printed by the script",
       installRowFail:
         "Go manual instead: click “Check system”, copy the install command, run it yourself",
-      diagnosticsTitle: "Diagnostics",
-      diagnosticsHelp:
-        "One click checks the key dependencies, so you don't have to dig through the README for commands.",
-      diagnosticsRunBtn: "Run diagnostics",
-      diagRunning: "Checking…",
-      diagDone: "Done",
-      diagVersionLabel: "Extension version",
-      diagVersionFail: "manifest not readable",
-      diagStorageLabel: "Extension local storage",
-      diagStorageOk: ({ count }) => `${count} setting${count === 1 ? "" : "s"} saved`,
-      diagUnknownError: "unknown error",
-      diagWhisperLabel: "Local Whisper server",
+      // 2026-09-15 (Irene directive): the standalone "诊断" card was
+      // removed. All diagnosticsTitle / diagnosticsHelp / diagnosticsRunBtn
+      // / diagRunning / diagDone / diagVersionLabel / diagVersionFail /
+      // diagStorageLabel / diagStorageOk / diagUnknownError /
+      // diagWhisperLabel / diagWhisperLimitedSuffix /
+      // diagWhisperNotEnabledSuffix / diagWhisperDownSuffix keys were
+      // removed with it. pingLimitedPrefix stays — pingWhisper still
+      // uses it when the server answers ok:false with a missing-deps list,
+      // and that path is consumed by both sidepanel and options.
       pingLimitedPrefix: "online but missing deps: ",
-      diagWhisperLimitedSuffix:
-        "(the exact install command for this machine is in “Check system” above)",
-      diagWhisperNotEnabledSuffix: "(local Whisper is not enabled — no impact)",
-      diagWhisperDownSuffix:
-        "(not running? double-click start_whisper_server.bat in the extension folder)",
       // 2026-09-13: diagAsr*/diagAiKey* rows removed from runDiagnostics —
       // they only echoed the settings form above (user: "脱裤子放屁").
     },
@@ -335,6 +377,17 @@ const YTD_OPTIONS = (() => {
         "不选择模型的话您将无法使用总结和概览的功能。是否确认？",
       disableAiConfirmBtn: "确认",
       disableAiCancelBtn: "取消",
+      // 2026-09-16 (Irene directive): bat 启动 modal —— 把 bat 的
+      // 绝对路径直接告诉用户，不再让他自己找「扩展文件夹」。
+      batModalTitle: "启动 Whisper server",
+      batModalIntro:
+        "本机还没启动 Whisper server。先双击下面的 start_whisper_server.bat，保持黑窗口开着，再回到这里点「检查系统」。",
+      batModalPathLabel: "bat 文件绝对路径：",
+      batModalCopyBtn: "复制路径",
+      batModalOpenFolderBtn: "打开所在文件夹",
+      batModalCloseBtn: "关闭",
+      batModalCopied: "路径已复制——粘贴到资源管理器地址栏即可直达",
+      batModalOpenFailed: "无法自动打开文件夹。请把下面这段路径粘贴到资源管理器地址栏：",
       providerNeedsKey: ({ provider }) =>
         `已选择 ${provider}，但未填写 API Key，无法保存。请填写密钥，或选择「不使用 AI 模型」。`,
       switchKeyDialogTitle: "切换模型",
@@ -385,9 +438,12 @@ const YTD_OPTIONS = (() => {
       whisperSetupDownloadBtn: "下载安装脚本",
       subtitlesDirLabel: "字幕缓存目录",
       subtitlesDirHelp:
-        "Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。再次打开同一视频会直接读缓存，不再跑 Whisper。",
+        "Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。再次打开同一视频会直接读缓存，不再跑 Whisper。留空 = 后台首次使用时自动解析浏览器 Downloads 目录并把绝对路径回写到这里；想自己指定就在下面填绝对路径。",
+      // 2026-09-16 (Irene directive): 留空现在是合法选项——后台会
+      // 自动解析 Downloads 目录并回写绝对路径。原 hard-block 拦的其实
+      // 是「我懒得算默认路径」，改完解析逻辑后就该放行。
       subtitlesDirRequired:
-        "字幕缓存目录为空，无法保存。Whisper 需要本机一个可写目录来缓存转写结果。请填写上方目录后再保存。",
+        "（留空 = 首次使用自动解析浏览器 Downloads 目录，无需在此填任何东西）",
       // 2026-09-10: 独立 #notificationsCard 删除后 heading/legend/help 不再需要。
       notifyOnTranscribeLabel: "Whisper 转录完成时",
       notifyOnSummaryAndAnalysisLabel: "总结和概览完成时（一起开关）",
@@ -468,6 +524,17 @@ const YTD_OPTIONS = (() => {
       asrSelectAriaLabel: "语音识别服务",
       asrOptionNone: "不使用（仅用 B 站原生字幕）",
       asrOptionWhisper: "本地 Whisper",
+      asrOptionMinimax: "MiniMax 云端 ASR",
+      // 2026-09-17 (Irene directive): 同 EN — minimax 云端 ASR 设置区。
+      minimaxAsrHelp:
+        "用 MiniMax 云端 ASR 给没有官方字幕的视频生成带时间戳字幕。音轨上传到 MiniMax 远程处理，按字符计费（看 MiniMax 后台）。本机不跑任何东西。",
+      minimaxAsrKeyLabel: "MiniMax API Key",
+      minimaxAsrKeyPlaceholder: "eyJ...",
+      minimaxAsrModelLabel: "ASR 模型",
+      minimaxAsrModelAriaLabel: "MiniMax ASR 模型",
+      minimaxAsrModelAsr10: "asr-1.0（当前唯一可用模型）",
+      minimaxAsrCostHint:
+        "MiniMax 语音识别目前只上线了 asr-1.0 一个模型，选它即可；后续若官方发布新模型，下拉列表会自动补上。",
       asrBailianKeyLabel: "百炼 API Key",
       asrBailianHelp:
         "bililearn 会下载当前B站音轨，上传到百炼48小时临时空间，并使用 Fun-ASR 生成带时间戳字幕。",
@@ -486,6 +553,10 @@ const YTD_OPTIONS = (() => {
       whisperOfflineDetail: ({ batHint }) =>
         `未启动——先做步骤 3：双击 ${batHint} 并保持窗口开着`,
       whisperOfflineStatus: "server 未启动（检查只读，不会改动系统）",
+      // 2026-09-15 (Irene directive): 同 EN — server 没起来时无法探测
+      // 其他 prereq，行内中性 + 行内一键装按钮各自承担各自的事。
+      whisperUntestedUntilServerUp:
+        "server 未启动时无法探测——先点本行按钮装，或先启 BAT 再回查",
       whisperOldServerDetail: ({ batHint }) =>
         `在线，但跑的是旧版本——诊断信息不全。请关闭黑窗口，重新双击 ${batHint}，然后再点一次「检查系统」`,
       whisperDepsLabel: "依赖详情",
@@ -495,6 +566,12 @@ const YTD_OPTIONS = (() => {
       whisperMissingRequired: "缺失——本地转写必需",
       whisperZhconvLabel: "zhconv — 繁体字幕转简体",
       whisperZhconvMissingLimited: "未安装 → 字幕将保留繁体；转写功能不受影响",
+      whisperInstallVcRedistBtn: "下载 VC++",
+      whisperInstallPythonBtn: "安装 Python",
+      whisperInstallFasterWhisperBtn: "安装 faster-whisper",
+      whisperStartServerBtn: "启动 Whisper server",
+      whisperInstallZhconvBtn: "安装 zhconv",
+      whisperZhconvOptionalHint: "可选 — 仅影响繁简转换",
       whisperLimitedStatus: ({ cmd }) =>
         `缺依赖，安装命令（是否执行由你决定）：${cmd}；装完关闭黑窗口重开一次 bat`,
       whisperOnlineReady: ({ batPath }) =>
@@ -540,21 +617,9 @@ const YTD_OPTIONS = (() => {
       installRowOk:
         "脚本内容透明：自动找 Python → pip install faster-whisper zhconv（包从官方源 pypi.org 下载，来源会在脚本运行时打印）→ 验证导入；装到哪个 Python 会在脚本里打印",
       installRowFail: "改为手动：点「检查系统」复制安装命令自行执行",
-      diagnosticsTitle: "诊断",
-      diagnosticsHelp: "一键检查关键依赖是否就位。不用反复看 README 找命令。",
-      diagnosticsRunBtn: "运行诊断",
-      diagRunning: "检查中…",
-      diagDone: "完成",
-      diagVersionLabel: "扩展版本",
-      diagVersionFail: "无法读取 manifest",
-      diagStorageLabel: "扩展本地存储",
-      diagStorageOk: ({ count }) => `${count} 项设置已保存`,
-      diagUnknownError: "未知错误",
-      diagWhisperLabel: "本地 Whisper server",
+      // 2026-09-15 (Irene directive): 同 EN — 「诊断」卡片整张去掉，相关
+      // i18n 键全部清掉。pingLimitedPrefix 保留（pingWhisper 仍在用）。
       pingLimitedPrefix: "在线但缺依赖: ",
-      diagWhisperLimitedSuffix: "（上方「检查系统」里有针对本机的安装命令）",
-      diagWhisperNotEnabledSuffix: "（当前未启用本地 Whisper，无影响）",
-      diagWhisperDownSuffix: "（未运行？双击扩展目录里的 start_whisper_server.bat）",
       // 2026-09-13: diagAsr*/diagAiKey* 行已从 runDiagnostics 移除——
       // 只是复读上方设置表单（用户原话："脱裤子放屁"）。
     },
@@ -840,7 +905,8 @@ const YTD_OPTIONS = (() => {
     if (
       !verified ||
       verified.aiApiKey !== settings.aiApiKey ||
-      verified.asrApiKey !== settings.asrApiKey
+      verified.asrApiKey !== settings.asrApiKey ||
+      verified.minimaxAsrApiKey !== settings.minimaxAsrApiKey
     ) {
       throw new Error("SETTINGS_WRITE_VERIFICATION_FAILED");
     }
@@ -950,6 +1016,9 @@ const YTD_OPTIONS = (() => {
     const asrApiKeyInput = doc.getElementById("asrApiKey");
     const asrProviderSelect = doc.getElementById("asrProvider");
     const asrFieldEls = [...doc.querySelectorAll("[data-asr-field]")];
+    // 2026-09-17 (Irene directive): MiniMax cloud ASR inputs.
+    const minimaxAsrApiKeyInput = doc.getElementById("minimaxAsrApiKey");
+    const minimaxAsrModelSelect = doc.getElementById("minimaxAsrModel");
     const whisperUrlText = doc.getElementById("whisperUrlText");
     const switchKeyDialog = doc.getElementById("switchKeyDialog");
     const switchKeyDialogBody = doc.getElementById("switchKeyDialogBody");
@@ -1176,11 +1245,29 @@ const YTD_OPTIONS = (() => {
       // hidden in options.html, so an unknown/missing provider must
       // never light up the bailian block — that showed Alibaba content
       // under a blank dropdown on fresh installs (2026-08-31 report).
-      const active = ["bailian", "whisper", "none"].includes(provider)
+      // 2026-09-17: "minimax" is now in the whitelist — without it the
+      // dropdown silently fell back to "whisper" and lit up the entire
+      // whisper check section (Python / VC++ / faster-whisper / server
+      // / zhconv rows + Whisper URL + model + language + subtitles dir +
+      // transcribe notification) under a MiniMax ASR pick, exactly the
+      // opposite of what the user wanted (Irene: "如果用户选择了这个，
+      // whisper相关的信息不应该都删掉么").
+      const active = ["bailian", "whisper", "minimax", "none"].includes(provider)
         ? provider
         : "whisper";
       for (const el of asrFieldEls) {
         el.classList.toggle("is-hidden", el.dataset.asrField !== active);
+      }
+      // 2026-09-15 (Irene directive, replaces 2026-09-13 idle rows):
+      // switching the "语音识别" dropdown to Whisper now auto-runs a single
+      // environment check. The user sees 5 rows with their real ✓/✗
+      // state, and any ✗ row carries its own install/start button. Idle
+      // "Untested" rows are no longer drawn — that previous attempt at
+      // upfront guidance produced a confusing wall of buttons above the
+      // status list. The dropdown stays the trigger; "检查系统" remains
+      // the manual re-check button.
+      if (active === "whisper") {
+        void runWhisperCheck();
       }
     }
 
@@ -1287,6 +1374,9 @@ const YTD_OPTIONS = (() => {
         // for a fully configured returning user.
         applyNotifyVisibility();
         if (asrApiKeyInput) asrApiKeyInput.value = settings.asrApiKey;
+        // 2026-09-17: populate the MiniMax cloud ASR block.
+        if (minimaxAsrApiKeyInput) minimaxAsrApiKeyInput.value = settings.minimaxAsrApiKey || "";
+        if (minimaxAsrModelSelect) minimaxAsrModelSelect.value = settings.minimaxAsrModel || "speech-01";
         if (asrProviderSelect) {
           // A stored provider with no matching <option> (e.g. legacy
           // "bailian" while the option is hidden) renders a BLANK select
@@ -1373,6 +1463,10 @@ const YTD_OPTIONS = (() => {
         glmApiType: glmApiTypeSelect ? glmApiTypeSelect.value : "",
         asrApiKey: asrApiKeyInput ? asrApiKeyInput.value : "",
         asrProvider: asrProviderSelect ? asrProviderSelect.value : "whisper",
+        // 2026-09-17: persist MiniMax cloud ASR config alongside the
+        // existing AI-provider / Whisper fields.
+        minimaxAsrApiKey: minimaxAsrApiKeyInput ? minimaxAsrApiKeyInput.value : "",
+        minimaxAsrModel: minimaxAsrModelSelect ? minimaxAsrModelSelect.value : "speech-01",
         whisperUrl: whisperUrlText ? whisperUrlText.textContent.trim() : "",
         whisperModel: whisperModelSelect ? whisperModelSelect.value : "",
         whisperLanguage: whisperLanguageInput ? whisperLanguageInput.value : "",
@@ -1412,17 +1506,15 @@ const YTD_OPTIONS = (() => {
       }
 
       // 2026-08-31: the subtitle cache directory has NO default — a hardcoded
-      // fallback would leak the build machine's layout onto other installs
-      // (user-reported on a second computer: the field pre-filled with
-      // someone else's C:/Users/... path). Fresh installs start empty, and a
-      // Whisper user must pick their own directory before anything saves.
-      // Scoped to asrProvider === "whisper" because the field lives inside
-      // the Whisper settings block: blocking saves for "none"/"bailian"
-      // users would surface an error whose input is hidden.
-      if (settings.asrProvider === "whisper" && !settings.subtitlesDir) {
-        setStatus(saveStatus, "subtitlesDirRequired");
-        return;
-      }
+      // 2026-09-16 (Irene directive, replaces 2026-09-12 hard-block):
+      // empty subtitlesDir is now a valid save state. The background
+      // script's resolveDownloadsRoot() fills in an absolute path the
+      // first time Whisper actually needs it (on the first
+      // loadCachedTranscript / whisperCachePath call), so the user no
+      // longer has to know their browser Downloads path up front.
+//      // Scoped to asrProvider === "whisper" because the field lives inside
+//      // the Whisper settings block: blocking saves for "none"/"bailian"
+//      // users would surface an error whose input is hidden.
 
       try {
         await persistAndVerifySettings(
@@ -1470,8 +1562,12 @@ const YTD_OPTIONS = (() => {
         whisperCheckResults.hidden = false;
       }
       if (whisperReadyBar) whisperReadyBar.hidden = true;
-      if (whisperCopyCmdBtn) whisperCopyCmdBtn.hidden = true;
-      if (installDepsBtn) installDepsBtn.hidden = true;
+      // 2026-09-15 (Irene directive): the two global fallback buttons moved
+      // into a collapsed <details id="whisperFallbackBlock">; hide it at the
+      // start of every check so a previously-failed state doesn't leak into
+      // the new report.
+      const fallbackBlock = doc.getElementById("whisperFallbackBlock");
+      if (fallbackBlock) fallbackBlock.hidden = true;
       const r = await pingWhisper(
         whisperUrlText
           ? whisperUrlText.textContent.trim()
@@ -1479,6 +1575,13 @@ const YTD_OPTIONS = (() => {
       );
       renderWhisperCheckResults((r && r.data) || null);
     }
+
+    // 2026-09-15 (Irene directive, replaces the 2026-09-13
+    // renderWhisperIdleRows path): no idle rendering. The list is empty
+    // until the user clicks "检查系统" or switches the "语音识别" dropdown
+    // to Whisper (which now triggers runWhisperCheck). The renderWhisperIdleRows
+    // function was removed in this revision — see git history for the
+    // previous "5 rows + 5 buttons always visible" attempt.
 
     // Pure renderer for the check flow (2026-08-31 i18n rework): called by
     // runWhisperCheck after a fetch AND by applyLanguage when the UI
@@ -1505,14 +1608,88 @@ const YTD_OPTIONS = (() => {
       const batHint = batPath || translate(currentLanguage, "whisperBatHintFallback");
 
       // Case 1: server not reachable at all.
+// 2026-09-15 (Irene directive): the MV3 service worker cannot directly
+// spawn a process or read file-system paths, so when the local Whisper
+// server is down we have NO way to introspect Python / VC++ /
+// faster-whisper / zhconv from here. Old behaviour was to draw a
+// single red "Whisper server ✗" row and hide the rest — which made the
+// setup guide useless on a fresh install (the user couldn't see what
+// to install BEFORE running the bat, but the bat can't start without
+// those prereqs either). New behaviour: render FIVE rows regardless.
+// The 4 prereq rows go neutral (untestable while the server is down)
+// and each carries its own one-click install button so the user can
+// fix them without leaving the page; the 5th row says "server offline"
+// + 启动 Whisper server button. As soon as the user runs the bat and
+// re-checks, the same 5 rows switch to the real ✓/✗ state from
+// /health (the existing K2/K3/K5 paths).
       if (!health) {
+        // 2026-09-16 (Irene directive): when the server is down, the
+        // MV3 service worker has no way to introspect Python / VC++ /
+        // faster-whisper / zhconv from this page. Previous drafts hung
+        // a per-row "Install Python / Install faster-whisper / Install
+        // zhconv / Download VC++" button on these rows, which read like
+        // "the extension thinks you haven't installed these" — but the
+        // user may already have them (the new-device report: Python
+        // 3.13 was installed and the page still showed "Install
+        // Python", making it look like the check was wrong). Fix: NO
+        // action button on the 4 prereq rows while server down. The
+        // row text is honest ("untestable until the server is up") and
+        // the ONLY button the user sees is the row-5 BAT-start button,
+        // which is the actual next step. As soon as the user runs the
+        // bat and re-checks, the same 5 rows switch to the real ✓/✗
+        // state from /health.
+        //
+        // Row 1 — Python.
+        renderCheckItem(
+          list,
+          "Python 3.10+",
+          null,
+          translate(currentLanguage, "whisperUntestedUntilServerUp"),
+        );
+        // Row 2 — VC++ runtime.
+        renderCheckItem(
+          list,
+          "Microsoft Visual C++ 2015-2022 x64",
+          null,
+          translate(currentLanguage, "whisperUntestedUntilServerUp"),
+        );
+        // Row 3 — faster-whisper (the engine).
+        renderCheckItem(
+          list,
+          "faster-whisper",
+          null,
+          translate(currentLanguage, "whisperUntestedUntilServerUp"),
+        );
+        // Row 4 — zhconv (optional). Same shape, optional badge.
+        renderCheckItem(
+          list,
+          translate(currentLanguage, "whisperZhconvLabel"),
+          null,
+          translate(currentLanguage, "whisperUntestedUntilServerUp"),
+          { optional: true },
+        );
+        // Row 5 — Whisper server. Red, with the BAT-start button. This
+        // is the ONLY one that needs the server itself to come up; the
+        // other 4 are independent of the server.
         renderCheckItem(
           list,
           "Whisper server",
           false,
           translate(currentLanguage, "whisperOfflineDetail", { batHint }),
+          {
+            action: {
+              label: translate(currentLanguage, "whisperStartServerBtn"),
+              messageAction: "copyBatPath",
+              payload: {},
+            },
+          },
         );
         whisperTestStatus.textContent = translate(currentLanguage, "whisperOfflineStatus");
+        // The fallback block would only show "copy install command"
+        // helpers, but with the server down we can't compute a
+        // targeted pip command — leave it collapsed.
+        const fallbackBlock = doc.getElementById("whisperFallbackBlock");
+        if (fallbackBlock) fallbackBlock.hidden = true;
         return;
       }
 
@@ -1606,7 +1783,23 @@ const YTD_OPTIONS = (() => {
 
       // Row 3: faster-whisper (the required transcription engine).
       if (fwMissing) {
-        renderCheckItem(list, "faster-whisper", false, translate(currentLanguage, "whisperMissingRequired"));
+        renderCheckItem(
+          list,
+          "faster-whisper",
+          false,
+          translate(currentLanguage, "whisperMissingRequired"),
+          {
+            // 2026-09-15 (Irene directive): ✗ faster-whisper carries an
+            // inline pip-install button — same fix as before lived in
+            // the global copy-install-command fallback, now it lives on
+            // the row that needs fixing.
+            action: {
+              label: translate(currentLanguage, "whisperInstallFasterWhisperBtn"),
+              messageAction: "pipInstall",
+              payload: { packages: ["faster-whisper"] },
+            },
+          },
+        );
       } else {
         renderCheckItem(
           list,
@@ -1635,7 +1828,18 @@ const YTD_OPTIONS = (() => {
             fwMissing ? "whisperZhconvMissingLimited" : "whisperZhconvMissingHint",
             { pyExe: pyCmdRef },
           ),
-          { optional: true },
+          {
+            optional: true,
+            // 2026-09-15 (Irene directive): optional ✗ rows also carry an
+            // inline pip-install button so the user can fix the gap from
+            // the same row, instead of having to open the fallback block
+            // (which only opens for the pip-fixable required case).
+            action: {
+              label: translate(currentLanguage, "whisperInstallZhconvBtn"),
+              messageAction: "pipInstall",
+              payload: { packages: ["zhconv"] },
+            },
+          },
         );
       }
 
@@ -1655,6 +1859,15 @@ const YTD_OPTIONS = (() => {
       // Required readiness = faster-whisper importable (vc_redist gates
       // the DLL it loads). Readiness ignores the optional zhconv.
       const requiredReady = !fwMissing && !vcRedistMissing;
+      // 2026-09-15 (Irene directive): the fallback block (one-shot
+      // copy-install-command / download-setup-script buttons) lives in a
+      // collapsed <details>; it opens ONLY when pip can actually fix
+      // what's broken AND the OS-level runtime is OK. vc_redist missing
+      // hides the block even if pip-side deps are also missing — the
+      // pip command can't help the user until the runtime is in place,
+      // so showing it there is misleading.
+      const fallbackBlock = doc.getElementById("whisperFallbackBlock");
+      if (fallbackBlock) fallbackBlock.hidden = pipMissing.length === 0 || vcRedistMissing;
       if (!requiredReady) {
         if (vcRedistMissing) {
           // OS-level fix, not pip — do not show the pip install button.
@@ -1662,10 +1875,8 @@ const YTD_OPTIONS = (() => {
         } else {
           whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatus", { cmd });
           if (whisperCopyCmdBtn && cmd) {
-            whisperCopyCmdBtn.hidden = false;
             whisperCopyCmdBtn.dataset.cmd = cmd;
           }
-          if (installDepsBtn) installDepsBtn.hidden = false;
         }
         return;
       }
@@ -1684,11 +1895,15 @@ const YTD_OPTIONS = (() => {
       } else {
         // Server up + transcription usable — still surface the optional
         // zhconv install command so closing the gap is one paste away.
+        // The copy/download buttons live inside whisperFallbackBlock which
+        // the ready branch hides above; force-show the block here so the
+        // optional gap stays addressable in one click.
         whisperTestStatus.textContent = translate(currentLanguage, "whisperLimitedStatus", { cmd });
         if (whisperCopyCmdBtn && cmd) {
-          whisperCopyCmdBtn.hidden = false;
           whisperCopyCmdBtn.dataset.cmd = cmd;
         }
+        const fallbackBlock = doc.getElementById("whisperFallbackBlock");
+        if (fallbackBlock) fallbackBlock.hidden = false;
       }
     }
 
@@ -1861,6 +2076,108 @@ const YTD_OPTIONS = (() => {
         if (event.target === disableAiDialog) closeDisableAiDialog(false);
       });
     }
+
+    // -----------------------------------------------------------------
+    // 2026-09-16 (Irene directive): batModal — modal that opens from the
+    // copyBatPath handler in background.js. The URL looks like
+    // options.html?batModal=1&batPath=<abs-path-of-start_whisper_server.bat>
+    // The modal gives the user the absolute path of the bat and a
+    // best-effort "open folder" button so they don't have to hunt
+    // around chrome://extensions to find "the extension folder".
+    // -----------------------------------------------------------------
+    const batModal = doc.getElementById("batModal");
+    const batModalPathEl = doc.getElementById("batModalPath");
+    const batModalCopyBtn = doc.getElementById("batModalCopyBtn");
+    const batModalOpenFolderBtn = doc.getElementById("batModalOpenFolderBtn");
+    const batModalCloseBtn = doc.getElementById("batModalCloseBtn");
+    let batModalResolvedPath = "";
+
+    function closeBatModal() {
+      if (!batModal) return;
+      batModal.classList.add("is-hidden");
+      // Drop the query params so a refresh doesn't re-open the modal.
+      try {
+        const url = new URL(root.location.href);
+        url.searchParams.delete("batModal");
+        url.searchParams.delete("batPath");
+        root.history.replaceState(null, "", url.pathname + (url.searchParams.toString() ? "?" + url.searchParams.toString() : ""));
+      } catch (_e) {}
+    }
+
+    function openBatModal(absPath) {
+      if (!batModal || !absPath) return;
+      batModalResolvedPath = absPath;
+      if (batModalPathEl) batModalPathEl.textContent = absPath;
+      batModal.classList.remove("is-hidden");
+      if (batModalCopyBtn) batModalCopyBtn.focus();
+    }
+
+    if (batModal) {
+      // Auto-open when the page was loaded with ?batModal=1 (the path
+      // background.js appended via copyBatPath).
+      try {
+        const url = new URL(root.location.href);
+        if (url.searchParams.get("batModal") === "1") {
+          const p = url.searchParams.get("batPath") || "";
+          if (p) openBatModal(p);
+        }
+      } catch (_e) {}
+
+      // Copy absolute path → clipboard.
+      if (batModalCopyBtn) {
+        batModalCopyBtn.addEventListener("click", async () => {
+          if (!batModalResolvedPath) return;
+          try {
+            await copyPromptValue(root.navigator.clipboard, batModalResolvedPath);
+            if (whisperTestStatus) {
+              whisperTestStatus.textContent = translate(currentLanguage, "batModalCopied");
+            }
+          } catch (_e) {
+            // Fallback: a hidden textarea + execCommand for very old /
+            // non-secure contexts where navigator.clipboard is unavailable.
+            const ta = doc.createElement("textarea");
+            ta.value = batModalResolvedPath;
+            ta.setAttribute("readonly", "");
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            doc.body.appendChild(ta);
+            ta.select();
+            try { doc.execCommand("copy"); } catch (_e2) {}
+            doc.body.removeChild(ta);
+          }
+        });
+      }
+
+      // Open the bat's parent directory in the OS file manager. MV3 has
+      // no native shell API, so we ask the background to do it via a
+      // dedicated action. The background uses chrome.downloads.show /
+      // shellExecute fallback to bring up the folder.
+      if (batModalOpenFolderBtn) {
+        batModalOpenFolderBtn.addEventListener("click", async () => {
+          if (!batModalResolvedPath) return;
+          try {
+            await chrome.runtime.sendMessage({
+              action: "openBatFolder",
+              payload: { batPath: batModalResolvedPath },
+            });
+          } catch (_e) {
+            if (whisperTestStatus) {
+              whisperTestStatus.textContent = translate(currentLanguage, "batModalOpenFailed") + " " + batModalResolvedPath;
+            }
+          }
+        });
+      }
+
+      if (batModalCloseBtn) batModalCloseBtn.addEventListener("click", closeBatModal);
+      batModal.addEventListener("click", (event) => {
+        if (event.target === batModal) closeBatModal();
+      });
+      doc.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !batModal.classList.contains("is-hidden")) {
+          closeBatModal();
+        }
+      });
+    }
     if (asrProviderSelect) {
       asrProviderSelect.addEventListener("change", () => {
         const v = asrProviderSelect.value;
@@ -1924,16 +2241,16 @@ const YTD_OPTIONS = (() => {
     // Diagnostics panel: run health checks on the configured
     // whisper server, B 站 API, and other dependencies. Results
     // rendered as a list of ✓/✗ items.
+    //
+    // 2026-09-15 (Irene directive): the standalone "诊断" card was
+    // removed. Its contents (extension version, saved settings, local
+    // Whisper server reachability) are already visible in the Whisper
+    // setup card above, and the Whisper server check itself is one
+    // click away from there. The runDiagnostics function, the
+    // renderDiagnosticsItem wrapper, the runDiagnosticsBtn click
+    // listener, and the diagnostics* DOM refs were all removed in
+    // this revision.
     // ------------------------------------------------------------
-    const runDiagnosticsBtn = doc.getElementById("runDiagnosticsBtn");
-    const diagnosticsStatus = doc.getElementById("diagnosticsStatus");
-    const diagnosticsResults = doc.getElementById("diagnosticsResults");
-
-    function renderDiagnosticsItem(label, ok, detail) {
-      // Default target: the bottom diagnostics card. The whisper setup
-      // panel passes its own list via renderCheckItem below.
-      renderDiagnosticsItemTo(diagnosticsResults, label, ok, detail);
-    }
 
     function renderCheckItem(listEl, label, ok, detail, opts) {
       renderDiagnosticsItemTo(listEl, label, ok, detail, opts);
@@ -1981,6 +2298,42 @@ const YTD_OPTIONS = (() => {
         }
         text.appendChild(small);
       }
+      // 2026-09-15 (Irene directive, replaces 2026-09-13): the action
+      // button is appended when the row is ✗ (ok === false) OR neutral
+      // (ok === null — "untestable until something else comes up").
+      // The 5 deps used to render a button for every row regardless
+      // of state, which produced the always-visible "安装 Python / 安装
+      // faster-whisper / 启动 Whisper server / 安装 zhconv / 下载 VC++"
+      // wall above the list — the opposite of what the user wanted. ✓
+      // rows show only their green tick; ✗ and neutral rows show the
+      // tick + the exact fix button on the same line. Neutral rows
+      // matter specifically for the "server offline, prereqs unknown"
+      // case — the user can't see Python state from the page, but
+      // they can still click the row's button to install it without
+      // waiting for the server.
+      if (ok !== true && opts && opts.action && opts.action.label) {
+        const btn = doc.createElement("button");
+        btn.type = "button";
+        btn.className = "secondary diagnostics-action-btn";
+        btn.textContent = opts.action.label;
+        btn.addEventListener("click", () => {
+          if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({
+              action: opts.action.messageAction || opts.action.action,
+              payload: opts.action.payload || {},
+            }).catch((err) => {
+              // Background script unreachable (e.g. extension reload) — fall
+              // back to the old direct chrome.tabs path so the user is
+              // never left without recourse.
+              console.warn("[bililearn] action message failed:", err);
+            });
+          }
+          if (opts.action.fallbackUrl && typeof chrome !== "undefined" && chrome.tabs) {
+            chrome.tabs.create({ url: opts.action.fallbackUrl });
+          }
+        });
+        li.appendChild(btn);
+      }
       li.appendChild(mark);
       li.appendChild(text);
       listEl.appendChild(li);
@@ -2020,95 +2373,11 @@ const YTD_OPTIONS = (() => {
     }
 
     async function runDiagnostics() {
-      if (!diagnosticsResults || !runDiagnosticsBtn) return;
-      diagnosticsResults.innerHTML = "";
-      diagnosticsResults.hidden = false;
-      runDiagnosticsBtn.disabled = true;
-      if (diagnosticsStatus) diagnosticsStatus.textContent = translate(currentLanguage, "diagRunning");
-
-      // 1. Extension version
-      const manifest = root.chrome && root.chrome.runtime && root.chrome.runtime.getManifest
-        ? root.chrome.runtime.getManifest()
-        : null;
-      renderDiagnosticsItem(
-        translate(currentLanguage, "diagVersionLabel"),
-        Boolean(manifest && manifest.version),
-        manifest ? "v" + manifest.version : translate(currentLanguage, "diagVersionFail"),
-      );
-
-      // 2. Saved settings via the SAME adapter loadSettings uses. The old
-      // code read window.localStorage directly — real settings live in
-      // chrome.storage.local, so every check below saw an empty store and
-      // reported 未配置 even on a fully set-up machine (user report
-      // 2026-08-29: whisper server running, diagnostics still red ✗).
-      let saved = {};
-      try {
-        const raw = await storage.get(settingsApi.STORAGE_KEY);
-        saved = (raw && raw[settingsApi.STORAGE_KEY]) || {};
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagStorageLabel"),
-          true,
-          translate(currentLanguage, "diagStorageOk", { count: Object.keys(saved).length }),
-        );
-      } catch (e) {
-        renderDiagnosticsItem(translate(currentLanguage, "diagStorageLabel"), false, e && e.message ? e.message : translate(currentLanguage, "diagUnknownError"));
-      }
-
-      // 3. Whisper server. The URL is a fixed read-only address, so ping it
-      // directly — never trust a stored copy. Red only when 本地 Whisper is
-      // actually selected; otherwise a down server is a neutral note (the
-      // machine is fine, the feature is just not enabled).
-      const whisperUrl = "http://127.0.0.1:7860";
-      const asrNow = (asrProviderSelect && asrProviderSelect.value) || saved.asrProvider || "none";
-      const r = await pingWhisper(whisperUrl);
-      const limited = Boolean(r.data && r.data.ok === false);
-      if (r.ok) {
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagWhisperLabel"),
-          true,
-          whisperUrl + " — " + r.detail,
-        );
-      } else if (limited && asrNow === "whisper") {
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagWhisperLabel"),
-          false,
-          whisperUrl + " — " + r.detail + translate(currentLanguage, "diagWhisperLimitedSuffix"),
-        );
-      } else if (limited) {
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagWhisperLabel"),
-          null,
-          whisperUrl + " — " + r.detail + translate(currentLanguage, "diagWhisperNotEnabledSuffix"),
-        );
-      } else if (asrNow === "whisper") {
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagWhisperLabel"),
-          false,
-          whisperUrl + " — " + r.detail + translate(currentLanguage, "diagWhisperDownSuffix"),
-        );
-      } else {
-        renderDiagnosticsItem(
-          translate(currentLanguage, "diagWhisperLabel"),
-          null,
-          whisperUrl + " — " + r.detail + translate(currentLanguage, "diagWhisperNotEnabledSuffix"),
-        );
-      }
-
-      // 2026-09-13: the old steps 4-5 ("ASR 提供方" + "AI Key" rows) were
-      // removed — both just echoed the settings form a screen above (user
-      // report: "前面不都有么？脱裤子放屁"). The diagnostics card sticks to
-      // facts the page can't already show: version, stored settings, and
-      // whether the local whisper server answers.
-
-      if (diagnosticsStatus) diagnosticsStatus.textContent = translate(currentLanguage, "diagDone");
-      runDiagnosticsBtn.disabled = false;
-      diagnosticsHasRun = true;
-    }
-
-    if (runDiagnosticsBtn) {
-      runDiagnosticsBtn.addEventListener("click", () => {
-        void runDiagnostics();
-      });
+      // 2026-09-15 (Irene directive): removed entirely. The standalone
+      // "诊断" card that owned this function is gone; the Whisper setup
+      // card now surfaces the same facts inline. Kept as an empty stub
+      // so external callers (none in-tree, but defensive) don't crash if
+      // they ever invoke it.
     }
 
     // ------------------------------------------------------------

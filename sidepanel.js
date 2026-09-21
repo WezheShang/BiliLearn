@@ -1055,6 +1055,22 @@ async function startBililearn(videoId, videoUrl) {
       showWhisperPrompt(videoId, videoUrl, transcriptResult.cacheDir);
       return;
     }
+    if (transcriptResult.error === "MINIMAX_ASR_KEY_MISSING") {
+      // 2026-09-17 (Irene directive): MiniMax cloud ASR is selected
+      // but no API key was filled in. Don't surface this as "no
+      // subtitles found" — guide the user straight to the settings
+      // page so they can paste the key.
+      if (gen !== generation) return;
+      showError(
+        "MiniMax 云端 ASR 未配置",
+        transcriptResult.message ||
+          "请到 bililearn 设置 → 语音识别 → MiniMax 云端 ASR 里填上 API Key。",
+        {
+          primary: { label: "打开设置", action: openOptionsPage },
+        },
+      );
+      return;
+    }
     if (transcriptResult.error === "NO_TRANSCRIPT") {
       // No subtitles anywhere and no ASR path will auto-run: guide the
       // user to pick an ASR source instead of a dead-end error (2026-08-28).

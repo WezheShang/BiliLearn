@@ -114,7 +114,7 @@
             <option value="other" data-i18n="providerOptionOther"
               >Other model</option
             >
-            <option value="none" data-i18n="providerOptionNone"
+            <option value="none" data-i18n="providerOptionNone" selected
               >No AI model</option
             >
           </select>
@@ -310,7 +310,51 @@
           <select id="asrProvider" name="asrProvider" aria-label="语音识别服务" data-i18n-aria-label="asrSelectAriaLabel">
             <option value="none" data-i18n="asrOptionNone">不使用（仅用 B 站原生字幕）</option>
             <option value="whisper" data-i18n="asrOptionWhisper">本地 Whisper</option>
+            <option value="minimax" data-i18n="asrOptionMinimax">MiniMax 云端 ASR</option>
           </select>
+
+
+          <!-- 2026-09-17 (Irene directive): minimax cloud ASR block.
+               Same shape as whisperSettings: shown only when the dropdown
+               picks "minimax" (data-asr-field mirrors data-asr-field="whisper"
+               above). The block carries the API key + model dropdown; the
+               background script picks up these values when asrProvider===
+//               "minimax" and POSTs multipart/form-data to
+//               https://api.minimax.chat/v1/audio/transcriptions. -->
+          <div id="minimaxAsrSettings" data-asr-field="minimax" class="is-hidden">
+            <p class="help" data-i18n="minimaxAsrHelp">
+              用 MiniMax 云端 ASR 给没有官方字幕的视频生成字幕。
+              账户余额在 minimax 后台查看，按字符计费；本地不占任何资源。
+            </p>
+            <label data-i18n="minimaxAsrKeyLabel">MiniMax API Key</label>
+            <div class="static-field">
+              <input
+                type="password"
+                id="minimaxAsrApiKey"
+                name="minimaxAsrApiKey"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="eyJ..."
+                data-i18n-placeholder="minimaxAsrKeyPlaceholder"
+              />
+            </div>
+            <label data-i18n="minimaxAsrModelLabel">ASR 模型</label>
+            <select
+              id="minimaxAsrModel"
+              name="minimaxAsrModel"
+              aria-label="MiniMax ASR 模型"
+              data-i18n-aria-label="minimaxAsrModelAriaLabel"
+            >
+              <option value="asr-1.0" data-i18n="minimaxAsrModelAsr10"
+                selected
+                >asr-1.0（唯一可用模型）</option
+              >
+            </select>
+            <p class="help" data-i18n="minimaxAsrCostHint">
+              当前 MiniMax 语音识别只发布了一个模型 asr-1.0，
+              选它就好；后续如果官方上线更多模型这里会自动加上。
+            </p>
+          </div>
 
 
           <div id="whisperSettings" data-asr-field="whisper" class="is-hidden">
@@ -319,15 +363,23 @@
               本设置仅在你需要转录**没有官方字幕**的视频时使用；按需安装即可。
             </p>
 
-            <!-- 2026-09-07: only the live "检查系统" check stays. The
-                 previous "本地环境准备" 4-step manual is gone. 2026-09-13
-                 (user directive): EVERY dependency gets a row — installed
-                 ✓ with version, missing ✗ with its concrete fix — so the
-                 user always sees the whole environment at a glance. -->
+            <!-- 2026-09-15 (Irene directive — check-system rewrite):
+                 - The single 「检查系统」button is the ONLY always-visible control.
+                 - The 5 dep rows (VC++ / Python / faster-whisper / Whisper server /
+                   zhconv) live below; each row shows ✓/✗ and gets an install/start
+                   button INLINE ONLY when the check returns ✗ for that row.
+                 - The two fallback buttons (「复制安装命令」/「下载安装脚本」) and
+                   the global hint about which step to do live inside a single
+                   collapsed details block that only opens when at least one
+                   required dep is ✗ after the check — keeps the happy path
+                   uncluttered and gives late-stage users a one-shot escape.
+                 - The dropdown "语音识别" change handler still triggers a check
+                 automatically (see options.js handleAsrProviderChange). -->
             <div class="whisper-check-section" id="whisperCheckSection">
               <p class="help" data-i18n="whisperCheckSectionHelp">
-                本地 Whisper 需要按顺序装好以下依赖。点击「检查系统」检测环境：每个依赖各占一行——装好的打
-                ✓（带版本），缺的标红并给出对应的安装办法。
+                本地 Whisper 需要 5 项依赖，每项各占一行。在「语音识别」下拉选 Whisper
+                或点「检查系统」会逐行检测：装好的打 ✓（带版本），缺的标 ✗ 并在该行右侧
+                给出对应的安装或启动按钮。
               </p>
               <div class="diagnostics-actions">
                 <button
@@ -338,39 +390,50 @@
                 >
                   检查系统
                 </button>
-                <button
-                  id="whisperCopyCmdBtn"
-                  class="secondary"
-                  type="button"
-                  hidden
-                  data-i18n="whisperCopyCmdBtn"
-                >
-                  复制安装命令
-                </button>
-                <button
-                  type="button"
-                  id="installDepsBtn"
-                  class="secondary"
-                  hidden
-                  title="下载一个自包含安装脚本：找 Python → pip 安装 faster-whisper + zhconv → 验证导入。装什么、装到哪个 Python 全写在脚本里，运行前可先查看内容"
-                  data-i18n-title="whisperSetupDownloadTitle"
-                  data-i18n="whisperSetupDownloadBtn"
-                >
-                  下载安装脚本
-                </button>
                 <span
                   id="whisperTestStatus"
                   role="status"
                   aria-live="polite"
                 ></span>
               </div>
-              <ul id="whisperCheckResults" class="diagnostics-list" hidden></ul>
+              <ul id="whisperCheckResults" class="diagnostics-list"></ul>
               <div
                 id="whisperReadyBar"
                 class="ready-bar"
                 role="status"
                 hidden
               ></div>
+              <!-- Fallback block: hidden by default, expanded by renderWhisperCheckResults
+                   when at least one required dep is missing. -->
+              <details
+                id="whisperFallbackBlock"
+                class="whisper-fallback"
+                hidden
+              >
+                <summary data-i18n="whisperFallbackSummary">
+                  还是不行？尝试一键修复
+                </summary>
+                <div class="diagnostics-actions">
+                  <button
+                    id="whisperCopyCmdBtn"
+                    class="secondary"
+                    type="button"
+                    data-i18n="whisperCopyCmdBtn"
+                  >
+                    复制安装命令
+                  </button>
+                  <button
+                    type="button"
+                    id="installDepsBtn"
+                    class="secondary"
+                    title="下载一个自包含安装脚本：找 Python → pip 安装 faster-whisper + zhconv → 验证导入。装什么、装到哪个 Python 全写在脚本里，运行前可先查看内容"
+                    data-i18n-title="whisperSetupDownloadTitle"
+                    data-i18n="whisperSetupDownloadBtn"
+                  >
+                    下载安装脚本
+                  </button>
+                </div>
+              </details>
             </div>
 
                         <label data-i18n="whisperUrlLabel">Whisper server URL</label>
@@ -434,11 +497,12 @@
               type="text"
               autocomplete="off"
               spellcheck="false"
-              placeholder="C:/Users/you/videoprocess/subtitles"
+              placeholder="(留空 = 系统下载目录下的 BiliSubs/ 子目录)"
             />
             <p class="help" data-i18n="subtitlesDirHelp">
               Whisper 转写 + AI 校正后的字幕会保存到这里（按 BV 号缓存）。
               下次再打开同一视频会直接读缓存，不再跑 Whisper。
+              留空 = 自动使用系统下载目录下的 <code>BiliSubs/</code> 子目录（首次写入时自动创建）。
             </p>
 
             <!-- 2026-09-02: notifyOnSummary + notifyOnAnalysis are bound
@@ -491,19 +555,10 @@
         <span id="dataStatus" role="status" aria-live="polite"></span>
       </section>
 
-      <section class="card">
-        <h2 data-i18n="diagnosticsTitle">诊断</h2>
-        <p class="help" data-i18n="diagnosticsHelp">
-          一键检查关键依赖是否就位。不用反复看 README 找命令。
-        </p>
-        <div class="diagnostics-actions">
-          <button type="button" id="runDiagnosticsBtn" class="secondary" data-i18n="diagnosticsRunBtn">
-            运行诊断
-          </button>
-          <span id="diagnosticsStatus" role="status" aria-live="polite"></span>
-        </div>
-        <ul id="diagnosticsResults" class="diagnostics-list" hidden></ul>
-      </section>
+      <!-- 2026-09-15 (Irene directive): the standalone "诊断" card was
+           removed — version / storage / Whisper-server status is already
+           visible in the Whisper setup card above (and the Whisper
+           server check is one click away from there). -->
 
       <footer data-i18n-html="footer">
         Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the
@@ -574,6 +629,64 @@
             data-i18n="disableAiCancelBtn"
           >
             取消
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2026-09-16 (Irene directive): when the user clicks the
+         Whisper-server row's "启动 Whisper server" button while the
+         server is offline, background.js opens this modal in the
+         options page with ?batModal=1&batPath=<abs-path>. The modal
+         shows the absolute path of start_whisper_server.bat, lets
+         the user copy it, and (best-effort) opens the extension's
+         install folder in the OS file manager so the user can double-
+         click the bat. The user kept reporting "I can't find the
+         bat" because the previous fallback copy just said "double-click
+         it in the extension folder" without naming the folder. -->
+    <div
+      class="modal-overlay is-hidden"
+      id="batModal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="batModalTitle"
+    >
+      <div class="modal-card">
+        <h3 id="batModalTitle" data-i18n="batModalTitle">
+          启动 Whisper server
+        </h3>
+        <p data-i18n="batModalIntro">
+          你的电脑还没启动 Whisper server。先双击下面这个
+          <code>start_whisper_server.bat</code>，保持黑窗口开着，再回到这里点「检查系统」。
+        </p>
+        <p class="help">
+          <strong data-i18n="batModalPathLabel">bat 文件绝对路径：</strong>
+          <code id="batModalPath"></code>
+        </p>
+        <div class="modal-actions">
+          <button
+            type="button"
+            class="primary"
+            id="batModalCopyBtn"
+            data-i18n="batModalCopyBtn"
+          >
+            复制路径
+          </button>
+          <button
+            type="button"
+            class="secondary"
+            id="batModalOpenFolderBtn"
+            data-i18n="batModalOpenFolderBtn"
+          >
+            打开所在文件夹
+          </button>
+          <button
+            type="button"
+            class="secondary"
+            id="batModalCloseBtn"
+            data-i18n="batModalCloseBtn"
+          >
+            关闭
           </button>
         </div>
       </div>

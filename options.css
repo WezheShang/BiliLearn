@@ -576,6 +576,31 @@ footer {
   font-size: 12px;
 }
 
+/* 2026-09-13 (Irene directive): every dependency row carries its own
+   action button. Keep it on the right edge of the row, small enough
+   not to dominate the status text, and matching the .secondary button
+   look (white bg, light border, pink hover per DESIGN.md §5.1). */
+.diagnostics-action-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 4px 12px !important;
+  font-size: 12px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.diagnostics-action-btn:hover {
+  border-color: var(--accent);
+}
+.diagnostics-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ------------------------------------------------------------
    Whisper check section (2026-08-30 transparency rework): visible
    steps + read-only check button. Reuses .diagnostics-list rows for

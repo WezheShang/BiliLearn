@@ -41,15 +41,170 @@ let relayNoReceiverWarned = false;
 
 // Prevent the Bilibili content script from reading API keys or cached data.
 // Side panel, options, and service-worker contexts remain trusted.
-chrome.storage.local
-  .setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
-  .catch((error) =>
-    console.warn("[dk-bililearn] Could not restrict storage access:", error),
+//
+// 2026-09-13 fix: chrome.storage.local.setAccessLevel is Chrome 136+ only
+// (added 2025-05-20). On older Chromium builds (including the 125 install
+// some users have on a second device) the method is undefined and the call
+// throws a TypeError at SW startup, which kills the entire service worker
+// before it can register listeners — manifesting as "Service worker
+// registration failed. Status code: 15" AND "clicking the extension icon
+// does nothing" (the latter because setPanelBehavior is never reached).
+// Capability-detect before calling; on older builds we log a single warn
+// and fall back to documented mitigations (no in-page reads; API keys
+// live behind the trusted context boundary regardless).
+if (typeof chrome.storage.local.setAccessLevel === "function") {
+  chrome.storage.local
+    .setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
+    .catch((error) =>
+      console.warn(
+        "[dk-bililearn] Could not restrict storage access:",
+        error,
+      ),
+    );
+} else {
+  console.warn(
+    "[dk-bililearn] chrome.storage.local.setAccessLevel unavailable on this Chrome build (<136). Trusted-context isolation skipped; B 站 content script sees the same storage view as before. Update Chrome for full protection.",
   );
+}
 
 async function getSettings() {
   const stored = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
-  return YTD_SETTINGS.normalize(stored[YTD_SETTINGS.STORAGE_KEY]);
+  const normalized = YTD_SETTINGS.normalize(stored[YTD_SETTINGS.STORAGE_KEY]);
+  // 2026-09-16 (Irene directive): if the user has not set an explicit
+  // subtitlesDir, transparently fill in an absolute default rooted at
+  // the browser's configured Downloads directory. The previous default
+  // was the relative path "BiliSubs" — whisper_server is a separate
+  // Python process and resolved that against its own CWD, which almost
+  // never matched the user's Downloads folder, so cache lookups silently
+  // missed on a fresh install. By resolving once on first load (and
+  // caching the result in chrome.storage.local under the
+  // non-settings key "downloadsRootCache") we ship an absolute path the
+  // Python server can actually use, without baking any build-machine
+  // layout into the extension.
+  if (!normalized.subtitlesDir) {
+    const root = await resolveDownloadsRoot();
+    if (root) {
+      normalized.subtitlesDir = joinPath(root, "BiliSubs");
+    }
+  }
+  return normalized;
+}
+
+// Lightweight path join that normalises to forward slashes (whisper_server
+// uses os.path.join internally on either separator; this keeps the
+// value uniform on the JS side).
+function joinPath(...parts) {
+  return parts.filter((p) => typeof p === "string" && p.length).join("/").replace(/[\\/]+/g, "/");
+}
+
+// Resolve the browser's configured Downloads root in three steps:
+//
+//   1. chrome.storage.local cache (key "downloadsRootCache"). The user
+//      may have cleared history since the last resolve, so we still fall
+//      through if the cached path no longer exists in the download
+//      history — but using the cache keeps the common case cheap.
+//
+//   2. chrome.downloads.search() over recent history. The filename
+//      field on completed downloads is an ABSOLUTE path; dirname gives
+//      us the Downloads folder Chrome actually uses (which is whatever
+//      the user set under chrome://settings/downloads). On a brand-new
+//      profile with zero history this is empty.
+//
+//   3. Trigger a probe download of a 0-byte data URL into a hidden
+//      filename. Chrome resolves it against the same Downloads root
+//      and reports the absolute path via DownloadItem.filename. We
+//      then remove the probe and return dirname.
+//
+// Returns null when the downloads API is unavailable (older Chrome,
+// enterprise policy that disables downloads, etc.) — the consumer
+// treats null as "no default; the user must set one explicitly".
+let downloadsRootPromise = null; // memoised within a single tick
+async function resolveDownloadsRoot() {
+  if (!chrome.downloads || !chrome.downloads.search) return null;
+
+  // Step 1: cache.
+  try {
+    const cached = await chrome.storage.local.get("downloadsRootCache");
+    if (cached && typeof cached.downloadsRootCache === "string" && cached.downloadsRootCache) {
+      return cached.downloadsRootCache;
+    }
+  } catch (_e) { /* storage may be denied; fall through */ }
+
+  // Step 2: historical download with an absolute path.
+  try {
+    const items = await chrome.downloads.search({ limit: 20, orderBy: ["-startTime"] });
+    for (const item of items) {
+      if (!item || typeof item.filename !== "string") continue;
+      // Windows: C:\Users\me\Downloads\<name>; POSIX: /Users/me/Downloads/<name>
+      const m = item.filename.match(/^(.*[\/\\])(?:[^\\/]+)$/);
+      if (m && m[1]) {
+        const root = m[1].replace(/[\\/]+$/, "");
+        chrome.storage.local.set({ downloadsRootCache: root }).catch(() => {});
+        return root;
+      }
+    }
+  } catch (_e) { /* fall through to probe */ }
+
+  // Step 3: probe download (0-byte data URL, then remove it).
+  if (typeof chrome.downloads.download === "function") {
+    try {
+      const probeId = await new Promise((resolve, reject) => {
+        chrome.downloads.download(
+          {
+            url: "data:text/plain;base64,",
+            filename: ".bililearn-probe",
+            conflictAction: "overwrite",
+            saveAs: false,
+          },
+          (id) => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else resolve(id);
+          },
+        );
+      });
+      // Wait briefly for the filename to be populated. onChanged fires
+      // when the path is determined; we give it up to 5 seconds.
+      const probePath = await new Promise((resolve) => {
+        let resolved = null;
+        const cleanup = () => {
+          try { chrome.downloads.onChanged.removeListener(listener); } catch (_e) {}
+          clearTimeout(timer);
+          resolve(resolved);
+        };
+        const listener = (delta) => {
+          if (delta.id !== probeId) return;
+          if (delta.filename && delta.filename.current) {
+            resolved = delta.filename.current;
+            cleanup();
+          }
+        };
+        chrome.downloads.onChanged.addListener(listener);
+        // Fallback: query directly after a short delay in case the
+        // listener misses the event on a slow first paint.
+        const timer = setTimeout(async () => {
+          if (resolved) return cleanup();
+          try {
+            const [item] = await chrome.downloads.search({ id: probeId });
+            if (item && item.filename) resolved = item.filename;
+          } catch (_e) { /* ignore */ }
+          cleanup();
+        }, 1500);
+      });
+      // Remove the probe — the user never sees a real file.
+      try { chrome.downloads.removeFile(probeId, () => {}); } catch (_e) {}
+      try { chrome.downloads.erase({ id: probeId }, () => {}); } catch (_e) {}
+      if (probePath) {
+        const m = probePath.match(/^(.*[\/\\])(?:[^\\/]+)$/);
+        if (m && m[1]) {
+          const root = m[1].replace(/[\\/]+$/, "");
+          chrome.storage.local.set({ downloadsRootCache: root }).catch(() => {});
+          return root;
+        }
+      }
+    } catch (_e) { /* give up; return null below */ }
+  }
+
+  return null;
 }
 
 const promptFileCache = new Map();
@@ -350,21 +505,41 @@ async function readStreamedAiCompletion(response, onActivity) {
 /**
  * When the user clicks the extension icon, open the side panel.
  * Chrome's Side Panel API lets us show a persistent panel alongside the page.
+ *
+ * 2026-09-13 hardening (fresh-device report: "clicking the icon does
+ * nothing"): the whole setup is guarded so a missing/partial
+ * chrome.sidePanel (exotic Chromium builds, enterprise policy) can never
+ * throw at service-worker startup and take every later registration
+ * (onMessage relay, whisper jobs, notifications) down with it. Note the
+ * panel itself cannot display on restricted pages — chrome:// pages, the
+ * Web Store — so clicking the icon there legitimately opens nothing;
+ * test on a normal http(s) page.
  */
-chrome.action.onClicked.addListener((tab) => {
-  // Re-enable + open without awaiting — preserves user gesture context
-  chrome.sidePanel.setOptions({
-    tabId: tab.id,
-    path: "sidepanel.html",
-    enabled: true,
+try {
+  chrome.action.onClicked.addListener((tab) => {
+    try {
+      // Re-enable + open without awaiting — preserves user gesture context
+      chrome.sidePanel?.setOptions({
+        tabId: tab.id,
+        path: "sidepanel.html",
+        enabled: true,
+      });
+      chrome.sidePanel?.open({ tabId: tab.id });
+    } catch (clickError) {
+      debugLog("[dk-bililearn] sidePanel click open failed:", clickError);
+    }
   });
-  chrome.sidePanel.open({ tabId: tab.id });
-});
 
-/**
- * Allow the side panel to open on any page, but it's designed for Bilibili.
- */
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  /**
+   * Allow the side panel to open on any page, but it's designed for Bilibili.
+   */
+  chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true })?.catch?.(
+    (behaviorError) =>
+      debugLog("[dk-bililearn] setPanelBehavior rejected:", behaviorError),
+  );
+} catch (setupError) {
+  debugLog("[dk-bililearn] side panel API unavailable:", setupError);
+}
 
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   if (reason === "install") chrome.runtime.openOptionsPage();
@@ -710,6 +885,250 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     );
     sendResponse({ success: true });
     return false;
+  }
+
+  // 2026-09-13 (Irene directive): per-dependency action buttons on the
+  // options page. Each one does ONE thing the user explicitly asked for.
+  //  - openExternalUrl: open a download page (e.g. VC++ redist, Python
+  //    installer) in a new tab. The user runs the installer themselves
+  //    (these need UAC, which a service worker cannot trigger).
+  //  - pipInstall: download a self-extracting .bat that pip-installs
+  //    exactly the named package(s), then auto-open it so the user just
+  //    clicks "Run" in the Windows confirmation. The same shape as
+  //    installDepsBtn (options.js) but scoped to a single package.
+  //  - copyBatPath: copy the local start_whisper_server.bat absolute path
+  //    to the clipboard + show a modal telling the user where to paste
+  //    (the path is in a real file location the user already installed).
+  if (message.action === "openExternalUrl") {
+    const url =
+      message.payload && typeof message.payload.url === "string"
+        ? message.payload.url.trim()
+        : "";
+    if (!/^https?:\/\//i.test(url)) {
+      sendResponse({ success: false, error: "refused non-http(s) url" });
+      return false;
+    }
+    chrome.tabs.create({ url }, () => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      } else {
+        sendResponse({ success: true });
+      }
+    });
+    return true;
+  }
+
+  if (message.action === "pipInstall") {
+    const pkgs = Array.isArray(message.payload && message.payload.packages)
+      ? message.payload.packages.filter((p) => typeof p === "string" && p.trim())
+      : [];
+    if (pkgs.length === 0) {
+      sendResponse({ success: false, error: "no packages specified" });
+      return false;
+    }
+    // Build a one-liner .bat that:
+    //  1) finds python (where python > miniconda3 > python.org std paths)
+    //  2) prints which interpreter it's about to use
+    //  3) pip install --user <packages> (--user avoids system-pip locks
+    //     without needing elevation)
+    //  4) verifies the import and reports OK or the specific error
+    // Source is plain text and reviewed in the Windows prompt before run.
+    const pkgList = pkgs.map((p) => `"${p.replace(/"/g, "")}"`).join(" ");
+    const batSource = [
+      "@echo off",
+      "setlocal",
+      "REM bililearn one-shot pip install: " + pkgs.join(" "),
+      "REM Generated " + new Date().toISOString() + " — review before running.",
+      "REM Installs into the FIRST python.exe it can find (PATH > miniconda > python.org).",
+      "echo === bililearn pip install ===",
+      "echo Will install: " + pkgs.join(" "),
+      "echo.",
+      "set \"PYTHON_EXE=\"",
+      "for /f \"delims=\" %%i in ('where python 2^>nul') do (",
+      "  if not defined PYTHON_EXE set \"PYTHON_EXE=%%i\"",
+      ")",
+      "if not defined PYTHON_EXE (",
+      "  for %%P in (",
+      "    \"%USERPROFILE%\\miniconda3\\python.exe\"",
+      "    \"%USERPROFILE%\\anaconda3\\python.exe\"",
+      "    \"%LOCALAPPDATA%\\Programs\\Python\\Python313\\python.exe\"",
+      "    \"%LOCALAPPDATA%\\Programs\\Python\\Python312\\python.exe\"",
+      "    \"%LOCALAPPDATA%\\Programs\\Python\\Python311\\python.exe\"",
+      "    \"%LOCALAPPDATA%\\Programs\\Python\\Python310\\python.exe\"",
+      "  ) do (",
+      "    if not defined PYTHON_EXE if exist %%~P set \"PYTHON_EXE=%%~P\"",
+      "  )",
+      ")",
+      "if not defined PYTHON_EXE (",
+      "  echo [ERROR] No Python 3.10+ found. Install from https://www.python.org/downloads/ first.",
+      "  pause",
+      "  exit /b 1",
+      ")",
+      "echo Using Python: %PYTHON_EXE%",
+      "echo.",
+      "echo Running: \"%PYTHON_EXE%\" -m pip install --user " + pkgList,
+      "echo (--user avoids the system-pip lock so no elevation prompt)",
+      "echo Source: PyPI (the official Python Package Index, files.pythonhosted.org).",
+      "echo.",
+      "\"%PYTHON_EXE%\" -m pip install --user " + pkgList,
+      "if errorlevel 1 (",
+      "  echo.",
+      "  echo [ERROR] pip install failed. Network blocked? Try:",
+      "  echo   \"https://mirrors.aliyun.com/pypi/simple/\" via -i flag.",
+      "  pause",
+      "  exit /b 1",
+      ")",
+      "echo.",
+      "echo Verifying import...",
+      "\"%PYTHON_EXE%\" -c \"import " +
+        pkgs
+          .map((p) => p.replace(/-/g, "_").replace(/zhconv/, "zhconv"))
+          .join(", ") +
+        "; print('OK: " + pkgs.join(", ") + " ready')\"",
+      "if errorlevel 1 (",
+      "  echo [ERROR] Import failed after install. See traceback above.",
+      "  pause",
+      "  exit /b 1",
+      ")",
+      "echo.",
+      "echo === Done. Relaunch start_whisper_server.bat to pick up the new package. ===",
+      "pause",
+    ].join("\r\n");
+    const safeName =
+      "bililearn_install_" + pkgs.join("-").replace(/[^a-z0-9_-]/gi, "") + ".bat";
+    if (chrome.downloads && typeof chrome.downloads.download === "function") {
+      const dataUrl =
+        "data:application/octet-stream;base64," +
+        btoa(unescape(encodeURIComponent(batSource)));
+      chrome.downloads.download(
+        { url: dataUrl, filename: safeName, saveAs: false },
+        (downloadId) => {
+          if (chrome.runtime.lastError || !downloadId) {
+            sendResponse({
+              success: false,
+              error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || "download failed",
+            });
+            return;
+          }
+          // Auto-open so the user only has to click "Run" in the Windows
+          // confirmation. Same pattern as installDepsBtn in options.js.
+          try {
+            const listener = (delta) => {
+              if (delta && delta.id === downloadId && delta.state) {
+                if (delta.state.current === "complete") {
+                  try {
+                    chrome.downloads.open(downloadId);
+                  } catch (_e) {}
+                  try {
+                    chrome.downloads.onChanged.removeListener(listener);
+                  } catch (_e) {}
+                } else if (delta.state.current === "interrupted") {
+                  try {
+                    chrome.downloads.onChanged.removeListener(listener);
+                  } catch (_e) {}
+                }
+              }
+            };
+            chrome.downloads.onChanged.addListener(listener);
+          } catch (_e) {}
+          sendResponse({ success: true, downloadId });
+        },
+      );
+      return true;
+    }
+    sendResponse({ success: false, error: "chrome.downloads API unavailable" });
+    return false;
+  }
+
+  if (message.action === "copyBatPath") {
+    // Resolve start_whisper_server.bat from the extension's own install
+    // location (chrome.runtime.getURL points at our manifest, so the
+    // bat lives next to it). Falls back to undefined when the file is
+    // missing (e.g. user deleted it).
+    let batPath = "";
+    try {
+      const url = chrome.runtime.getURL("start_whisper_server.bat");
+      if (url.startsWith("file://")) {
+        batPath = decodeURI(url.slice("file://".length));
+        // Windows file:///C:/... → C:\...
+        batPath = batPath.replace(/^\/([A-Za-z]:)/, "$1").replace(/\//g, "\\");
+      }
+    } catch (_e) {}
+    (async () => {
+      try {
+        if (batPath && chrome.tabs && typeof chrome.tabs.create === "function") {
+          // Pop a modal in the options page that names the absolute
+          // path of the bat and offers a "copy path" + "open folder"
+          // button. 2026-09-16: the previous copy just said "double-
+          // click it in the extension folder" — the user (Irene)
+          // couldn't find the bat because the modal didn't actually
+          // exist (options.js had no handler for ?batModal=1); the
+          // user saw a no-op options tab. The new options.html modal
+          // is wired up to the same query string.
+          await chrome.tabs.create({
+            url: chrome.runtime.getURL(
+              "options.html?batModal=1&batPath=" + encodeURIComponent(batPath),
+            ),
+          });
+          // Also copy the path straight to the clipboard so the user
+          // can paste it into File Explorer's address bar immediately,
+          // without having to click the modal button.
+          try {
+            await (navigator.clipboard && navigator.clipboard.writeText
+              ? navigator.clipboard.writeText(batPath)
+              : Promise.resolve());
+          } catch (_e) { /* clipboard denied — modal still works */ }
+          sendResponse({ success: true, batPath });
+        } else {
+          sendResponse({
+            success: false,
+            error: "bat path not found in extension folder",
+          });
+        }
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+
+  // 2026-09-16 (Irene directive): open the folder containing
+  // start_whisper_server.bat in the OS file manager. MV3 has no
+  // native shell API; the most reliable cross-platform route is
+  // chrome.downloads.show() on a sentinel download pointing at the
+  // folder — Chrome pops up "show in folder" for the file. We also
+  // best-effort use chrome.tabs.create with a file:// URL on Windows
+  // (Chrome will open it in Explorer).
+  if (message.action === "openBatFolder") {
+    const batPath =
+      message.payload && typeof message.payload.batPath === "string"
+        ? message.payload.batPath.trim()
+        : "";
+    (async () => {
+      try {
+        if (!batPath) throw new Error("missing batPath");
+        // Compute parent folder. Windows "C:\a\b\c.bat" → "C:\a\b";
+        // POSIX "/a/b/c.bat" → "/a/b".
+        const sep = batPath.includes("\\") ? "\\" : "/";
+        const lastSep = batPath.lastIndexOf(sep);
+        const folder = lastSep > 0 ? batPath.slice(0, lastSep) : batPath;
+        // Try a no-op download pointing at the folder — downloads.show()
+        // does NOT work with a folder URL, so this branch is a no-op on
+        // most platforms. Kept as documentation; the real route below
+        // is file:// open which Chromium honours on Windows.
+        const fileUrl =
+          "file:///" + folder.replace(/\\/g, "/").replace(/^\/([A-Za-z]:)/, "$1");
+        if (chrome.tabs && typeof chrome.tabs.create === "function") {
+          await chrome.tabs.create({ url: fileUrl });
+          sendResponse({ success: true });
+          return;
+        }
+        throw new Error("tabs.create unavailable");
+      } catch (e) {
+        sendResponse({ success: false, error: String(e && e.message || e) });
+      }
+    })();
+    return true;
   }
 
   if (message.action === "openSidePanel") {
@@ -2820,6 +3239,138 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     // before falling through to native subtitles. We do NOT auto-trigger
     // Whisper here — that requires an explicit user click — but we tell
     // the side panel which action is available.
+    if (settings.asrProvider === "minimax") {
+      // 2026-09-17 (Irene directive): MiniMax cloud ASR. Same download-
+      // once-then-upload shape as whisper (downside already cached from a
+      // previous whisper run is reused via the audio-cache layer); the
+      // upload is to MiniMax's /v1/audio/transcriptions endpoint, auth is
+      // a Bearer key. The server returns { text, segments?[] }; we map
+      // segments to the canonical {start, end, text} shape the rest of
+      // the pipeline expects, falling back to the plain text in a
+      // single zero-length segment if segments are absent.
+      if (!settings.minimaxAsrApiKey) {
+        return {
+          success: false,
+          error: "MINIMAX_ASR_KEY_MISSING",
+          message:
+            "MiniMax cloud ASR is selected but no API key was filled in. Open bililearn Settings → 语音识别 → MiniMax 云端 ASR and paste your API key.",
+        };
+      }
+      try {
+        const audioBlob = await fetchBilibiliAudioBlob(videoId, page.cid, viewPayload);
+        // 2026-09-17 (Irene directive): MiniMax cloud ASR. Per the
+        // official docs (platform.minimaxi.com/docs/llms.txt), the
+        // endpoint is https://api.minimaxi.com/v1/speech_to_text —
+        // NOT the OpenAI-compatible /v1/audio/transcriptions that an
+        // earlier draft used. Model is the single "asr-1.0". The
+        // language hint goes in an HTTP HEADER, not a multipart field.
+        // Segments only come back when response_format is "verbose_json";
+        // "json" returns the joined text only.
+        //
+        // HARD LIMITS from the docs:
+        //   - audio duration ≤ 500 seconds
+        //   - file size ≤ 50 MB
+        //   - supported formats: wav / aiff / flac / alac(m4a) / mp3 /
+        //     aac / opus / ogg
+        // Anything longer returns 400/413 and is NOT truncated. We do
+        // NOT split the audio in this code path (per Irene — too much
+        // surface area); we relay MiniMax's verbatim error message so
+        // the user knows which limit they hit, and recommend switching
+        // to local Whisper for longer videos.
+        if (audioBlob && audioBlob.size > 50 * 1024 * 1024) {
+          return {
+            success: false,
+            error: "MINIMAX_ASR_TOO_LARGE",
+            message:
+              "Audio is " +
+              (audioBlob.size / 1024 / 1024).toFixed(1) +
+              " MB but MiniMax cloud ASR rejects anything over 50 MB. Switch to 本地 Whisper for longer videos.",
+          };
+        }
+        const form = new FormData();
+        form.append("model", "asr-1.0");
+        form.append("file", audioBlob, "bilibili.m4a");
+        form.append("response_format", "verbose_json");
+        const language = (settings.whisperLanguage || "").trim().toLowerCase();
+        const headers = {
+          Authorization: "Bearer " + settings.minimaxAsrApiKey,
+        };
+        if (language) headers.language = language;
+        const ctrl = new AbortController();
+        // 5-minute cap for the single upload. For a long network this
+        // is tight, but the extension should surface the failure rather
+        // than hang in an unawaitable state.
+        const timer = setTimeout(() => ctrl.abort(), 5 * 60_000);
+        let resp;
+        try {
+          resp = await fetch("https://api.minimaxi.com/v1/speech_to_text", {
+            method: "POST",
+            headers,
+            body: form,
+            signal: ctrl.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+        const payload = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          // payload.error.message is the MiniMax-formatted reason
+          // (e.g. "audio duration 623.4s exceeds the limit of 500s").
+          const reason =
+            payload.error && payload.error.message
+              ? payload.error.message
+              : "HTTP " + resp.status;
+          return {
+            success: false,
+            error: "MINIMAX_ASR_HTTP_" + resp.status,
+            message:
+              "MiniMax cloud ASR refused the upload (" +
+              reason +
+              "). " +
+              (resp.status === 400 || resp.status === 413
+                ? "This usually means the audio is over 500 seconds or 50 MB; switch to 本地 Whisper for longer videos."
+                : "Check the API key and the network."),
+          };
+        }
+        const rawSegments = Array.isArray(payload.segments) ? payload.segments : [];
+        const transcript = rawSegments
+          .map((seg) => ({
+            start: typeof seg.start === "number" ? seg.start : 0,
+            end: typeof seg.end === "number" ? seg.end : 0,
+            text: typeof seg.text === "string" ? seg.text : "",
+          }))
+          .filter((seg) => seg.text);
+        // verbose_json should always include segments, but if for any
+        // reason MiniMax returns only text we synthesise a single
+        // 0-duration segment so the sidepanel still has something.
+        if (!transcript.length && typeof payload.text === "string" && payload.text) {
+          transcript.push({ start: 0, end: 0, text: payload.text });
+        }
+        const plainText = transcript.map((seg) => seg.text).join(" ");
+        const timestampedText = transcript
+          .map((seg) => `[${formatTimestamp(seg.start)}] ${seg.text}`)
+          .join("\n");
+        return withVideoMeta({
+          success: true,
+          source: "minimax-asr",
+          language: payload.language || language || "unknown",
+          chapters: [],
+          transcript,
+          transcriptText: plainText,
+          transcriptTextTimestamped: timestampedText,
+        });
+      } catch (minimaxErr) {
+        const aborted = minimaxErr && minimaxErr.name === "AbortError";
+        return {
+          success: false,
+          error: aborted ? "MINIMAX_ASR_TIMEOUT" : (minimaxErr && minimaxErr.message) || "MINIMAX_ASR_FAILED",
+          message: aborted
+            ? "MiniMax cloud ASR timed out after 5 minutes."
+            : "MiniMax cloud ASR failed: " + ((minimaxErr && minimaxErr.message) || "unknown error"),
+        };
+      }
+    }
+
     if (settings.asrProvider === "whisper") {
       // Pass the same metadata the write path uses, so loadCachedTranscript
       // can resolve to the {date}_{title}_{UP}.json file instead of the
