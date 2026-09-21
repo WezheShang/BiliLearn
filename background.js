@@ -548,7 +548,7 @@ try {
   debugLog("[dk-bililearn] side panel API unavailable:", setupError);
 }
 
-chrome.runtime.onInstalled.addListener(({ reason }) => {
+chrome.runtime?.onInstalled?.addListener(({ reason }) => {
   if (reason === "install") chrome.runtime.openOptionsPage();
 });
 
@@ -625,13 +625,13 @@ function updatePanelForTab(tabId, url) {
 }
 
 // A tab navigated to a new URL.
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (!changeInfo.url) return; // ignore title/favicon-only updates
   updatePanelForTab(tabId, changeInfo.url);
 });
 
 // The user switched to a different tab (or opened a new one).
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+chrome.tabs?.onActivated?.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
     updatePanelForTab(tabId, tab.url);
@@ -648,7 +648,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
  * Listen for messages from the side panel and content script.
  * This is like a switchboard — different "actions" trigger different handlers.
  */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
     handleFetchTranscript(message.videoId, message.videoUrl, message.pageNumber)
@@ -1691,7 +1691,7 @@ async function notifyAnalysisDoneIfSlow(info) {
   });
 }
 
-chrome.notifications.onClicked.addListener((notifId) => {
+chrome.notifications?.onClicked?.addListener((notifId) => {
   if (
     !notifId ||
     (!notifId.startsWith(WHISPER_DONE_NOTIF_PREFIX) &&
