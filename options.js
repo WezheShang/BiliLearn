@@ -279,6 +279,18 @@ const YTD_OPTIONS = (() => {
       whisperInstallPythonBtn: "Install Python",
       whisperInstallFasterWhisperBtn: "Install faster-whisper",
       whisperStartServerBtn: "Start Whisper server",
+      whisperAutostartLabel: "Auto-start at every boot",
+      // 2026-09-23 (Irene directive): two one-click paths the user can
+      // take instead of digging through chrome://extensions for the bat.
+      // Both launch through chrome.downloads.open() in the background;
+      // the autostart one needs admin (Windows UAC pop-up) once.
+      whisperStartServerOnceBtn: "Start Whisper server (this session)",
+      whisperInstallAutostartBtn: "Auto-start at every boot",
+      whisperUninstallAutostartBtn: "Remove auto-start",
+      whisperAutostartInstalledHint:
+        "Auto-start is on — the whisper server runs at every boot under SYSTEM.",
+      whisperAutostartNotInstalledHint:
+        "Pick \"Auto-start at every boot\" to skip this step after each reboot.",
       whisperInstallZhconvBtn: "Install zhconv",
       whisperZhconvOptionalHint: "Optional — only affects Traditional→Simplified conversion",
       whisperLimitedStatus: ({ cmd }) =>
@@ -570,6 +582,16 @@ const YTD_OPTIONS = (() => {
       whisperInstallPythonBtn: "安装 Python",
       whisperInstallFasterWhisperBtn: "安装 faster-whisper",
       whisperStartServerBtn: "启动 Whisper server",
+      whisperAutostartLabel: "开机自动启动",
+      // 2026-09-23 (Irene directive)：一键启动 + 一键开机自启，跟英文同
+      // 套语意。两个按钮都通过 chrome.downloads.open() 触发，自启那
+      // 个首次需要 admin（Windows UAC 弹窗）一次。
+      whisperStartServerOnceBtn: "启动 Whisper server（本会话）",
+      whisperInstallAutostartBtn: "开机自动启动",
+      whisperUninstallAutostartBtn: "取消开机自动启动",
+      whisperAutostartInstalledHint: "已开启开机自启 — 系统启动后自动跑 server（SYSTEM 上下文）。",
+      whisperAutostartNotInstalledHint:
+        "点「开机自动启动」以后每次重启都自动跑 server，不用手动再启。",
       whisperInstallZhconvBtn: "安装 zhconv",
       whisperZhconvOptionalHint: "可选 — 仅影响繁简转换",
       whisperLimitedStatus: ({ cmd }) =>
@@ -1668,9 +1690,13 @@ const YTD_OPTIONS = (() => {
           translate(currentLanguage, "whisperUntestedUntilServerUp"),
           { optional: true },
         );
-        // Row 5 — Whisper server. Red, with the BAT-start button. This
-        // is the ONLY one that needs the server itself to come up; the
-        // other 4 are independent of the server.
+        // Row 5 — Whisper server. Red, with two one-click start buttons:
+        // "this session" launches the silent vbs right now via
+        // chrome.downloads.open(); "auto-start at every boot" downloads
+        // a wrapper ps1 that the user runs once with admin (UAC prompt)
+        // to register a SYSTEM AtStartup task. No more chrome://extensions
+        // digging. The legacy "find the bat" path is still available
+        // via the modal copyBatPath handler — kept as a fallback.
         renderCheckItem(
           list,
           "Whisper server",
@@ -1678,12 +1704,92 @@ const YTD_OPTIONS = (() => {
           translate(currentLanguage, "whisperOfflineDetail", { batHint }),
           {
             action: {
-              label: translate(currentLanguage, "whisperStartServerBtn"),
-              messageAction: "copyBatPath",
+              label: translate(currentLanguage, "whisperStartServerOnceBtn"),
+              messageAction: "launchWhisperServerOnce",
               payload: {},
             },
           },
         );
+        // Auto-start row — sits below row 5 so the user sees it
+        // immediately. Reads the flag the install handler writes so the
+        // button flips between "install" and "uninstall" without a
+        // round-trip to schtasks (which MV3 can't do natively).
+        let flag = null;
+        try {
+          if (
+            chrome.storage &&
+            chrome.storage.local &&
+            typeof chrome.storage.local.get === "function"
+          ) {
+            flag = await new Promise((resolve) => {
+              try {
+                chrome.storage.local.get(
+                  ["bililearn_autostart_attempted"],
+                  (v) =>
+                    resolve(
+                      v && v.bililearn_autostart_attempted
+                        ? v.bililearn_autostart_attempted
+                        : null,
+                    ),
+                );
+              } catch (_e) {
+                resolve(null);
+              }
+              setTimeout(() => resolve(null), 500);
+            });
+          }
+        } catch (_e) {
+          flag = null;
+        }
+          renderCheckItem(
+            list,
+            translate(currentLanguage, "whisperAutostartLabel") ||
+              "开机自动启动",
+            flag ? true : null,
+            flag
+              ? translate(currentLanguage, "whisperAutostartInstalledHint")
+              : translate(currentLanguage, "whisperAutostartNotInstalledHint"),
+            flag
+              ? {
+                  action: {
+                    label: translate(
+                      currentLanguage,
+                      "whisperUninstallAutostartBtn",
+                    ),
+                    messageAction: "uninstallWhisperAutostart",
+                    payload: {},
+                  },
+                }
+              : {
+                  action: {
+                    label: translate(
+                      currentLanguage,
+                      "whisperInstallAutostartBtn",
+                    ),
+                    messageAction: "installWhisperAutostart",
+                    payload: {},
+                  },
+                },
+          );
+        } catch (_e) {
+          // Storage probe failed — surface a neutral row with install.
+          renderCheckItem(
+            list,
+            "开机自动启动",
+            null,
+            translate(currentLanguage, "whisperAutostartNotInstalledHint"),
+            {
+              action: {
+                label: translate(
+                  currentLanguage,
+                  "whisperInstallAutostartBtn",
+                ),
+                messageAction: "installWhisperAutostart",
+                payload: {},
+              },
+            },
+          );
+        }
         whisperTestStatus.textContent = translate(currentLanguage, "whisperOfflineStatus");
         // The fallback block would only show "copy install command"
         // helpers, but with the server down we can't compute a

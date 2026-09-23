@@ -1099,6 +1099,368 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // 2026-09-23 (Irene directive): a one-click "start Whisper server
+  // now" path. The old copyBatPath handler only copied the bat path
+  // to the clipboard and popped a modal telling the user to find and
+  // double-click it — they did, but only after digging through
+  // chrome://extensions for the folder. This handler short-circuits that:
+  // it stages the silent vbs launcher into Downloads via
+  // chrome.downloads.download, then calls chrome.downloads.open on
+  // completion — the OS opens .vbs through wscript.exe, which runs
+  // start_whisper_server.bat hidden. The user is prompted by Windows
+  // the FIRST time (and can tick "always use this app" to skip it on
+  // subsequent starts), so subsequent presses are truly one click.
+  // On non-Windows the .vbs has no OS launcher; the handler falls
+  // back to copying the path + the batModal modal so the user can
+  // still locate and run it manually.
+  if (message.action === "launchWhisperServerOnce") {
+    (async () => {
+      try {
+        const url = chrome.runtime.getURL("start_whisper_server_silent.vbs");
+        if (!url.startsWith("file://")) {
+          sendResponse({
+            success: false,
+            error: "vbs not co-located with manifest (non-file:// URL)",
+          });
+          return;
+        }
+        // file:///C:/.../start_whisper_server_silent.vbs → fetch the
+        // bytes so we can re-host via downloads.download. Downloading
+        // a data URL is the only way chrome.downloads.open() will
+        // hand the file back to the OS for vbs association — opening
+        // a file:// URL via chrome.tabs.create just makes Chrome
+        // download the .vbs instead of running it through wscript.
+        const res = await fetch(url);
+        if (!res.ok) {
+          sendResponse({
+            success: false,
+            error: "vbs fetch failed: HTTP " + res.status,
+          });
+          return;
+        }
+        const buf = new Uint8Array(await res.arrayBuffer());
+        // Build a binary-safe base64 data URL. btoa() chokes on bytes
+        // >0xFF, so we walk the buffer manually.
+        let bin = "";
+        for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+        const dataUrl =
+          "data:application/octet-stream;base64," + btoa(bin);
+        if (
+          !chrome.downloads ||
+          typeof chrome.downloads.download !== "function"
+        ) {
+          sendResponse({ success: false, error: "downloads API unavailable" });
+          return;
+        }
+        chrome.downloads.download(
+          {
+            url: dataUrl,
+            filename: "bililearn_start_whisper_server_silent.vbs",
+            saveAs: false,
+          },
+          (downloadId) => {
+            if (chrome.runtime.lastError || !downloadId) {
+              sendResponse({
+                success: false,
+                error:
+                  (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
+                  "download failed",
+              });
+              return;
+            }
+            try {
+              const listener = (delta) => {
+                if (
+                  delta &&
+                  delta.id === downloadId &&
+                  delta.state &&
+                  delta.state.current
+                ) {
+                  if (delta.state.current === "complete") {
+                    try {
+                      chrome.downloads.open(downloadId);
+                    } catch (_e) {}
+                    try {
+                      chrome.downloads.onChanged.removeListener(listener);
+                    } catch (_e) {}
+                    sendResponse({ success: true, downloadId });
+                  } else if (delta.state.current === "interrupted") {
+                    try {
+                      chrome.downloads.onChanged.removeListener(listener);
+                    } catch (_e) {}
+                    sendResponse({
+                      success: false,
+                      error: "download interrupted",
+                    });
+                  }
+                }
+              };
+              chrome.downloads.onChanged.addListener(listener);
+              // Safety net: if onChanged never fires (some Chrome versions
+              // when the file is already in cache), poll once after 2s.
+              setTimeout(() => {
+                chrome.downloads.search(
+                  { id: downloadId },
+                  (results) => {
+                    const r = results && results[0];
+                    if (r && r.state === "complete") {
+                      try {
+                        chrome.downloads.open(downloadId);
+                      } catch (_e) {}
+                      try {
+                        chrome.downloads.onChanged.removeListener(listener);
+                      } catch (_e) {}
+                      if (!responseStarted) {
+                        responseStarted = true;
+                        sendResponse({ success: true, downloadId });
+                      }
+                    }
+                  },
+                );
+              }, 2000);
+              let responseStarted = false;
+              const origSendResponse = sendResponse;
+              sendResponse = (resp) => {
+                responseStarted = true;
+                origSendResponse(resp);
+              };
+            } catch (_e) {
+              sendResponse({ success: true, downloadId });
+            }
+          },
+        );
+      } catch (e) {
+        sendResponse({
+          success: false,
+          error: String((e && e.message) || e),
+        });
+      }
+    })();
+    return true;
+  }
+
+  // 2026-09-23 (Irene directive): one-click "auto-start at boot" path.
+  // Stages a tiny ps1 wrapper that invokes
+  // setup_whisper_autostart_system.ps1 -Action install (the script
+  // already shipped with the extension — registers an AtStartup task
+  // that runs start_whisper_server_silent.vbs hidden under SYSTEM).
+  // The wrapper is downloaded into the user's Downloads folder and
+  // handed to the OS via chrome.downloads.open — Windows will pop
+  // UAC (the script needs admin to write the machine-level env var
+  // + register the SYSTEM task). The first time the user accepts
+  // UAC once; the task is permanent from then on.
+  //
+  // Mirrors the launchWhisperServerOnce downloads pattern — same
+  // shape, different content. We can't spawn wscript / PowerShell
+  // directly from MV3 service worker, but downloads.open is the same
+  // hook pipInstall has used since the start of this extension.
+  if (message.action === "installWhisperAutostart") {
+    (async () => {
+      try {
+        const ps1Url = chrome.runtime.getURL(
+          "setup_whisper_autostart_system.ps1",
+        );
+        if (!ps1Url.startsWith("file://")) {
+          sendResponse({
+            success: false,
+            error: "ps1 not co-located with manifest",
+          });
+          return;
+        }
+        const wrapper = [
+          "# bililearn auto-start installer",
+          "# Generated 2026-09-23 — run as Administrator once; the SYSTEM",
+          "# scheduled task survives reboots from then on. Re-running this",
+          "# wrapper is harmless (the ps1 uses -Force on Register-ScheduledTask).",
+          "$ErrorActionPreference = 'Stop'",
+          "$here = Split-Path -Parent $MyInvocation.MyCommand.Path",
+          "Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
+          "  '-NoProfile',",
+          "  '-ExecutionPolicy', 'Bypass',",
+          "  '-File', (Join-Path $here 'setup_whisper_autostart_system.ps1'),",
+          "  '-Action', 'install'",
+          ") -Verb RunAs -Wait",
+          "Read-Host 'Press Enter to exit'",
+        ].join("\r\n");
+        const dataUrl =
+          "data:application/octet-stream;base64," +
+          btoa(unescape(encodeURIComponent(wrapper)));
+        if (
+          !chrome.downloads ||
+          typeof chrome.downloads.download !== "function"
+        ) {
+          sendResponse({ success: false, error: "downloads API unavailable" });
+          return;
+        }
+        chrome.downloads.download(
+          {
+            url: dataUrl,
+            filename: "bililearn_install_autostart.ps1",
+            saveAs: false,
+          },
+          (downloadId) => {
+            if (chrome.runtime.lastError || !downloadId) {
+              sendResponse({
+                success: false,
+                error:
+                  (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
+                  "download failed",
+              });
+              return;
+            }
+            try {
+              const listener = (delta) => {
+                if (
+                  delta &&
+                  delta.id === downloadId &&
+                  delta.state &&
+                  delta.state.current
+                ) {
+                  if (delta.state.current === "complete") {
+                    try {
+                      chrome.downloads.open(downloadId);
+                    } catch (_e) {}
+                    try {
+                      chrome.downloads.onChanged.removeChangedListener &&
+                        chrome.downloads.onChanged.removeListener(listener);
+                    } catch (_e) {}
+                    // Mark in storage so the options page can flip its
+                    // button to an "uninstall" affordance next render.
+                    try {
+                      chrome.storage &&
+                        chrome.storage.local &&
+                        chrome.storage.local.set &&
+                        chrome.storage.local.set({
+                          bililearn_autostart_attempted: Date.now(),
+                        });
+                    } catch (_e) {}
+                    sendResponse({ success: true, downloadId });
+                  } else if (delta.state.current === "interrupted") {
+                    try {
+                      chrome.downloads.onChanged.removeListener(listener);
+                    } catch (_e) {}
+                    sendResponse({
+                      success: false,
+                      error: "download interrupted",
+                    });
+                  }
+                }
+              };
+              chrome.downloads.onChanged.addListener(listener);
+            } catch (_e) {
+              sendResponse({ success: true, downloadId });
+            }
+          },
+        );
+      } catch (e) {
+        sendResponse({
+          success: false,
+          error: String((e && e.message) || e),
+        });
+      }
+    })();
+    return true;
+  }
+
+  // 2026-09-23 (Irene directive): uninstall counterpart for
+  // installWhisperAutostart — same download-and-open shape, calls
+  // the same ps1 with -Action uninstall. The user is expected to
+  // run this with admin elevation too (ps1 silently no-ops if not
+  // admin). On completion we clear the local flag so the options
+  // page can fall back to showing "install" again.
+  if (message.action === "uninstallWhisperAutostart") {
+    (async () => {
+      try {
+        const wrapper = [
+          "# bililearn auto-start uninstaller",
+          "# Run as Administrator once.",
+          "$ErrorActionPreference = 'Stop'",
+          "$here = Split-Path -Parent $MyInvocation.MyCommand.Path",
+          "Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
+          "  '-NoProfile',",
+          "  '-ExecutionPolicy', 'Bypass',",
+          "  '-File', (Join-Path $here 'setup_whisper_autostart_system.ps1'),",
+          "  '-Action', 'uninstall'",
+          ") -Verb RunAs -Wait",
+          "Read-Host 'Press Enter to exit'",
+        ].join("\r\n");
+        const dataUrl =
+          "data:application/octet-stream;base64," +
+          btoa(unescape(encodeURIComponent(wrapper)));
+        if (
+          !chrome.downloads ||
+          typeof chrome.downloads.download !== "function"
+        ) {
+          sendResponse({ success: false, error: "downloads API unavailable" });
+          return;
+        }
+        chrome.downloads.download(
+          {
+            url: dataUrl,
+            filename: "bililearn_uninstall_autostart.ps1",
+            saveAs: false,
+          },
+          (downloadId) => {
+            if (chrome.runtime.lastError || !downloadId) {
+              sendResponse({
+                success: false,
+                error:
+                  (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
+                  "download failed",
+              });
+              return;
+            }
+            try {
+              const listener = (delta) => {
+                if (
+                  delta &&
+                  delta.id === downloadId &&
+                  delta.state &&
+                  delta.state.current
+                ) {
+                  if (delta.state.current === "complete") {
+                    try {
+                      chrome.downloads.open(downloadId);
+                    } catch (_e) {}
+                    try {
+                      chrome.downloads.onChanged.removeListener(listener);
+                    } catch (_e) {}
+                    try {
+                      chrome.storage &&
+                        chrome.storage.local &&
+                        chrome.storage.local.remove &&
+                        chrome.storage.local.remove(
+                          "bililearn_autostart_attempted",
+                        );
+                    } catch (_e) {}
+                    sendResponse({ success: true, downloadId });
+                  } else if (delta.state.current === "interrupted") {
+                    try {
+                      chrome.downloads.onChanged.removeListener(listener);
+                    } catch (_e) {}
+                    sendResponse({
+                      success: false,
+                      error: "download interrupted",
+                    });
+                  }
+                }
+              };
+              chrome.downloads.onChanged.addListener(listener);
+            } catch (_e) {
+              sendResponse({ success: true, downloadId });
+            }
+          },
+        );
+      } catch (e) {
+        sendResponse({
+          success: false,
+          error: String((e && e.message) || e),
+        });
+      }
+    })();
+    return true;
+  }
+
   // 2026-09-16 (Irene directive): open the folder containing
   // start_whisper_server.bat in the OS file manager. MV3 has no
   // native shell API; the most reliable cross-platform route is

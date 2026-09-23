@@ -65,17 +65,47 @@ function makeChromeShim(initialStorage = {}) {
     api: {
       storage: {
         local: {
-          get: (key) => {
-            if (typeof key === "string") return Promise.resolve({ [key]: localStore[key] });
-            return Promise.resolve({ ...localStore });
+          // 2026-09-23: options.js now uses the chrome.storage callback
+          // form for the autostart probe
+          // (chrome.storage.local.get([...], cb)). The shim previously
+          // returned only a Promise and ignored the callback — the
+          // options UI would sit on the row until the 1.5s safety
+          // timeout fired. Fire the callback synchronously when one is
+          // provided; keep the Promise return for legacy callers.
+          get: (key, cb) => {
+            const value =
+              typeof key === "string"
+                ? { [key]: localStore[key] }
+                : Array.isArray(key)
+                  ? key.reduce((acc, k) => {
+                      acc[k] = localStore[k];
+                      return acc;
+                    }, {})
+                  : { ...localStore };
+            if (typeof cb === "function") {
+              try {
+                cb(value);
+              } catch (_e) {}
+            }
+            return Promise.resolve(value);
           },
-          set: (obj) => {
+          set: (obj, cb) => {
             Object.assign(localStore, obj);
+            if (typeof cb === "function") {
+              try {
+                cb();
+              } catch (_e) {}
+            }
             return Promise.resolve();
           },
-          remove: (key) => {
-            if (Array.isArray(key)) key.forEach((k) => delete localStore[k]);
-            else delete localStore[key];
+          remove: (key, cb) => {
+            const arr = Array.isArray(key) ? key : [key];
+            arr.forEach((k) => delete localStore[k]);
+            if (typeof cb === "function") {
+              try {
+                cb();
+              } catch (_e) {}
+            }
             return Promise.resolve();
           },
         },
@@ -108,6 +138,31 @@ function makeChromeShim(initialStorage = {}) {
         onStartup: { addListener: () => {} },
         getURL: (p) => `chrome-extension://fake/${p}`,
         openOptionsPage: () => {},
+      },
+      // 2026-09-23: launchWhisperServerOnce / installWhisperAutostart /
+      // uninstallWhisperAutostart in background.js hit chrome.downloads
+      // for the data-URL round-trip + chrome.downloads.open handoff.
+      // The test never asserts on the download lifecycle (the row-level
+      // assertions stop at "after render"). Capture calls so a future
+      // test can assert which action was sent, but no-op the network.
+      downloads: {
+        download: (opts, cb) => {
+          if (typeof cb === "function") {
+            try {
+              cb(1);
+            } catch (_e) {}
+          }
+          return 1;
+        },
+        open: () => {},
+        onChanged: { addListener: () => {}, removeListener: () => {} },
+        search: (q, cb) => {
+          if (typeof cb === "function") {
+            try {
+              cb([{ id: (q && q.id) || 1, state: "complete" }]);
+            } catch (_e) {}
+          }
+        },
       },
       tabs: {
         query: () => Promise.resolve([{ id: 1, url: "https://www.bilibili.com/video/BV1test12345" }]),
