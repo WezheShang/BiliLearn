@@ -3265,14 +3265,15 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
       }
       try {
         const audioBlob = await fetchBilibiliAudioBlob(videoId, page.cid, viewPayload);
-        // 2026-09-17 (Irene directive): MiniMax cloud ASR. Per the
-        // official docs (platform.minimaxi.com/docs/llms.txt), the
-        // endpoint is https://api.minimaxi.com/v1/speech_to_text —
-        // NOT the OpenAI-compatible /v1/audio/transcriptions that an
-        // earlier draft used. Model is the single "asr-1.0". The
-        // language hint goes in an HTTP HEADER, not a multipart field.
-        // Segments only come back when response_format is "verbose_json";
-        // "json" returns the joined text only.
+        // 2026-09-17 (Irene directive, refined per official MiniMax docs):
+        // The MiniMax ASR endpoint for users in mainland China is
+        //   https://api.minimaxi.cn/v1/speech_to_text
+        // (the .cn host, NOT api.minimaxi.com — a confusingly similar
+        // hostname that resolves but always returns 404 for this path).
+        // Model is the single "asr-1.0". The language hint goes in an
+        // HTTP HEADER, not a multipart field. Segments only come back
+        // when response_format is "verbose_json"; "json" returns the
+        // joined text only.
         //
         // HARD LIMITS from the docs:
         //   - audio duration ≤ 500 seconds
@@ -3310,7 +3311,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         const timer = setTimeout(() => ctrl.abort(), 5 * 60_000);
         let resp;
         try {
-          resp = await fetch("https://api.minimaxi.com/v1/speech_to_text", {
+          resp = await fetch("https://api.minimaxi.cn/v1/speech_to_text", {
             method: "POST",
             headers,
             body: form,

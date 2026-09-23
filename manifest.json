@@ -23,6 +23,7 @@
     "https://*.bilivideo.com/*",
     "https://*.akamaized.net/*",
     "https://*.oss-cn-beijing.aliyuncs.com/*",
+    "https://api.minimaxi.cn/*",
     "https://api.minimaxi.com/*",
     "https://api.minimax.io/*",
     "https://api.deepseek.com/*",
