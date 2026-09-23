@@ -89,7 +89,7 @@ function expectType(label, classified, expectedType) {
 function testViewCodeNotLoggedIn() {
   console.log("\n[1/7] view.code === -101 → NOT_LOGGED_IN");
   const view = { code: -101, message: "未登录" };
-  const r = classifyBilibiliError({ viewPayload: view });
+  const r = classifyBilibiliError({ view: view });
   expectType("view.code=-101", r, "NOT_LOGGED_IN");
   assertEqual(r.source, "view.code", "source=view.code");
   assertTrue(
@@ -102,7 +102,7 @@ function testViewCodeNotLoggedIn() {
 function testViewCodePremiere() {
   console.log("\n[2/7] view.code === -104 → PREMIERE_OR_LIMITED");
   const view = { code: -104, message: "大会员" };
-  const r = classifyBilibiliError({ viewPayload: view });
+  const r = classifyBilibiliError({ view: view });
   expectType("view.code=-104", r, "PREMIERE_OR_LIMITED");
   assertEqual(r.source, "view.code", "source=view.code");
   assertTrue(
@@ -123,7 +123,7 @@ function testViewPaidFlag() {
       pages: [{ cid: 1, part: "1" }],
     },
   };
-  const r = classifyBilibiliError({ viewPayload: view });
+  const r = classifyBilibiliError({ view: view });
   expectType("view.is_upower_expert=1", r, "PAID_VIDEO");
   assertEqual(r.source, "view.paid_flag", "source=view.paid_flag");
   assertTrue(
@@ -132,14 +132,14 @@ function testViewPaidFlag() {
   );
   // 也覆盖 is_ugc_pay 和 is_cooperation
   const v2 = classifyBilibiliError({
-    viewPayload: {
+    view: {
       code: 0,
       data: { videos: [{ is_ugc_pay: 1 }] },
     },
   });
   expectType("is_ugc_pay=1", v2, "PAID_VIDEO");
   const v3 = classifyBilibiliError({
-    viewPayload: {
+    view: {
       code: 0,
       data: { videos: [{ is_cooperation: 1 }] },
     },
@@ -169,7 +169,7 @@ function testPlayurlNoAudioPaid() {
     code: 0,
     data: { dash: { audio: [], video: [{ id: 80 }] } },
   };
-  const r = classifyBilibiliError({ viewPayload: view, playurlPayload: playurl });
+  const r = classifyBilibiliError({ view: view, playurlPayload: playurl });
   expectType("audio=[] + paid", r, "PAID_VIDEO");
   assertTrue(
     r.source === "view.paid_flag" || r.source === "playurl.no_audio",
@@ -181,7 +181,7 @@ function testPlayurlNoAudioPaid() {
     data: { videos: [{ is_upower_expert: 0 }] },
   };
   const r2 = classifyBilibiliError({
-    viewPayload: view2,
+    view: view2,
     playurlPayload: playurl,
     rawMessage: "无法获取B站音轨地址。",
   });
@@ -205,7 +205,7 @@ function testPlayurlNoAudioFree() {
     data: { dash: { audio: [] } },
   };
   const r = classifyBilibiliError({
-    viewPayload: view,
+    view: view,
     playurlPayload: playurl,
     rawMessage: "无法获取B站音轨地址。",
   });
@@ -239,7 +239,7 @@ function testCdnConnectionClosed4x() {
   // 假装 4 次都失败，最后一次是 ERR_CONNECTION_CLOSED
   const lastErrorMessage = "TypeError: Failed to fetch (ERR_CONNECTION_CLOSED)";
   const r = classifyBilibiliError({
-    viewPayload: view,
+    view: view,
     playurlPayload: playurl,
     rawMessage: lastErrorMessage,
   });

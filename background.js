@@ -2014,7 +2014,7 @@ const BILIBILI_ERROR_TITLES = Object.freeze({
  * 把 view / playurl 的返回结果归到 4 类错误之一。
  *
  * @param {Object} args
- * @param {Object|undefined} args.viewPayload    x/web-interface/view 的 JSON
+ * @param {Object|undefined} args.view    x/web-interface/view 的 JSON
  * @param {Object|undefined} args.playurlPayload x/player/playurl 的 JSON
  * @param {string|undefined} args.rawMessage     下载音轨失败时的原始 message
  * @returns {{ type: string, title: string, userMessage: string, source: string }}
@@ -2028,13 +2028,13 @@ const BILIBILI_ERROR_TITLES = Object.freeze({
  *   - "default"          兜底
  */
 function classifyBilibiliError({
-  viewPayload,
+  view,
   playurlPayload,
   rawMessage,
 } = {}) {
   // 1. view 接口自己报错（未登录 / 视频不存在 / 大会员）
-  if (viewPayload && typeof viewPayload === "object") {
-    const code = Number(viewPayload.code);
+  if (view && typeof view === "object") {
+    const code = Number(view.code);
     if (Number.isFinite(code)) {
       if (code === -101 || code === -400) {
         return {
@@ -2057,8 +2057,8 @@ function classifyBilibiliError({
 
   // 2. view 返回了付费/充电视频标记
   const v0 =
-    viewPayload && viewPayload.data && Array.isArray(viewPayload.data.videos)
-      ? viewPayload.data.videos[0]
+    view && view.data && Array.isArray(view.data.videos)
+      ? view.data.videos[0]
       : null;
   if (v0) {
     const isPaid =
@@ -2133,7 +2133,7 @@ function bilibiliErrorToException(classified) {
   return err;
 }
 
-async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
+async function fetchBilibiliAudioBlob(videoId, cid, view) {
   const response = await fetch(
     `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(cid)}&fnval=16&qn=16`,
     { credentials: "include" },
@@ -2144,7 +2144,7 @@ async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
   // 内容但 dash.audio 为空。
   if (!response.ok || (typeof payload.code === "number" && payload.code !== 0)) {
     throw bilibiliErrorToException(
-      classifyBilibiliError({ viewPayload, playurlPayload: payload }),
+      classifyBilibiliError({ view, playurlPayload: payload }),
     );
   }
   const audioTracks = [...(payload.data?.dash?.audio || [])].sort(
@@ -2158,7 +2158,7 @@ async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
   const candidates = [audio?.baseUrl, audio?.base_url, ...(audio?.backupUrl || []), ...(audio?.backup_url || [])].filter(Boolean);
   if (!candidates.length) {
     throw bilibiliErrorToException(
-      classifyBilibiliError({ viewPayload, playurlPayload: payload, rawMessage: "无法获取B站音轨地址。" }),
+      classifyBilibiliError({ view, playurlPayload: payload, rawMessage: "无法获取B站音轨地址。" }),
     );
   }
 
@@ -2213,7 +2213,7 @@ async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
   // 所有候选 URL 都重试完了还失败，分类成网络/CDN 错误
   throw bilibiliErrorToException(
     classifyBilibiliError({
-      viewPayload,
+      view,
       playurlPayload: payload,
       rawMessage: lastError?.message || "未知错误",
     }),
@@ -2237,7 +2237,7 @@ async function fetchBilibiliAudioBlob(videoId, cid, viewPayload) {
  * @param {string} videoId - The Bilibili video ID (e.g., "dQw4w9WgXcQ")
  * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
  */
-async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
+async function transcribeWithLocalWhisper(videoId, cid, settings, view) {
   const url = (settings.whisperUrl || "").replace(/\/+$/, "");
   if (!url) {
     throw new Error("Local Whisper is selected as the ASR provider but whisperUrl is empty.");
@@ -2250,7 +2250,7 @@ async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
     "正在下载B站音轨",
     "转录在后台进行，可随意切换页面",
   );
-  const audioBlob = await fetchBilibiliAudioBlob(videoId, cid, viewPayload);
+  const audioBlob = await fetchBilibiliAudioBlob(videoId, cid, view);
   const contentType = audioBlob.type || "audio/mp4";
   // Stage 2 — about to call whisper server. Bridging the gap between
   // "download done" and "server started" so the UI doesn't appear stuck.
@@ -2266,10 +2266,10 @@ async function transcribeWithLocalWhisper(videoId, cid, settings, viewPayload) {
   // watchdog recovers the finished result from that cache instead of
   // losing it. Values are encodeURIComponent'd to stay header-safe
   // (latin-1) with CJK titles; the server unquotes them.
-  const metaTitle = encodeURIComponent(viewPayload?.data?.title || "");
-  const metaChannel = encodeURIComponent(viewPayload?.data?.owner?.name || "");
-  const metaPubDate = viewPayload?.data?.pubdate
-    ? new Date(viewPayload.data.pubdate * 1000).toISOString().split("T")[0]
+  const metaTitle = encodeURIComponent(view?.data?.title || "");
+  const metaChannel = encodeURIComponent(view?.data?.owner?.name || "");
+  const metaPubDate = view?.data?.pubdate
+    ? new Date(view.data.pubdate * 1000).toISOString().split("T")[0]
     : "";
   const headers = {
     "Content-Type": contentType,
@@ -2920,13 +2920,13 @@ async function runWhisperPipeline(videoId, videoUrl, requestedPageNumber, settin
     // view 接口自己报错（未登录 / 大会员 / 视频不存在）→ 归类后抛
     if (!viewResponse.ok || view.code !== 0 || !view.data) {
       throw bilibiliErrorToException(
-        classifyBilibiliError({ viewPayload: view, rawMessage: view.message || "无法读取 B 站视频信息。" }),
+        classifyBilibiliError({ view: view, rawMessage: view.message || "无法读取 B 站视频信息。" }),
       );
     }
     // 充电视频：view 返回成功但 videos[0] 带付费标记 → 提前拦截，避免
     // playurl 再走一次才在 audio 为空时发现。
     const v0Header = view.data.videos?.[0] || null;
-    const preCheck = classifyBilibiliError({ viewPayload: view });
+    const preCheck = classifyBilibiliError({ view: view });
     if (
       preCheck.type === BILIBILI_ERROR_TYPES.PAID_VIDEO ||
       preCheck.type === BILIBILI_ERROR_TYPES.PREMIERE_OR_LIMITED
@@ -3264,12 +3264,21 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         };
       }
       try {
-        const audioBlob = await fetchBilibiliAudioBlob(videoId, page.cid, viewPayload);
-        // 2026-09-17 (Irene directive, refined per official MiniMax docs):
-        // The MiniMax ASR endpoint for users in mainland China is
-        //   https://api.minimaxi.cn/v1/speech_to_text
-        // (the .cn host, NOT api.minimaxi.com — a confusingly similar
-        // hostname that resolves but always returns 404 for this path).
+        const audioBlob = await fetchBilibiliAudioBlob(videoId, page.cid, view);
+        // 2026-09-23 (regression fix on top of 6a45b8d): The previous
+        // commit switched the endpoint from api.minimaxi.com to
+        // api.minimaxi.cn because a curl GET returned 404 — that 404
+        // was actually because GET /speech_to_text is 404 on BOTH
+        // hosts (this endpoint only accepts POST). With POST the
+        // correct path returns 401 "login fail: Please carry the API
+        // secret key" (i.e. reachable, just no key). The api.minimaxi.cn
+        // host additionally has an EXPIRED TLS certificate as of
+        // 2026-09-23, which Chrome refuses outright and surfaces to
+        // background.js as a generic "Failed to fetch" — even though
+        // the same POST to api.minimaxi.com reaches the server and
+        // returns the expected 401. So api.minimaxi.com is the right
+        // endpoint; .cn is to be avoided until they renew.
+        //
         // Model is the single "asr-1.0". The language hint goes in an
         // HTTP HEADER, not a multipart field. Segments only come back
         // when response_format is "verbose_json"; "json" returns the
@@ -3311,7 +3320,7 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         const timer = setTimeout(() => ctrl.abort(), 5 * 60_000);
         let resp;
         try {
-          resp = await fetch("https://api.minimaxi.cn/v1/speech_to_text", {
+          resp = await fetch("https://api.minimaxi.com/v1/speech_to_text", {
             method: "POST",
             headers,
             body: form,
