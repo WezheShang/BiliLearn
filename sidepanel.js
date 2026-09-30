@@ -334,12 +334,19 @@ async function maybeResumeWhisperJob() {
   if (!job) return false;
   if (!job.videoId) return false; // malformed record, ignore
 
-  // Only resume if the active tab is a B站 page whose bvid matches the job.
-  // If the user is on a non-B站 tab, a different B站 video, or we can't
-  // tell what tab they're on, fall through to the normal flow — don't
-  // show another video's job state in someone else's sidebar.
+  // Only resume if the active tab is a B站/YouTube page whose video id
+  // matches the job. If the user is on another site, a different video,
+  // or we can't tell what tab they're on, fall through to the normal
+  // flow — don't show another video's job state in someone else's
+  // sidebar. 2026-09-30: readActiveBilibiliVideoId now returns the
+  // @p-suffixed cache-key form (YouTube support), while job.videoId is
+  // stored bare (the trigger message strips the suffix) — compare on
+  // the bare id or the match can never succeed.
   const frontVideoId = await readActiveBilibiliVideoId();
-  if (!frontVideoId || frontVideoId !== job.videoId) {
+  if (
+    !frontVideoId ||
+    String(frontVideoId).split("@p")[0] !== String(job.videoId).split("@p")[0]
+  ) {
     return false;
   }
 
@@ -387,11 +394,14 @@ async function readActiveBilibiliVideoId() {
     // 2026-09-12: panel-window scoped (see queryPanelActiveTab) — the old
     // lastFocusedWindow query misjudged "current view" whenever another
     // window held focus and skipped/attached the wrong whisper job.
+    // 2026-09-27: also recognises YouTube — anything extractVideoId
+    // can resolve goes through. Returns the @p-suffixed form so the
+    // caller's "videoId === currentVideoId" comparison stays aligned
+    // with the value `currentVideoId` itself holds.
     const tab = await queryPanelActiveTab();
     const url = tab && tab.url;
     if (!url) return "";
-    const match = url.match(/bilibili\.com\/video\/([A-Za-z0-9]+)/);
-    return match ? match[1] : "";
+    return extractVideoId(url) || "";
   } catch {
     return "";
   }
@@ -573,8 +583,20 @@ function panelIsShowingResults() {
  * stays open — closing it on tab switch was a friction point.
  */
 function handleFrontTabUrl(url) {
-  if (!/^https:\/\/www\.bilibili\.com\/video\//.test(url || "")) {
-    // Not a B站 video. Show the no-video state in the same sidebar —
+  // 2026-09-27: also accept YouTube watch / shorts / embed URLs.
+  // `extractVideoId` returns null for anything else (including B站
+  // list pages without a bvid, chrome:// pages, new-tab pages); those
+  // fall through to the no-video state below.
+  const isVideoUrl = (() => {
+    if (!url) return false;
+    try {
+      return extractVideoId(url) !== null;
+    } catch {
+      return false;
+    }
+  })();
+  if (!isVideoUrl) {
+    // Not a supported video. Show the no-video state in the same sidebar —
     // closing it on every tab switch felt jarring and forced the user
     // to click the extension icon again to bring it back.
     if (typeof checkCurrentTab === "function") {
@@ -741,16 +763,21 @@ async function checkCurrentTab() {
     // 2026-09-12: 「稍后再看」/收藏夹播放页（https://www.bilibili.com/list/
     // watchlater?oid=...&bvid=BV...）也是真实播放器 — 只要带 bvid 就放行，
     // 由 extractVideoId 从 query 里取视频号。
+    // 2026-09-27: also accept YouTube watch / shorts / embed URLs —
+    // extractVideoId now understands both platforms and returns null for
+    // anything else (including chrome:// pages).
     const isListPlaybackPage =
       /^https:\/\/www\.bilibili\.com\/list\//.test(url) &&
       /[?&]bvid=BV[A-Za-z0-9]{10}(&|$)/.test(url);
-    if (
-      !/^https:\/\/www\.bilibili\.com\/video\//.test(url) &&
-      !isListPlaybackPage
-    ) {
+    const isSupported =
+      /^https:\/\/www\.bilibili\.com\/video\//.test(url) ||
+      isListPlaybackPage ||
+      /^https?:\/\/(?:[^/]+\.)?youtube\.com\//.test(url) ||
+      /^https?:\/\/youtu\.be\//.test(url);
+    if (!isSupported) {
       showWelcome(
-        "当前页面不是 B 站视频。\n当前页面: " + url +
-        "\n提示：bililearn 只会显示 B 站视频的字幕。请打开 https://www.bilibili.com/video/BV… 格式的视频页面。"
+        "当前页面不是 B 站或 YouTube 视频。\n当前页面: " + url +
+        "\n提示：bililearn 支持 B 站视频页（https://www.bilibili.com/video/BV…）和 YouTube（https://www.youtube.com/watch?v=…）。"
       );
       return;
     }
@@ -817,6 +844,30 @@ async function checkCurrentTab() {
 function extractVideoId(url) {
   try {
     const urlObj = new URL(url);
+
+    // YouTube (2026-09-27). Canonical id = 11 chars. Accept the
+    // common shapes: /watch?v=ID, youtu.be/ID, /shorts/ID, /embed/ID.
+    // Suffix with "@p1" so the rest of the sidepanel's `currentVideoId`
+    // cache key (`videoId@page`) keeps working unchanged for the
+    // YouTube branch — there's only ever one "page" per YouTube video.
+    if (
+      urlObj.hostname === "www.youtube.com" ||
+      urlObj.hostname === "m.youtube.com" ||
+      urlObj.hostname === "youtu.be" ||
+      urlObj.hostname.endsWith(".youtube.com")
+    ) {
+      let id = null;
+      if (urlObj.hostname === "youtu.be") {
+        id = urlObj.pathname.replace(/^\/+/, "").split("/")[0] || null;
+      } else if (urlObj.pathname.startsWith("/watch")) {
+        id = urlObj.searchParams.get("v");
+      } else if (urlObj.pathname.startsWith("/shorts/")) {
+        id = urlObj.pathname.split("/")[2] || null;
+      } else if (urlObj.pathname.startsWith("/embed/")) {
+        id = urlObj.pathname.split("/")[2] || null;
+      }
+      if (id && /^[A-Za-z0-9_-]{11}$/.test(id)) return `${id}@p1`;
+    }
 
     const match = urlObj.pathname.match(/\/video\/(BV[A-Za-z0-9]{10})/i);
     if (urlObj.hostname.endsWith("bilibili.com") && match) {
@@ -2186,6 +2237,18 @@ function switchTab(tabName) {
   if (tabName === "summary" && !currentSummary && !summaryInFlight.has(currentVideoId) && !aiKeyMissing) {
     triggerSummary();
   }
+
+  // Close any lingering Explain UI when switching tabs. The modal is
+  // position: fixed so it would otherwise keep overlaying the new tab's
+  // content (the user sees an Explain modal stuck over the Overview/Notes
+  // tabs they just opened and can't tell where it came from). The
+  // tooltip can also be left behind if the mouseup that triggered
+  // setupExplainFeature wasn't followed by another mouseup on a different
+  // region — hide it defensively.
+  const lingeringModal = document.getElementById?.("explainModal");
+  if (lingeringModal) lingeringModal.remove();
+  const lingeringTooltip = document.getElementById?.("explainTooltip");
+  if (lingeringTooltip) lingeringTooltip.style.display = "none";
 }
 
 /**
@@ -3010,18 +3073,24 @@ function setupExplainFeature() {
 
   let selectedText = "";
 
-  // Interacting with Explain must preserve the transcript selection and stay
-  // isolated from document/row click behavior.
-  tooltip.addEventListener("mousedown", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-  });
-  tooltip.addEventListener("mouseup", (event) => {
-    event.stopPropagation();
-  });
-  tooltip.addEventListener("click", (event) => {
-    event.stopPropagation();
-  });
+  // Interacting with Explain must NOT interfere with the browser's
+  // built-in selection handling — the previous mousedown preventDefault
+  // and mouseup stopPropagation blocked the user from being able to
+  // right-click → Copy the selected text (the system context-menu would
+  // open but the clipboard payload came out empty). The tooltip is now
+  // also placed ABOVE the selection (see below), so it never covers the
+  // text the user might want to copy. selectedText is captured into the
+  // closure on mouseup, so the click handler can use it even if the
+  // click itself ends up clearing the live Selection.
+  tooltip
+    .querySelector(".explain-btn")
+    .addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!selectedText) return;
+      const captured = selectedText;
+      tooltip.style.display = "none";
+      showExplanation(captured);
+    });
 
   // Listen for text selection
   document.addEventListener("mouseup", (e) => {
@@ -3035,12 +3104,22 @@ function setupExplainFeature() {
     if (text.length > 0 && isInTranscript) {
       selectedText = text;
 
-      // Position the tooltip near the selection
+      // Position the tooltip ABOVE the selection by default so it never
+      // covers the selected text — this keeps right-click → Copy working
+      // on the text underneath. Fall back to below when there isn't
+      // enough room above (e.g. first row of the list, or scrolled near
+      // the top of the panel).
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
+      const tipHeight = tooltip.offsetHeight || 36;
+      const spaceAbove = rect.top;
+      const placeAbove = spaceAbove >= tipHeight + 12;
+      const top = placeAbove
+        ? rect.top + window.scrollY - tipHeight - 8
+        : rect.bottom + window.scrollY + 8;
 
       tooltip.style.display = "block";
-      tooltip.style.top = `${rect.bottom + window.scrollY + 8}px`;
+      tooltip.style.top = `${top}px`;
       tooltip.style.left = `${rect.left + rect.width / 2}px`;
     } else {
       tooltip.style.display = "none";
@@ -3053,18 +3132,6 @@ function setupExplainFeature() {
       tooltip.style.display = "none";
     }
   });
-
-  // Handle explain button click
-  tooltip
-    .querySelector(".explain-btn")
-    .addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!selectedText) return;
-
-      tooltip.style.display = "none";
-      await showExplanation(selectedText);
-    });
 }
 
 /**

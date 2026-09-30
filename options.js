@@ -1052,6 +1052,20 @@ const YTD_OPTIONS = (() => {
     const whisperModelSelect = doc.getElementById("whisperModel");
     const whisperLanguageInput = doc.getElementById("whisperLanguage");
     const subtitlesDirInput = doc.getElementById("subtitlesDir");
+    // 2026-09-27: YouTube proxy + cookies file. Both default to empty
+    // (= "not set, attempt direct connection"); see settings.js
+    // normalize() for the validation that strips an empty / malformed
+    // proxy back to "".
+    const youtubeProxyInput = doc.getElementById("youtubeProxy");
+    const youtubeCookiesFileInput = doc.getElementById("youtubeCookiesFile");
+    // 2026-09-28 (Irene regression): raw pasted Netscape cookies text.
+    // textarea (not input) so users can paste multi-line exports
+    // directly. Stored in chrome.storage.local as-is (trim applied in
+    // settings.js normalize). Visibility of the value on the options
+    // page is the user's explicit acknowledgement that this is
+    // sensitive — same trade-off as the file path field, just more
+    // convenient to use.
+    const youtubeCookiesTextInput = doc.getElementById("youtubeCookiesText");
     const whisperCheckBtn = doc.getElementById("whisperCheckBtn");
     // 2026-09-02: notification-prefs toggles. Their stored values are
     // booleans normalized to true (see settings.js normalize) — these
@@ -1423,6 +1437,9 @@ const YTD_OPTIONS = (() => {
         if (whisperModelSelect) whisperModelSelect.value = settings.whisperModel;
         if (whisperLanguageInput) whisperLanguageInput.value = settings.whisperLanguage;
         if (subtitlesDirInput) subtitlesDirInput.value = settings.subtitlesDir;
+        if (youtubeProxyInput) youtubeProxyInput.value = settings.youtubeProxy || "";
+        if (youtubeCookiesFileInput) youtubeCookiesFileInput.value = settings.youtubeCookiesFile || "";
+        if (youtubeCookiesTextInput) youtubeCookiesTextInput.value = settings.youtubeCookiesText || "";
         // 2026-09-02: notification-prefs defaults to ON — `=== false` is
         // the only way to land in the unchecked branch (see settings.js
         // normalize). Mirror the same strict form here so a missing
@@ -1493,6 +1510,9 @@ const YTD_OPTIONS = (() => {
         whisperModel: whisperModelSelect ? whisperModelSelect.value : "",
         whisperLanguage: whisperLanguageInput ? whisperLanguageInput.value : "",
         subtitlesDir: subtitlesDirInput ? subtitlesDirInput.value : "",
+        youtubeProxy: youtubeProxyInput ? youtubeProxyInput.value : "",
+        youtubeCookiesFile: youtubeCookiesFileInput ? youtubeCookiesFileInput.value : "",
+        youtubeCookiesText: youtubeCookiesTextInput ? youtubeCookiesTextInput.value : "",
         // 2026-09-02: read the live checkbox state straight into the
         // payload. Save is the only place that converts DOM -> storage;
         // background.js never reads the form, it reads storage.
@@ -1609,11 +1629,24 @@ const YTD_OPTIONS = (() => {
     // runWhisperCheck after a fetch AND by applyLanguage when the UI
     // language changes, so the rendered report always follows the selected
     // language. `health` is the /health body, or null when offline.
-    function renderWhisperCheckResults(health) {
+    // Render generation counter for renderWhisperCheckResults — see the
+    // guard comment inside (2026-09-30).
+    let whisperCheckRenderSeq = 0;
+
+    async function renderWhisperCheckResults(health) {
       const list = whisperCheckResults;
       if (!list) return;
       lastWhisperRenderKind = "check";
       lastWhisperHealthData = health;
+      // 2026-09-30: render-generation guard. The offline branch below
+      // appends the auto-start row AFTER awaiting a storage probe with a
+      // 500ms fallback timeout — if a newer render (re-check, language
+      // switch) replaces the list in the meantime, that late append would
+      // land on the NEW list as a stray row. Stamp the generation on the
+      // list; the deferred append bails when its render was superseded.
+      const renderSeq = ++whisperCheckRenderSeq;
+      list.dataset.renderSeq = String(renderSeq);
+      const stillCurrent = () => list.dataset.renderSeq === String(renderSeq);
       list.innerHTML = "";
       list.hidden = false;
       if (whisperReadyBar) whisperReadyBar.hidden = true;
@@ -1738,9 +1771,9 @@ const YTD_OPTIONS = (() => {
               setTimeout(() => resolve(null), 500);
             });
           }
-        } catch (_e) {
-          flag = null;
-        }
+          // A newer render took over the list while we waited — drop the
+          // stale auto-start row instead of appending it to the new list.
+          if (!stillCurrent()) return;
           renderCheckItem(
             list,
             translate(currentLanguage, "whisperAutostartLabel") ||

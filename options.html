@@ -505,6 +505,78 @@
               留空 = 自动使用系统下载目录下的 <code>BiliSubs/</code> 子目录（首次写入时自动创建）。
             </p>
 
+            <!-- 2026-09-27: YouTube support — proxy + cookies file. Hidden
+                 inside <details> so the B站-only user does not see it
+                 unless they actively expand the section. -->
+            <details class="youtube-settings-block">
+              <summary>YouTube 支持（HTTP 代理；浏览器 cookies 自动获取）</summary>
+              <p class="help">
+                bililearn 把 YouTube 视频转成可读字幕需要：①
+                youtube.com 在你这台机器上能通（国内网络通常需要填
+                HTTP 代理）；② YouTube 登录态——扩展会自动从
+                Chrome 取你的 YouTube cookies（Netscape 格式）传给
+                yt-dlp，绕过 googlevideo.com 的 403 反爬。前提是你在
+                Chrome 里已经登录 YouTube。下面的 Cookies 文件路径
+                留空即可——除非你用别的浏览器 profile 登录 YouTube。
+              </p>
+
+              <label for="youtubeProxy">YouTube HTTP 代理（可选）</label>
+              <input
+                id="youtubeProxy"
+                name="youtubeProxy"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="http://127.0.0.1:15236  （留空 = 走直连）"
+              />
+
+              <label for="youtubeCookiesFile"
+                >YouTube Cookies 文件路径（高级 / 可选）</label
+              >
+              <input
+                id="youtubeCookiesFile"
+                name="youtubeCookiesFile"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="（留空 = 自动用 Chrome 当前 profile 的 YouTube cookies）"
+              />
+
+              <label for="youtubeCookiesText"
+                >YouTube Cookies 内容（直接粘贴 Netscape 文本，最稳）</label
+              >
+              <textarea
+                id="youtubeCookiesText"
+                name="youtubeCookiesText"
+                rows="8"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	1825051589	SID	g.a000xxx..."
+                style="width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;resize:vertical;"
+              ></textarea>
+              <p class="help">
+                <strong>优先级：</strong
+                ><code>youtubeCookiesText</code>（粘贴的内容）
+                <code>&gt;</code>
+                <code>youtubeCookiesFile</code>（文件路径）
+                <code>&gt;</code>
+                扩展自动用 <code>chrome.cookies.getAll</code> 抓
+                Chrome 里的 YouTube cookies。<br />
+                <strong>什么时候用这个框：</strong
+                >① Chrome 113+ 默认开启了
+                <em>Cookies Having Independent Partitioned State</em>
+                —— 真正的 auth cookies（SID / HSID / LOGIN_INFO /
+                <code>__Secure-1PSID</code> 等）被分区存到
+                <code>accounts.google.com</code> 这个 top-level site，
+                扩展即使加了权限有时也拿不到；直接粘贴文件就能绕过。
+                ② 你用的是另一个浏览器 profile 登录 YouTube，扩展抓的
+                不是你的会话。格式：Netscape cookies.txt（每行
+                <code>domain  TRUE  /  secure  expiry  name  value</code>，
+                第一行以 <code># Netscape HTTP Cookie File</code> 开头，
+                不超过 64 KB）。粘贴完点 <em>Save settings</em>。
+              </p>
+            </details>
+
             <!-- 2026-09-02: notifyOnSummary + notifyOnAnalysis are bound
                  to a single store value (notifyOnSummaryAndAnalysis) —
                  the user can only opt in/out of both together. The

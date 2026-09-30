@@ -211,6 +211,30 @@ var YTD_SETTINGS = (() => {
     // all land on the show-banner side. Once dismissed the banner is
     // suppressed for the lifetime of this profile; no auto-reset.
     firstRunDismissed: false,
+    // 2026-09-27: optional HTTP proxy for YouTube fetches. youtube.com
+    // is reachable from this machine only through the system proxy
+    // (127.0.0.1:15236). Direct connection times out. Empty string
+    // means "no proxy, attempt direct" — the user gets the documented
+    // Connection to www.youtube.com timed out error and can fill this
+    // in via the options page. Note: googlevideo.com segments still
+    // 403 even with proxy; for those the user needs to export a Chrome
+    // cookies file and set youtubeCookiesFile (added next).
+    youtubeProxy: "",
+    // 2026-09-27: absolute path to a Chrome-exported cookies.txt (Netscape
+    // format). Empty means "do not pass a cookie file to yt-dlp". Used
+    // only when /youtube/audio 403s — the metadata + subtitle endpoints
+    // do NOT need this.
+    youtubeCookiesFile: "",
+    // 2026-09-28 (Irene regression, 22-cookie pasted Netscape file):
+    // user-friendly fallback. The user pastes the raw Netscape cookies
+    // text (the same shape a "Get cookies.txt LOCALLY" export would
+    // produce) into the options page textarea; the extension stores it
+    // in chrome.storage.local and hands it to whisper_server inline
+    // (no temp file on the user's disk). Wins over both youtubeCookiesFile
+    // AND the chrome.cookies.getAll auto-fetch — explicit paste is the
+    // most reliable signal, especially when Chrome's CHIPS partitioning
+    // hides real auth cookies from chrome.cookies.getAll.
+    youtubeCookiesText: "",
   });
 
   const WHISPER_MODELS = Object.freeze([
@@ -368,6 +392,32 @@ var YTD_SETTINGS = (() => {
       // 2026-09-10: first-run onboarding banner flag. Strict true
       // check; anything else means "fresh install, show the banner".
       firstRunDismissed: input.firstRunDismissed === true,
+      // 2026-09-27: optional YouTube proxy + cookies file. Both are
+      // strings; an empty string is the documented "not set" signal.
+      // Proxy must start with http:// or socks5:// if non-empty —
+      // yt-dlp accepts those schemes and rejects anything else with a
+      // cryptic extraction error.
+      youtubeProxy: (() => {
+        const raw = typeof input.youtubeProxy === "string" ? input.youtubeProxy.trim() : "";
+        if (!raw) return "";
+        return /^(https?|socks5):\/\//i.test(raw) ? raw : "";
+      })(),
+      // Cookies file: just an absolute path. Server validates existence
+      // when /youtube/audio is called and surfaces a clear error if the
+      // file is missing.
+      youtubeCookiesFile:
+        typeof input.youtubeCookiesFile === "string"
+          ? input.youtubeCookiesFile.trim()
+          : "",
+      // 2026-09-28 (Irene regression): raw pasted Netscape cookies
+      // text. Server caps at 64 KB; we trim the ends so a stray newline
+      // doesn't bloat the storage payload. Empty / non-string falls
+      // back to "" — the resolveYouTubeCookies helper then tries the
+      // file path, then chrome.cookies auto-fetch.
+      youtubeCookiesText:
+        typeof input.youtubeCookiesText === "string"
+          ? input.youtubeCookiesText.trim()
+          : "",
     };
   }
 

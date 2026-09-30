@@ -1557,8 +1557,18 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
     debugLog("[dk-bililearn BG] Relay request:", message.payload?.action);
     (async () => {
       try {
-        // Query specifically for Bilibili tabs to avoid side panel context issues
-        // Try multiple query strategies to find the right tab
+        // A tab can serve relay payloads if its content script handles
+        // them: Bilibili video pages and YouTube watch pages.
+        const isSupportedUrl = (u) => {
+          if (!u) return false;
+          return (
+            u.includes("bilibili.com/video/") ||
+            /^https:\/\/(www\.|m\.)?youtube\.com\/watch/.test(u)
+          );
+        };
+
+        // Query the active tab first to avoid side panel context issues;
+        // fall back to broader queries to find the right tab.
         let tabs = await chrome.tabs.query({
           active: true,
           lastFocusedWindow: true,
@@ -1569,19 +1579,32 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
           tabs[0]?.url,
         );
 
-        // If no Bilibili tab found, try broader query
-        if (!tabs[0] || !tabs[0].url?.includes("bilibili.com/video/")) {
+        // If the active tab isn't a supported video page, try any active
+        // supported tab (the video may live in another window).
+        if (!tabs[0] || !isSupportedUrl(tabs[0].url)) {
           tabs = await chrome.tabs.query({
-            url: "https://www.bilibili.com/video/*",
+            url: [
+              "https://www.bilibili.com/video/*",
+              "https://www.youtube.com/watch*",
+              "https://m.youtube.com/watch*",
+              "https://youtube.com/watch*",
+            ],
             active: true,
           });
-          debugLog("[dk-bililearn BG] Active Bilibili tabs:", tabs.length);
+          debugLog("[dk-bililearn BG] Active supported tabs:", tabs.length);
         }
 
-        // Still nothing? Try any Bilibili tab
+        // Still nothing? Try any supported tab, active or not.
         if (!tabs[0]) {
-          tabs = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
-          debugLog("[dk-bililearn BG] Any Bilibili tabs:", tabs.length);
+          tabs = await chrome.tabs.query({
+            url: [
+              "https://www.bilibili.com/video/*",
+              "https://www.youtube.com/watch*",
+              "https://m.youtube.com/watch*",
+              "https://youtube.com/watch*",
+            ],
+          });
+          debugLog("[dk-bililearn BG] Any supported tabs:", tabs.length);
         }
 
         if (tabs[0]) {
@@ -1591,10 +1614,55 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
             "URL:",
             tabs[0].url,
           );
-          let response = await chrome.tabs.sendMessage(
-            tabs[0].id,
-            message.payload,
-          );
+          let response;
+          try {
+            response = await chrome.tabs.sendMessage(
+              tabs[0].id,
+              message.payload,
+            );
+          } catch (sendErr) {
+            const sendMsg = sendErr?.message || String(sendErr);
+            const noReceiver =
+              /Receiving end does not exist/i.test(sendMsg) ||
+              /Could not establish connection/i.test(sendMsg);
+            if (!noReceiver) throw sendErr;
+            // The content script is orphaned — the page was loaded before
+            // the extension (re)loaded, so the manifest-declared injection
+            // never ran for it. Re-inject content.js on demand and retry
+            // the message. This self-heals every relay path (getVideoInfo /
+            // DOM transcript / playback polling) without requiring the
+            // user to F5 the page. At most one re-inject attempt per tab
+            // per service-worker lifetime — if it didn't take, further
+            // failures flow to the outer catch as before.
+            const reinjectedTabs = (globalThis.__bililearnRelayReinjectedTabs ??=
+              new Set());
+            if (!reinjectedTabs.has(tabs[0].id)) {
+              reinjectedTabs.add(tabs[0].id);
+              debugLog(
+                "[dk-bililearn BG] No receiver on tab",
+                tabs[0].id,
+                "— re-injecting content.js, then retrying",
+              );
+              try {
+                await chrome.scripting.executeScript({
+                  target: { tabId: tabs[0].id },
+                  files: ["content.js"],
+                });
+              } catch (injectErr) {
+                // Duplicate-load guard throw, world conflict, or injection
+                // failure — fall through and retry the message anyway; if
+                // the script really is alive the retry succeeds.
+                debugLog(
+                  "[dk-bililearn BG] Re-inject reported (may be benign):",
+                  injectErr?.message || injectErr,
+                );
+              }
+            }
+            response = await chrome.tabs.sendMessage(
+              tabs[0].id,
+              message.payload,
+            );
+          }
 
           // For getVideoInfo, PREFER Bilibili's own player data over the
           // DOM scrape. The player's videoDetails is canonical: its `author`
@@ -1609,8 +1677,8 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
           debugLog("[dk-bililearn BG] Got response from content:", response);
           sendResponse({ success: true, response });
         } else {
-          debugLog("[dk-bililearn BG] No Bilibili tab found");
-          sendResponse({ success: false, error: "No Bilibili tab found" });
+          debugLog("[dk-bililearn BG] No supported tab found");
+          sendResponse({ success: false, error: "No supported tab found" });
         }
       } catch (err) {
         // "Receiving end does not exist" is the normal state when the
@@ -3264,6 +3332,18 @@ async function handleTriggerWhisperTranscription(
   // response... message channel closed" 错误。注意顺序：STARTED job 必须先
   // 落 storage 再 sendResponse，sidepanel 收到 started 后会立即
   // maybeResumeWhisperJob，两者颠倒了会resume到旧记录。
+  //
+  // 2026-09-27: route by source — YouTube URLs / bare 11-char ids go
+  // through runYouTubeWhisperPipeline (metadata + audio via yt-dlp on
+  // the local whisper_server); everything else (BV... or bilibili.com)
+  // falls back to the original B站 pipeline.
+  const source = detectVideoSource(videoId) || detectVideoSource(videoUrl || "");
+  if (source === "youtube") {
+    runYouTubeWhisperPipeline(videoId || videoUrl, settings).catch(
+      (e) => debugLog("[dk-bililearn BG] youtube whisper pipeline detached error:", e?.message || e),
+    );
+    return { success: true, started: true };
+  }
   runWhisperPipeline(videoId, videoUrl, requestedPageNumber, settings).catch(
     (e) => debugLog("[dk-bililearn BG] whisper pipeline detached error:", e?.message || e),
   );
@@ -3519,8 +3599,724 @@ async function fetchBilibiliOfficialSubtitle(videoId, cid) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// YouTube helpers (2026-09-27)
+//
+// Mirror of the B站 fetchers above, but every step goes through the local
+// whisper_server (port 7860) because:
+//   - youtube.com is reachable only via the system proxy (HKCU registry
+//     ProxyEnable=1 → 127.0.0.1:15236); the SW cannot reach youtube.com
+//     directly.
+//   - yt-dlp lives in the server's Python (miniconda3) env.
+//   - server has the cookies / format-selection / post-processing helpers.
+//
+// All functions take `(videoIdOrUrl, settings)` so the sidepanel can
+// pass user-configured proxy + cookies file without the SW having to
+// persist its own copy.
+// ---------------------------------------------------------------------------
+
+// Canonical YouTube video id = 11 chars from `[A-Za-z0-9_-]`. We accept
+// EITHER a bare id (11 chars) OR a full youtube.com / youtu.be URL.
+const YT_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+const YT_URL_ID_RE = /(?:youtu\.be\/|[?&]v=|\/(?:shorts|embed)\/)([A-Za-z0-9_-]{11})/;
+
+function normalizeYouTubeInput(raw) {
+  if (!raw) return null;
+  const candidate = String(raw).trim();
+  if (YT_ID_RE.test(candidate)) return { videoId: candidate, url: `https://www.youtube.com/watch?v=${candidate}` };
+  const m = candidate.match(YT_URL_ID_RE);
+  if (m) return { videoId: m[1], url: candidate };
+  return null;
+}
+
+function detectVideoSource(raw) {
+  // "bilibili" | "youtube" | null. The sidepanel uses this to route
+  // transcripts / button-injection to the right pipeline.
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (YT_ID_RE.test(s) || /youtube\.com|youtu\.be/.test(s)) return "youtube";
+  if (/^BV[0-9A-Za-z]+$/i.test(s) || /bilibili\.com\/video\//.test(s)) return "bilibili";
+  return null;
+}
+
+async function whisperServerPostJson(path, body, signal) {
+  const url = (settings_whisperUrl_get()).replace(/\/+$/, "") + path;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  let payload;
+  try {
+    payload = await res.json();
+  } catch (e) {
+    throw new Error(`whisper_server ${path} returned non-JSON (HTTP ${res.status})`);
+  }
+  if (!res.ok || payload.ok === false) {
+    const detail = payload.error || `HTTP ${res.status}`;
+    throw new Error(`whisper_server ${path} failed: ${detail}`);
+  }
+  return payload;
+}
+
+let _cachedWhisperUrl = null;
+function settings_whisperUrl_get() {
+  if (_cachedWhisperUrl !== null) return _cachedWhisperUrl;
+  // Synchronous wrapper around getSettings(); used in async fns that
+  // already have `settings` in scope, so this fallback should never
+  // actually fire. It's here to keep the helper self-contained.
+  return _cachedWhisperUrl || "http://127.0.0.1:7860";
+}
+
+async function fetchYouTubeVideoInfo(rawInput, settings) {
+  const norm = normalizeYouTubeInput(rawInput);
+  if (!norm) throw new Error("无效的 YouTube URL 或视频 ID。");
+  const payload = {
+    url: norm.url,
+    proxy: settings.youtubeProxy || "",
+  };
+  // 2026-09-28 (Irene regression): /youtube/info also needs cookies
+  // for "Sign in to confirm" videos, otherwise extract_info raises
+  // before we ever get a `subtitles` dict back. Use the shared helper
+  // so /info, /audio and /subtitle see identical cookie resolution.
+  const cookies = await resolveYouTubeCookies(settings);
+  if (cookies.cookiesFile) payload.cookiesFile = cookies.cookiesFile;
+  if (cookies.cookiesText) payload.cookiesText = cookies.cookiesText;
+  return await whisperServerPostJson("/youtube/info", payload);
+}
+
+// 2026-09-29: ask the content script running in the YouTube watch
+// tab to read the transcript straight from the DOM. The content script
+// clicks "Show transcript" if needed, waits for the segment list to
+// render, and returns a segments array in the same envelope as
+// fetchYouTubeOfficialSubtitle. Returns null when:
+//   - no active YouTube watch tab is focused (sidepanel opened with
+//     no YouTube tab in front)
+//   - the focused tab is a YouTube page that isn't a watch page
+//     (e.g. /feed/trending)
+//   - the content script responds with success:false (button missing
+//     = video has no transcript)
+// In all of those cases the caller falls through to the whisper_server
+// path (which uses yt-dlp + cookies + proxy). The DOM path always wins
+// for videos the user has open in their browser because the browser
+// already has a TLS identity YouTube accepts.
+async function fetchYouTubeTranscriptFromDOM() {
+  let targetTab = null;
+  try {
+    // 1. Find the active YouTube watch tab. `lastFocusedWindow: true`
+    //    prefers the window the user is currently looking at; we then
+    //    filter to the URL pattern of a watch page (covers
+    //    /watch?v=, /shorts/<id>, youtu.be/<id>, /embed/<id>).
+    const [activeTab] = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true,
+    });
+    if (activeTab && activeTab.id && isYouTubeWatchUrl(activeTab.url)) {
+      targetTab = activeTab;
+    } else {
+      // 2. No active match — look across all windows for any open
+      //    YouTube watch tab. The sidepanel may be opened in window
+      //    A while the user has YouTube in window B.
+      const allYouTube = await chrome.tabs.query({});
+      const watchTab = allYouTube.find(
+        (t) => t.url && isYouTubeWatchUrl(t.url),
+      );
+      if (watchTab) targetTab = watchTab;
+    }
+  } catch (e) {
+    debugLog("[dk-bililearn BG] tab query failed:", e?.message || e);
+    return null;
+  }
+
+  if (!targetTab) {
+    debugLog("[dk-bililearn BG] no YouTube watch tab found for DOM transcript");
+    return null;
+  }
+
+  // 3. Message the content script. Some browser versions throttle
+  //    background→content messaging when the tab isn't visible, so
+  //    we wrap with a Promise.race timeout — if the content script
+  //    doesn't reply within 5s we fall back to whisper_server.
+  try {
+    const reply = await Promise.race([
+      chrome.tabs.sendMessage(targetTab.id, {
+        action: "getYouTubeTranscriptFromDOM",
+      }),
+      new Promise((resolve) => setTimeout(() => resolve({ __timeout: true }), 5000)),
+    ]);
+    if (!reply || reply.__timeout) {
+      debugLog("[dk-bililearn BG] DOM transcript timed out for tab", targetTab.id);
+      return null;
+    }
+    if (!reply.success) {
+      debugLog(
+        "[dk-bililearn BG] DOM transcript unavailable:",
+        reply.reason || reply.error,
+      );
+      return null;
+    }
+    // Attach videoId so the sidepanel can key its cache on the same
+    // id it would for the whisper_server path.
+    const norm = normalizeYouTubeInput(targetTab.url);
+    if (norm) reply.videoId = norm.videoId;
+    return reply;
+  } catch (e) {
+    // No content script listening (e.g. sidepanel opened for a YouTube
+    // tab where the manifest didn't inject content.js — e.g. an
+    // embedded player). The catch-all returns null so the caller
+    // falls back to whisper_server.
+    debugLog(
+      "[dk-bililearn BG] DOM transcript sendMessage failed:",
+      e?.message || e,
+    );
+    return null;
+  }
+}
+
+function isYouTubeWatchUrl(rawUrl) {
+  if (!rawUrl) return false;
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (
+      host !== "www.youtube.com" &&
+      host !== "youtube.com" &&
+      host !== "m.youtube.com" &&
+      host !== "youtu.be" &&
+      !host.endsWith(".youtube.com")
+    ) {
+      return false;
+    }
+    // /watch?v=<id> OR /shorts/<id> OR /embed/<id> OR youtu.be/<id>
+    if (u.pathname === "/watch") return !!u.searchParams.get("v");
+    if (u.pathname.startsWith("/shorts/")) return true;
+    if (u.pathname.startsWith("/embed/")) return true;
+    if (host === "youtu.be" && u.pathname.length > 1) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+// whisper_server endpoints (/info, /audio, /subtitle) need cookies
+// when the video is gated by the "Sign in to confirm" wall; this
+// helper returns the cookie payload the extension should pass to the
+// server, in the same priority order the user sees on the options
+// page.
+//
+// Priority (2026-09-28):
+//   1. `settings.youtubeCookiesText` — user-pasted raw cookies
+//      (textarea in options page). Wins over both the file path and
+//      the chrome.cookies auto-fetch because explicit paste is the
+//      most reliable signal — especially when Chrome's CHIPS
+//      partitioning hides real auth cookies from
+//      chrome.cookies.getAll.
+//   2. `settings.youtubeCookiesFile` — absolute path to a
+//      user-managed cookies.txt (manual export from a separate
+//      browser profile).
+//   3. `chrome.cookies.getAll` (via fetchYouTubeNetscapeCookies) —
+//      last resort, only works when the extension can actually see
+//      the partitioned auth cookies.
+//
+// Returns `{cookiesFile?: string, cookiesText?: string}`. Both fields
+// can be absent when the user is not logged into YouTube and the
+// auto-fetch returned nothing — the server still runs (yt-dlp tries
+// unauthenticated) and surfaces a clean 403 for restricted videos.
+async function resolveYouTubeCookies(settings) {
+  const text = (settings.youtubeCookiesText || "").trim();
+  if (text) {
+    // Length guard mirrors whisper_server's 64 KB cap so the user
+    // gets the same error message at the extension layer instead of
+    // only seeing the server's "invalid_input" raise.
+    if (text.length > 64 * 1024) {
+      console.warn(
+        `[bililearn] youtubeCookiesText is ${text.length} bytes; whisper_server caps at 65536 — the field will be truncated.`,
+      );
+    }
+    return { cookiesText: text };
+  }
+  const file = (settings.youtubeCookiesFile || "").trim();
+  if (file) return { cookiesFile: file };
+  try {
+    const netscape = await fetchYouTubeNetscapeCookies();
+    if (netscape) return { cookiesText: netscape };
+  } catch (e) {
+    debugLog("[dk-bililearn BG] chrome.cookies fetch failed:", e?.message || e);
+    // Fall through — return empty object so the server tries
+    // unauthenticated and surfaces a 403 the user can read.
+  }
+  return {};
+}
+
+// YouTube cookies via chrome.cookies API (2026-09-27)
+//
+// Replaces the previous "export cookies to a .txt file" workflow. The
+// extension already holds the `cookies` permission + youtube.com
+// host_permissions, so chrome.cookies.getAll gives us the user's own
+// YouTube session cookies directly — no extra extension install, no
+// manual export, no "where do I put the file" step.
+//
+// IMPORTANT (2026-09-28, Irene regression): YouTube's actual auth
+// cookies (SID / HSID / SSID / APISID / SAPISID / LOGIN_INFO / NID /
+// AEC / 1P_JAR) live under `.google.com`, NOT `.youtube.com`. The
+// `.youtube.com` set only has VISITOR_INFO1_LIVE / YSC / GPS / CONSENT
+// / ST-* — those are public / non-auth cookies that don't survive
+// YouTube's "Sign in to confirm you're not a bot" gate. The extension
+// needs both domains to be effective. The manifest host_permissions
+// must list *.google.com and accounts.google.com as well, or
+// chrome.cookies.getAll returns empty for those scopes.
+//
+// Output format: Netscape HTTP Cookie File (the same shape yt-dlp
+// reads via its `cookiefile` option). See
+// https://curl.haxx.se/rfc/cookie-spec.html for the spec.
+async function fetchYouTubeNetscapeCookies() {
+  // chrome.cookies.getAll has THREE query shapes and we use all of
+  // them for maximum coverage:
+  //
+  //   { domain: X }   — returns cookies whose domain matches or is
+  //                    a subdomain of X. Misses partitioned cookies
+  //                    set during a YouTube/Google login flow.
+  //   { url: U }      — returns cookies reachable from URL U,
+  //                    INCLUDING partitioned cookies whose
+  //                    partitionKey matches U's eTLD+1. Best
+  //                    single-call API for our use case.
+  //   { partitionKey: {topLevelSite: U}, domain: X } — explicit
+  //                    partition query. Same as url= when the
+  //                    url's eTLD+1 matches X; both forms required
+  //                    by Chrome for cookies that are partitioned
+  //                    under third-party cookie restrictions
+  //                    (Chrome 113+ default).
+  //
+  // Background: YouTube's auth cookies (SID / HSID / LOGIN_INFO /
+  // LOGIN_INFO_HIDDEN / __Secure-* — the ones that survive YouTube's
+  // "Sign in to confirm you're not a bot" wall) live on
+  // `.google.com` and were created during a login flow with
+  // `https://accounts.google.com` as the top-level site. Chrome
+  // now marks these cookies with a partitionKey whose topLevelSite
+  // is accounts.google.com. A plain `{domain: ".google.com"}`
+  // query returns ZERO of them — that's why my 2026-04-27 attempt
+  // saw only VISITOR_INFO1_LIVE / YSC / GPS / CONSENT (those are
+  // non-partitioned, uninteresting cookies). To surface partitioned
+  // cookies you must pass the topLevelSite explicitly, which is what
+  // the queries below do.
+  //
+  // Each query is tried once per scope; results are deduped by
+  // (name, domain, path).
+  const queries = [
+    // Non-partitioned fallback (older cookies, third-party embedded)
+    { domain: ".google.com" },
+    { domain: "google.com" },
+    { domain: ".youtube.com" },
+    { domain: "youtube.com" },
+    // url-form: handles partitioned cookies whose partitionKey's
+    // topLevelSite is the URL's eTLD+1.
+    { url: "https://www.youtube.com/" },
+    { url: "https://accounts.google.com/" },
+    // Explicit partition form: the filter property is `partitionKey`
+    // (NOT `partitioned` — that name makes chrome.cookies.getAll throw
+    // "Unexpected property: 'partitioned'" and the query contributes
+    // nothing). Chrome accepts topLevelSite with or without a trailing
+    // slash; try both variants for coverage.
+    {
+      partitionKey: { topLevelSite: "https://accounts.google.com" },
+      domain: ".google.com",
+    },
+    {
+      partitionKey: { topLevelSite: "https://accounts.google.com/" },
+      domain: ".google.com",
+    },
+    {
+      partitionKey: { topLevelSite: "https://www.youtube.com" },
+      domain: ".youtube.com",
+    },
+    {
+      partitionKey: { topLevelSite: "https://www.youtube.com/" },
+      domain: ".youtube.com",
+    },
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const details of queries) {
+    let entries = [];
+    try {
+      entries = await chrome.cookies.getAll(details);
+    } catch (e) {
+      console.log(
+        "[bililearn] chrome.cookies.getAll failed for",
+        JSON.stringify(details),
+        e?.message || e,
+      );
+      continue;
+    }
+    for (const c of entries) {
+      // Dedupe on (name, domain, path) — same cookie can be reported
+      // for overlapping domain queries.
+      const key = `${c.name}|${c.domain}|${c.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // Netscape columns: domain, flag, path, secure, expiry, name, value
+      const isSubdomainMatch = String(c.domain || "").startsWith(".");
+      const secure = c.secure ? "TRUE" : "FALSE";
+      const expiry = Number(c.expirationDate) ? Math.floor(c.expirationDate) : 0;
+      out.push(
+        [
+          c.domain || ".youtube.com",
+          isSubdomainMatch ? "TRUE" : "FALSE",
+          c.path || "/",
+          secure,
+          String(expiry),
+          c.name,
+          c.value || "",
+        ].join("\t"),
+      );
+    }
+  }
+  const sample = out
+    .slice(0, 8)
+    .map((l) => l.split("\t")[5])
+    .join(",");
+  console.log(
+    `[bililearn] fetchYouTubeNetscapeCookies: ${out.length} cookies [${sample}${out.length > 8 ? ", ..." : ""}]`,
+  );
+  if (!out.length) return null;
+  return [
+    "# Netscape HTTP Cookie File",
+    "# Generated by bililearn from chrome.cookies API (2026-09-27)",
+    "",
+    ...out,
+  ].join("\n");
+}
+
+async function fetchYouTubeAudioBlob(rawInput, settings) {
+  // Returns { blob, videoId, title, channel, uploadDate, duration }.
+  // Same shape as fetchBilibiliAudioBlob's return value so the whisper
+  // pipeline can use either transparently.
+  const norm = normalizeYouTubeInput(rawInput);
+  if (!norm) throw new Error("无效的 YouTube URL 或视频 ID。");
+  const whisperUrl = (settings.whisperUrl || "http://127.0.0.1:7860").replace(/\/+$/, "");
+  const requestPayload = {
+    videoId: norm.videoId,
+    url: norm.url,
+    proxy: settings.youtubeProxy || "",
+  };
+  // 2026-09-28: shared cookie resolver (text > file > auto-fetch).
+  // See resolveYouTubeCookies() above for the priority rationale —
+  // keeping this in one helper means a future change to cookie policy
+  // (e.g. a new "paste cookies URL" option) lands in exactly one
+  // place instead of three fetch functions.
+  const cookies = await resolveYouTubeCookies(settings);
+  if (cookies.cookiesFile) requestPayload.cookiesFile = cookies.cookiesFile;
+  if (cookies.cookiesText) requestPayload.cookiesText = cookies.cookiesText;
+  // Step 1 — tell server to download. yt-dlp writes to
+  // %TEMP%/bililearn_youtube/<videoId>.m4a and returns the relative
+  // audio URL.
+  const triggerPayload = await whisperServerPostJson("/youtube/audio", requestPayload);
+  // Step 2 — fetch the actual bytes. Server has them cached for 1h
+  // (see _YT_AUDIO_TTL_SEC); subsequent downloads for the same id are
+  // a re-fetch, not a re-download.
+  const audioResponse = await fetch(`${whisperUrl}${triggerPayload.audioUrl}`);
+  if (!audioResponse.ok) {
+    throw new Error(
+      `whisper_server /youtube/audio stream returned HTTP ${audioResponse.status}`,
+    );
+  }
+  const expectedBytes = Number(audioResponse.headers.get("content-length")) || 0;
+  const blob = await audioResponse.blob();
+  if (!blob.size) throw new Error("YouTube 音轨为空。");
+  if (expectedBytes) {
+    sendWhisperProgress(
+      WHISPER_STAGES.DOWNLOADING,
+      "正在下载 YouTube 音轨",
+      `约 ${(expectedBytes / 1024 / 1024).toFixed(1)} MB`,
+      { expectedBytes },
+    );
+  } else {
+    sendWhisperProgress(
+      WHISPER_STAGES.DOWNLOADING,
+      "正在下载 YouTube 音轨",
+      "请保持视频页面打开",
+    );
+  }
+  return { blob, videoId: triggerPayload.videoId, ext: triggerPayload.ext };
+}
+
+async function fetchYouTubeOfficialSubtitle(rawInput, settings) {
+  // Returns the same shape as fetchBilibiliOfficialSubtitle when a
+  // subtitle track is found, OR null when the video has no caption at
+  // any of the languages we tried (zh-Hans → zh-CN → zh → en →
+  // long-tail). The null return is the signal for
+  // handleFetchTranscript to fall through to the Whisper fallback —
+  // we deliberately do NOT throw here, because "no caption" is a
+  // normal outcome for some YouTube videos, not a hard error.
+  // Hard errors (invalid URL, network, parse failure) still throw.
+  const norm = normalizeYouTubeInput(rawInput);
+  if (!norm) throw new Error("无效的 YouTube URL 或视频 ID。");
+  const payload = {
+    videoId: norm.videoId,
+    url: norm.url,
+    lang: settings.whisperLanguage || "",
+    proxy: settings.youtubeProxy || "",
+  };
+  // 2026-09-28 (Irene regression): same cookie resolver as the audio
+  // path. Without this, "Sign in to confirm" videos never return their
+  // captions and always fall through to Whisper — which would still
+  // fail at the audio download for the same reason. Cookies fix both
+  // endpoints at once.
+  const cookies = await resolveYouTubeCookies(settings);
+  if (cookies.cookiesFile) payload.cookiesFile = cookies.cookiesFile;
+  if (cookies.cookiesText) payload.cookiesText = cookies.cookiesText;
+  let data;
+  try {
+    data = await whisperServerPostJson("/youtube/subtitle", payload);
+  } catch (e) {
+    // whisperServerPostJson throws when the server returns ok:false.
+    // Inspect the message — if it's the "no_subtitle" error_type the
+    // server already classified, just return null. Any other failure
+    // is a real error and should propagate.
+    const msg = String(e?.message || "");
+    if (msg.includes("no_subtitle")) {
+      debugLog("[dk-bililearn BG] YouTube video has no caption track");
+      return null;
+    }
+    throw e;
+  }
+  const segments = (data.segments || []).map((seg) => {
+    const start = Number(seg.start) || 0;
+    const duration = Number(seg.duration) || 0;
+    const text = String(seg.text || "").trim();
+    return { text, start, duration, language: data.language };
+  });
+  if (!segments.length) return null;
+  let transcriptTextPlain = "";
+  let transcriptTextTimestamped = "";
+  for (const seg of segments) {
+    transcriptTextPlain += seg.text + " ";
+    const m = Math.floor(seg.start / 60);
+    const s = Math.floor(seg.start % 60);
+    transcriptTextTimestamped += `[${m}:${String(s).padStart(2, "0")}] ${seg.text}\n`;
+  }
+  return {
+    success: true,
+    transcript: segments,
+    transcriptText: transcriptTextPlain.trim(),
+    transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+    language: data.language || null,
+    source: data.source === "yt-manual" ? "youtube-subtitle" : "youtube-auto-subtitle",
+  };
+}
+
+async function transcribeYouTubeWithLocalWhisper(rawInput, settings, info) {
+  // Mirrors transcribeWithLocalWhisper (the B站 version) but uses the
+  // YouTube audio fetch + the B站 view shape populated from /youtube/info
+  // so the rest of the pipeline (cache write, AI correction, sidepanel
+  // render) sees the same canonical structure.
+  const url = (settings.whisperUrl || "http://127.0.0.1:7860").replace(/\/+$/, "");
+  if (!url) {
+    throw new Error("Local Whisper is selected as the ASR provider but whisperUrl is empty.");
+  }
+  sendWhisperProgress(
+    WHISPER_STAGES.DOWNLOADING,
+    "正在下载 YouTube 音轨",
+    "转录在后台进行，可随意切换页面",
+  );
+  const audioFetch = await fetchYouTubeAudioBlob(rawInput, settings);
+  const contentType = audioFetch.blob.type || "audio/mp4";
+  sendWhisperProgress(
+    WHISPER_STAGES.READY_TO_TRANSCRIBE,
+    "音频下载完成，准备调用 Whisper",
+    `模型 ${settings.whisperModel || "base"} · ${url}`,
+  );
+  // Build the metadata headers exactly like transcribeWithLocalWhisper.
+  // whisper_server's cache key uses bvid/cid/title/channel/pubdate; for
+  // YouTube we substitute videoId as both "bvid" and a synthetic cid
+  // ("yt-<videoId>"). The cache file naming pattern is preserved so
+  // loadCachedTranscript's filename search still finds the right file.
+  const title = info?.title || "";
+  const channel = info?.channel || "";
+  const uploadDate = info?.uploadDate || ""; // YYYYMMDD
+  const headers = {
+    "Content-Type": contentType,
+    "X-Whisper-Model": settings.whisperModel || "base",
+    "X-Bvid": audioFetch.videoId,
+    "X-Cid": `yt-${audioFetch.videoId}`,
+    "X-Title": encodeURIComponent(title),
+    "X-Channel": encodeURIComponent(channel),
+    "X-Pubdate": uploadDate,
+    "X-Cache-Dir": encodeURIComponent(settings.subtitlesDir || ""),
+  };
+  if (settings.whisperLanguage) {
+    headers["X-Whisper-Language"] = settings.whisperLanguage;
+  }
+  sendWhisperProgress(
+    WHISPER_STAGES.TRANSCRIBING,
+    "Whisper 转录中",
+    "长视频通常需要几分钟，可在终端查看 whisper_server.py 日志",
+  );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30 * 60 * 1000);
+  let response;
+  try {
+    response = await fetch(`${url}/transcribe`, {
+      method: "POST",
+      headers,
+      body: audioFetch.blob,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  if (!response.ok) {
+    let detail = "";
+    try {
+      detail = (await response.text()).slice(0, 200);
+    } catch (_e) {}
+    throw new Error(
+      `Whisper server returned ${response.status}${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  const data = await response.json();
+  if (data.error) {
+    throw new Error(`Whisper server error: ${data.error}`);
+  }
+  const rawSegments = (data.segments || []).map((seg) => ({
+    from: Number(seg.start) || 0,
+    to: Number(seg.end) || 0,
+    content: String(seg.text || "").trim(),
+  }));
+  const corrected = await correctWhisperTranscript(rawSegments, data.language, settings);
+  return {
+    transcript: corrected,
+    language: data.language,
+    source: "whisper-youtube",
+  };
+}
+
+async function runYouTubeWhisperPipeline(rawInput, settings) {
+  // Mirror of runWhisperPipeline, but for YouTube videos. Pulls
+  // metadata via /youtube/info, then runs transcribeYouTubeWithLocalWhisper,
+  // then saves to the same cache (loadCachedTranscript searches by
+  // {date}_{title}_{UP}.json filenames, which the server's metadata
+  // headers already populate).
+  const info = await fetchYouTubeVideoInfo(rawInput, settings);
+  await setWhisperJob({
+    ...(activeWhisperJob || {}),
+    recoveryMeta: {
+      bvid: info.videoId,
+      cid: `yt-${info.videoId}`,
+      title: info.title || "",
+      channel: info.channel || "",
+      pubDate: info.uploadDate ? `${info.uploadDate.slice(0, 4)}-${info.uploadDate.slice(4, 6)}-${info.uploadDate.slice(6, 8)}` : "",
+      cacheDir: settings.subtitlesDir || "",
+    },
+    videoMeta: {
+      is_upower_expert: 0,
+      is_ugc_pay: 0,
+      is_cooperation: 0,
+      aid: null,
+      bvid: info.videoId,
+      title: info.title || null,
+    },
+  });
+  const result = await transcribeYouTubeWithLocalWhisper(rawInput, settings, info);
+  const canonicalTranscript = (result.transcript || []).map(normalizeSegment);
+  const cachePayload = {
+    bvid: info.videoId,
+    cid: `yt-${info.videoId}`,
+    source: result.source,
+    language: result.language,
+    savedAt: new Date().toISOString(),
+    transcript: canonicalTranscript,
+    chapters: [],
+  };
+  const metaPubDate = info.uploadDate
+    ? `${info.uploadDate.slice(0, 4)}-${info.uploadDate.slice(4, 6)}-${info.uploadDate.slice(6, 8)}`
+    : "";
+  const saved = await saveCachedTranscript(
+    info.videoId,
+    `yt-${info.videoId}`,
+    cachePayload,
+    settings,
+    info.title || "",
+    info.channel || "",
+    metaPubDate,
+  );
+  if (!saved) {
+    throw new Error(
+      "字幕缓存保存失败（whisper_server 写入错误）。请确认 whisper_server.py 仍在 7860 端口运行后重试。",
+    );
+  }
+  await setWhisperJob({
+    ...activeWhisperJob,
+    type: "whisper-job",
+    stage: WHISPER_STAGES.SUCCEEDED,
+    title: "Whisper 转录完成",
+    subtitle: "正在加载字幕…",
+    stageStartedAt: Date.now(),
+    finishedAt: Date.now(),
+    result: {
+      videoId: info.videoId,
+      pageNumber: 1,
+      title: info.title || "",
+      channel: info.channel || "",
+      pubDate: metaPubDate,
+      duration: info.duration || 0,
+      source: result.source,
+      language: result.language,
+    },
+  });
+  setTimeout(() => clearWhisperJob(), 8000);
+  return {
+    videoId: info.videoId,
+    pageNumber: 1,
+    title: info.title || "",
+    channel: info.channel || "",
+    pubDate: metaPubDate,
+    duration: info.duration || 0,
+    transcript: canonicalTranscript,
+    source: result.source,
+    language: result.language,
+  };
+}
+
 async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) {
   try {
+    // 2026-09-27: route YouTube URLs / bare ids to the YouTube
+    // subtitle path before any B站-specific work. The B站 path
+    // (canonicalBilibiliUrl below) would otherwise throw on a bare
+    // 11-char YouTube id, which is a fine fallback signal — but we
+    // want a clean dispatch, not a thrown exception.
+    const source = detectVideoSource(videoId) || detectVideoSource(videoUrl || "");
+    if (source === "youtube") {
+      // 2026-09-29: try the browser's own DOM first — much cleaner
+      // than yt-dlp through a proxy IP. The browser is already on
+      // youtube.com with valid auth cookies + matching TLS fingerprint,
+      // so opening "Show transcript" in the page always works for any
+      // video the user can SEE captions for in their browser. yt-dlp
+      // is the fallback for videos the user is NOT actively watching
+      // (e.g. sidepanel opened on a video that's not in the focused
+      // tab, or a video they want to capture via pasted URL only).
+      const domTranscript = await fetchYouTubeTranscriptFromDOM();
+      if (domTranscript && domTranscript.success) {
+        return domTranscript;
+      }
+      const settings = await getSettings();
+      const subtitle = await fetchYouTubeOfficialSubtitle(videoId || videoUrl, settings);
+      if (subtitle) return subtitle;
+      // No official / auto caption — tell the sidepanel to show the
+      // WHISPER_NEEDED prompt. We use the same error string the B站
+      // path emits so the sidepanel's `error === "WHISPER_NEEDED"`
+      // branch catches both platforms.
+      return {
+        success: false,
+        error: "WHISPER_NEEDED",
+        message: "YouTube 视频无字幕，需要 Whisper 转录。",
+        transcript: [],
+        transcriptText: "",
+        transcriptTextTimestamped: "",
+        language: null,
+        source: "youtube-none",
+      };
+    }
     YTD_SETTINGS.canonicalBilibiliUrl(videoId);
     const viewResponse = await fetch(
       `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(videoId)}`,
@@ -4625,10 +5421,22 @@ async function handleExplainSelection(
       };
     }
 
+    // Response language follows the browser/extension UI language, so
+    // the explanation reads in the language the user actually runs
+    // Chrome in (e.g. zh-CN → 中文, en-US → English). LLMs understand
+    // BCP-47 tags directly.
+    let uiLanguage = "";
+    try {
+      uiLanguage = chrome.i18n.getUILanguage();
+    } catch {
+      uiLanguage = typeof navigator !== "undefined" ? navigator.language : "";
+    }
+
     const variables = {
       videoTitle: videoTitle || "Unknown",
       selectedText,
       transcriptContext: transcriptContext || "None",
+      responseLanguage: uiLanguage || "zh-CN",
     };
     const systemPrompt = await loadPromptSection(
       "explain.md",

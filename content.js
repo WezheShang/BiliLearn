@@ -13,6 +13,23 @@
  * reading the page and making small visual changes.
  */
 
+// ============================================================
+// RE-INJECTION GUARD
+// ============================================================
+// background.js re-injects this file via chrome.scripting.executeScript
+// when a tab's content script is orphaned (extension reloaded after the
+// page loaded → "Receiving end does not exist"). A fresh injection runs
+// in a fresh isolated world, so the flag below is unset there and init
+// proceeds normally. If this file is somehow evaluated twice in the SAME
+// world, the throw aborts the duplicate before it can register a second
+// set of listeners/buttons/timers.
+if (globalThis.__BILILEARN_CONTENT_LOADED__) {
+  throw new Error(
+    "[bililearn] content.js already loaded in this world — skipping duplicate injection",
+  );
+}
+globalThis.__BILILEARN_CONTENT_LOADED__ = true;
+
 const DEBUG = false;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
@@ -170,6 +187,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     showNoteSavedToast(message.note);
     sendResponse({ success: true });
     return false;
+  }
+
+  if (message.action === "getYouTubeTranscriptFromDOM") {
+    // 2026-09-29: the browser is already inside youtube.com — no
+    // yt-dlp, no proxy fingerprint, no server round-trip. The
+    // transcript comes from one of two equivalent paths, mirroring
+    // how fetchBilibiliOfficialSubtitle hits B站's player/wbi/v2 API:
+    //
+    //   1. Page-state path (preferred): read the `ytInitialPlayerResponse`
+    //      JSON that every watch page embeds in a <script>, look up
+    //      `captions.playerCaptionsTracklistRenderer.captionTracks`,
+    //      fetch the chosen track's `baseUrl` directly via the
+    //      browser's trusted identity. Same as B站's
+    //      `subtitle.subtitles[i].subtitle_url` — public, no auth
+    //      dance when the user is already signed in.
+    //   2. DOM path (fallback): click "Show transcript" if the page
+    //      state didn't expose tracks (rare SPA layout shifts).
+    //
+    // Both paths return the canonical envelope; the background falls
+    // through to whisper_server only when BOTH fail.
+    extractYouTubeTranscriptFromPageState()
+      .then(async (pageState) => {
+        if (pageState && pageState.success) return pageState;
+        // Page-state path failed — try the on-page transcript panel.
+        const dom = await extractYouTubeTranscriptFromDOM();
+        return dom;
+      })
+      .then((payload) => sendResponse(payload))
+      .catch((err) =>
+        sendResponse({
+          success: false,
+          reason: "exception",
+          error: String(err?.message || err),
+        }),
+      );
+    return true; // Async response.
   }
 
   // Unknown action - still send a response to prevent hanging
@@ -785,6 +838,17 @@ function showNoteSavedToast(note) {
  * These are just sitting in the HTML — we grab them from the DOM elements.
  */
 function extractVideoInfo() {
+  // 2026-09-27: dispatch by host — B站 vs YouTube have wildly different
+  // DOM structures and "title / channel / pubdate" come from entirely
+  // different nodes on each.
+  if (
+    window.location.hostname === "www.youtube.com" ||
+    window.location.hostname === "m.youtube.com" ||
+    window.location.hostname.endsWith(".youtube.com")
+  ) {
+    return extractYouTubeVideoInfo();
+  }
+  // B站 (default branch — unchanged from the previous behaviour).
   // The video title is in an h1 element inside the #title container
   const activePartTitle = document.querySelector(
     ".video-pod__item.active .title, .video-pod__item.active .video-pod__title, .video-episode-card__info-playing .video-episode-card__info-title",
@@ -808,6 +872,485 @@ function extractVideoInfo() {
     description: descriptionElement?.textContent?.trim() || "",
     pubdate: extractVideoPubDate(),
   };
+}
+
+function extractYouTubeVideoInfo() {
+  // YouTube watch page DOM. The title is wrapped in an yt-formatted-string
+  // (custom element); textContent still resolves to the displayed text
+  // because custom elements expose the children through the standard DOM
+  // interface.
+  const titleElement = document.querySelector(
+    "h1.ytd-watch-metadata yt-formatted-string, " +
+    "#title > h1 > yt-formatted-string, " +
+    "#title yt-formatted-string, " +
+    "h1.title yt-formatted-string",
+  );
+  const channelElement = document.querySelector(
+    "ytd-channel-name a, #owner-name a, ytd-video-owner-renderer a, " +
+    "yt-formatted-string#owner-name, " +
+    "ytd-channel-name yt-formatted-string",
+  );
+  const descriptionElement = document.querySelector(
+    "ytd-text-inline-expander#description-inline-expander, " +
+    "meta[name=\"description\"], " +
+    "meta[property=\"og:description\"]",
+  );
+  const videoElement = document.querySelector("video");
+  // YouTube does not surface publish date as a stable visible string.
+  // It does ship a `<meta itemprop="datePublished" content="...">` tag
+  // in the page <head> — usually ISO 8601 (e.g. "2026-05-01T12:34:56Z").
+  const pubdateElement =
+    document.querySelector('meta[itemprop="datePublished"]') ||
+    document.querySelector('meta[itemprop="uploadDate"]');
+  const pubdateRaw = pubdateElement?.getAttribute("content") || "";
+  // Normalise to YYYY-MM-DD (the sidepanel cache layer keys on this).
+  const pubdate = pubdateRaw ? pubdateRaw.slice(0, 10) : "";
+  // Description: prefer the inline-expander text, fall back to meta tag.
+  let description = "";
+  if (descriptionElement?.tagName === "META") {
+    description = descriptionElement.getAttribute("content") || "";
+  } else if (descriptionElement) {
+    description = descriptionElement.textContent?.trim() || "";
+  }
+  return {
+    title: titleElement?.textContent?.trim() || "",
+    channelName: channelElement?.textContent?.trim() || "",
+    duration: videoElement?.duration || 0,
+    description,
+    pubdate,
+  };
+}
+
+// 2026-09-29: DOM-based YouTube transcript extraction. Avoids the
+// yt-dlp + proxy + cookies stack entirely for the common case where
+// the user already opened the video in their browser — the transcript
+// is rendered into the page the moment they click "Show transcript"
+// under the description. yt-dlp through a proxy IP gets blocked by
+// YouTube's TLS-fingerprint bot wall ("Sign in to confirm you're not
+// a bot") even with valid auth cookies; reading the DOM uses the
+// browser's already-trusted TLS identity, so it always works when
+// the user can see captions in their browser.
+//
+// 2026-09-29 (Irene direction): B站 subtitles come from
+// `api.bilibili.com/x/player/wbi/v2` (a clean public JSON API the
+// browser calls directly — no server, no proxy, no auth dance).
+// YouTube has the same shape: every watch page embeds a giant
+// `ytInitialPlayerResponse = { ... }` blob in a <script> tag, and
+// `captions.playerCaptionsTracklistRenderer.captionTracks[i].baseUrl`
+// is the URL of the caption file for the i-th language. The browser
+// can fetch that URL directly — same as B站 — and parse the response
+// (`fmt=srv3` is the cleanest XML, `fmt=json3` is JSON). This is
+// identical in spirit to fetchBilibiliOfficialSubtitle's pattern:
+// public API → JSON / structured response → segments. No yt-dlp, no
+// proxy cookies, no DPAPI, no TLS-fingerprint concern.
+//
+// extractYouTubeTranscriptFromPageState() below implements this path.
+// It runs FIRST (before extractYouTubeTranscriptFromDOM); if the page
+// state doesn't expose caption tracks (rare; e.g. very new SPA
+// builds), we fall back to opening the on-page transcript panel.
+//
+// Returns:
+//   { success: true, transcript: [{start, duration, text}], language, source }
+//   { success: false, reason: "no-page-state" | "no-tracks" |
+//                            "fetch-failed" | "parse-failed" |
+//                            "no-button" | "empty" | "no-segments" }
+async function extractYouTubeTranscriptFromPageState() {
+  // 1. Locate `ytInitialPlayerResponse` in any <script> tag on the page.
+  //    YouTube ships it inline as `var ytInitialPlayerResponse = {...};`
+  //    early in the head. We scan all script tags because the markup
+  //    shifts around between SPA builds; the variable name is stable.
+  const scripts = Array.from(document.querySelectorAll("script"));
+  let playerResponse = null;
+  for (const s of scripts) {
+    const text = s.textContent || "";
+    const idx = text.indexOf("ytInitialPlayerResponse");
+    if (idx === -1) continue;
+    // Walk forward to the opening brace of the JSON object.
+    const eqIdx = text.indexOf("{", idx);
+    if (eqIdx === -1) continue;
+    // Brace-match to find the matching closing brace (the JSON object
+    // is large and may contain nested objects/strings with braces).
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let i = eqIdx;
+    while (i < text.length) {
+      const ch = text[i];
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = !inString;
+      } else if (!inString) {
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            i++;
+            break;
+          }
+        }
+      }
+      i++;
+    }
+    const blob = text.substring(eqIdx, i);
+    try {
+      playerResponse = JSON.parse(blob);
+      break;
+    } catch {
+      // JSON.parse failed — try the next script tag. This is normal
+      // when there's a minified wrapper that splits the JSON across
+      // multiple script elements.
+    }
+  }
+  if (!playerResponse) {
+    return { success: false, reason: "no-page-state" };
+  }
+
+  // 2. Find the caption track list. B站 returns a list of subtitle
+  //    entries at `data.subtitle.subtitles`; YouTube is similar —
+  //    `captions.playerCaptionsTracklistRenderer.captionTracks`.
+  //    Each entry has `baseUrl`, `languageCode`, and `kind` (the
+  //    empty string = uploader manual, "asr" = YouTube's auto
+  //    speech recognition). We prefer manual over auto (more
+  //    accurate), and prefer the user's language chain over English.
+  const tracks =
+    playerResponse.captions?.playerCaptionsTracklistRenderer
+      ?.captionTracks || [];
+  if (!tracks.length) {
+    return { success: false, reason: "no-tracks" };
+  }
+
+  const langChain = ["zh-Hans", "zh-CN", "zh", "zh-Hant", "en"];
+  let chosen = null;
+  // Pass 1 — exact languageCode, manual (kind != asr).
+  for (const lang of langChain) {
+    chosen = tracks.find(
+      (t) => t.languageCode === lang && t.kind !== "asr",
+    );
+    if (chosen) break;
+  }
+  // Pass 2 — exact languageCode, any kind (manual > asr).
+  if (!chosen) {
+    for (const lang of langChain) {
+      chosen = tracks.find((t) => t.languageCode === lang);
+      if (chosen) break;
+    }
+  }
+  // Pass 3 — long-tail: take any manual track the video has, then
+  // any track at all (so videos with only Korean captions still
+  // get a transcript instead of falling through to Whisper).
+  if (!chosen) chosen = tracks.find((t) => t.kind !== "asr") || tracks[0];
+
+  // 3. Fetch the caption file. YouTube supports a few formats via
+  //    the `fmt` query parameter; srv3 is XML with per-cue timing,
+  //    json3 is JSON with the same data. We try json3 first (cleaner
+  //    to parse) and fall back to srv3 if YouTube returns an
+  //    unrecognised body. `kind` is preserved so the sidepanel can
+  //    label the transcript manual vs auto.
+  const baseUrl = chosen.baseUrl;
+  const sep = baseUrl.includes("?") ? "&" : "?";
+  let jsonBody = null;
+  let xmlBody = null;
+  try {
+    const j = await fetch(`${baseUrl}${sep}fmt=json3`, {
+      credentials: "include",
+    });
+    if (j.ok) {
+      jsonBody = await j.text();
+    }
+  } catch {
+    // Network / CORS — ignore and try srv3.
+  }
+  if (!jsonBody) {
+    try {
+      const x = await fetch(`${baseUrl}${sep}fmt=srv3`, {
+        credentials: "include",
+      });
+      if (x.ok) xmlBody = await x.text();
+    } catch {
+      /* empty */
+    }
+  }
+  if (!jsonBody && !xmlBody) {
+    return { success: false, reason: "fetch-failed" };
+  }
+
+  // 4. Parse whichever format we got. json3 → events[].segs[].utf8;
+  //    srv3 → timedtext/p[@t][@d]. Returns the canonical envelope.
+  const segments = jsonBody
+    ? parseYTJson3(jsonBody)
+    : parseYTSrv3(xmlBody);
+
+  if (!segments.length) {
+    return { success: false, reason: "parse-failed" };
+  }
+
+  return {
+    success: true,
+    // 2026-09-29 (Irene regression): the sidepanel consumes
+    // `transcriptResult.transcript` (line 1151 of sidepanel.js) and
+    // bails in renderTranscript() when that field is undefined — my
+    // earlier code returned `segments` and the transcript panel
+    // rendered as an empty shell with the action buttons but no
+    // body. Match fetchBilibiliOfficialSubtitle's envelope so the
+    // existing sidepanel render code works without modification.
+    transcript: segments,
+    transcriptText: segments.map((s) => s.text).join(" ").trim(),
+    transcriptTextTimestamped: segments
+      .map((s) => {
+        const m = Math.floor(s.start / 60);
+        const sec = Math.floor(s.start % 60);
+        return `[${m}:${String(sec).padStart(2, "0")}] ${s.text}`;
+      })
+      .join("\n"),
+    language: chosen.languageCode || null,
+    source: chosen.kind === "asr" ? "youtube-auto-subtitle" : "youtube-subtitle",
+  };
+}
+
+// json3 caption response parser (YouTube's structured format).
+// Shape: { wireMagic: "pb3", events: [{ tStartMs, dDurationMs, segs: [{ utf8 }] }] }
+// `segs` may be missing for blank cues (silence). Multi-segment cues
+// (rare, language overlays) are joined with no space — matches the
+// behaviour yt-dlp / official YouTube transcript displays.
+function parseYTJson3(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const events = Array.isArray(parsed?.events) ? parsed.events : [];
+  const out = [];
+  for (const ev of events) {
+    const start = Math.max(0, Math.floor(Number(ev.tStartMs) || 0) / 1000);
+    const dur = Math.max(
+      0,
+      Math.floor(Number(ev.dDurationMs) || 0) / 1000,
+    );
+    const segs = Array.isArray(ev.segs) ? ev.segs : [];
+    const parts = segs
+      .map((s) => (typeof s?.utf8 === "string" ? s.utf8 : ""))
+      .filter((s) => s.length > 0);
+    // Strip newline markers (YouTube uses "\n" inside json3 to mark
+    // line breaks within a single cue). Joining with "" preserves the
+    // soft-break intent for downstream layout, matching yt-dlp's
+    // default caption rendering.
+    const joined = parts.join("").replace(/\\r\\n|\\n/g, " ").trim();
+    if (!joined) continue;
+    out.push({ start, duration: dur, text: joined });
+  }
+  return out;
+}
+
+// srv3 caption response parser (XML fallback when json3 isn't served).
+// Shape: <timedtext><p t="0.000" d="2.500">Hello</p>...</timedtext>
+// YouTube's t/d are floats in seconds; some older responses omit d
+// (duration) — in that case we approximate from the next cue's t.
+function parseYTSrv3(text) {
+  if (!text) return [];
+  const cues = [];
+  const cueRe =
+    /<p\s+t="([0-9.]+)"(?:\s+d="([0-9.]+)")?\s*>([\s\S]*?)<\/p>/g;
+  let m;
+  while ((m = cueRe.exec(text)) !== null) {
+    const start = Number(m[1]) || 0;
+    const explicitDur = m[2] != null ? Number(m[2]) : null;
+    const inner = m[3]
+      .replace(/<[^>]+>/g, "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .trim();
+    if (!inner) continue;
+    cues.push({ start, dur: explicitDur, text: inner });
+  }
+  if (!cues.length) return [];
+  // Fill in missing durations from the next cue's start.
+  const out = [];
+  for (let i = 0; i < cues.length; i++) {
+    const c = cues[i];
+    let dur = c.dur;
+    if (dur == null || !Number.isFinite(dur)) {
+      const next = cues[i + 1];
+      dur = next ? Math.max(0, next.start - c.start) : 0;
+    }
+    out.push({ start: c.start, duration: dur, text: c.text });
+  }
+  return out;
+}
+
+//   { success: true, transcript: [{start, duration, text}], language, source }
+//   { success: false, reason: "no-button" | "empty" | "no-segments" }
+async function extractYouTubeTranscriptFromDOM() {
+  // 1. If the transcript panel is already open, skip the click.
+  //    Otherwise find the button. YouTube has localised the label to
+  //    dozens of languages; we pattern-match a few of the common ones
+  //    ("Show transcript", "转写稿", "転写", etc.) plus the generic
+  //    aria-label fallback. Failing the button lookup is a normal
+  //    "video has no transcript" outcome, not an error.
+  let panel = document.querySelector(
+    "ytd-transcript-renderer, ytd-transcript-segment-list-renderer",
+  );
+  if (!panel) {
+    const btn = findYouTubeTranscriptButton();
+    if (!btn) {
+      return { success: false, reason: "no-button" };
+    }
+    btn.click();
+    panel = await waitForTranscriptPanel(3000);
+    if (!panel) return { success: false, reason: "panel-timeout" };
+  }
+
+  // 2. Walk the segment list. YouTube uses custom elements
+  //    (`ytd-transcript-segment-renderer`) with two child nodes we
+  //    care about: a `.segment-timestamp` div (e.g. "1:23") and a
+  //    `.segment-text` element. textContent works through the shadow
+  //    boundary because YouTube flattens the children into the parent.
+  const items = panel.querySelectorAll(
+    "ytd-transcript-segment-renderer, yt-transcript-segment-renderer",
+  );
+  if (!items.length) {
+    return { success: false, reason: "no-segments" };
+  }
+
+  const segments = [];
+  for (const item of items) {
+    const tsText = item.querySelector(".segment-timestamp")?.textContent?.trim() || "";
+    const text = item.querySelector(".segment-text")?.textContent?.trim() || "";
+    const start = parseYTTranscriptTimestamp(tsText);
+    if (start === null || !text) continue;
+    segments.push({ start, duration: 0, text });
+  }
+  if (!segments.length) {
+    return { success: false, reason: "empty" };
+  }
+
+  // 3. Compute per-segment duration from consecutive starts. The
+  //    last segment uses the video duration as the upper bound so the
+  //    final cue doesn't appear to run forever.
+  for (let i = 0; i < segments.length - 1; i++) {
+    segments[i].duration = Math.max(
+      0,
+      segments[i + 1].start - segments[i].start,
+    );
+  }
+  const video = document.querySelector("video");
+  const lastStart = segments[segments.length - 1].start;
+  if (video && Number.isFinite(video.duration) && video.duration > lastStart) {
+    segments[segments.length - 1].duration = video.duration - lastStart;
+  }
+
+  // 4. Build the same envelope the whisper_server subtitle endpoint
+  //    returns, so the rest of the pipeline (cache write, AI
+  //    correction, sidepanel render) doesn't care which path produced
+  //    it. `language` is unknown — YouTube labels the panel with the
+  //    chosen language only after the user picks one from the
+  //    settings menu; we leave it null and let the sidepanel decide.
+  return {
+    success: true,
+    // 2026-09-29 (Irene regression): the sidepanel consumes
+    // `transcriptResult.transcript` (line 1151 of sidepanel.js) and
+    // bails in renderTranscript() when that field is undefined — my
+    // earlier code returned `segments` and the transcript panel
+    // rendered as an empty shell with the action buttons but no
+    // body. Match fetchBilibiliOfficialSubtitle's envelope so the
+    // existing sidepanel render code works without modification.
+    transcript: segments,
+    transcriptText: segments.map((s) => s.text).join(" ").trim(),
+    transcriptTextTimestamped: segments
+      .map((s) => {
+        const m = Math.floor(s.start / 60);
+        const sec = Math.floor(s.start % 60);
+        return `[${m}:${String(sec).padStart(2, "0")}] ${s.text}`;
+      })
+      .join("\n"),
+    language: null,
+    source: "youtube-dom-transcript",
+  };
+}
+
+// 2026-09-29: DOM-based YouTube transcript extraction. Avoids the
+// yt-dlp + proxy + cookies stack entirely for the common case where
+// the user already opened the video in their browser — the transcript
+// is rendered into the page the moment they click "Show transcript"
+// under the description. yt-dlp through a proxy IP gets blocked by
+// YouTube's TLS-fingerprint bot wall ("Sign in to confirm you're not
+// a bot") even with valid auth cookies; reading the DOM uses the
+// browser's already-trusted TLS identity, so it always works when
+// the user can see captions in their browser.
+
+// Find the "Show transcript" trigger. YouTube sometimes renders it as
+// a `<button>`, sometimes as a `[role="button"]` inside a menu, and
+// the label is localised. We try the most reliable selectors first
+// (aria-label, class hooks) and only fall back to text-content
+// matching for the localised copies we know about.
+function findYouTubeTranscriptButton() {
+  // 1. aria-label / title hints
+  const ariaSel = [
+    'button[aria-label*="transcript" i]',
+    'button[title*="transcript" i]',
+    'yt-button-shape button[aria-label*="transcript" i]',
+  ].join(", ");
+  const ariaHit = document.querySelector(ariaSel);
+  if (ariaHit) return ariaHit.closest("button") || ariaHit;
+
+  // 2. Anchor / button with a known localised label. "Show transcript"
+  //    is the en-US label; YouTube ships 80+ translations, but the
+  //    most common ones in the wild are below. The substring match
+  //    is intentionally permissive to absorb small UI variations.
+  const labels = [
+    "show transcript",
+    "转写稿",
+    "转录文本",
+    "转录稿",
+    "転写を表示",
+    "show transcription",
+    "show captions",
+    "transcript",
+  ];
+  const candidates = document.querySelectorAll(
+    'button, [role="button"], a[href*="transcript"]',
+  );
+  for (const el of candidates) {
+    const txt = (el.textContent || "").trim().toLowerCase();
+    if (!txt || txt.length > 40) continue;
+    if (labels.some((l) => txt.includes(l))) return el;
+  }
+  return null;
+}
+
+// Poll for the transcript panel after clicking the trigger. YouTube
+// re-renders the panel asynchronously (single-tick SPA swap), so a
+// fixed delay isn't enough — we poll until the segment list appears
+// or the budget runs out.
+async function waitForTranscriptPanel(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const sel = "ytd-transcript-renderer, ytd-transcript-segment-list-renderer";
+  while (Date.now() < deadline) {
+    const panel = document.querySelector(sel);
+    if (panel && panel.querySelectorAll("ytd-transcript-segment-renderer, yt-transcript-segment-renderer").length > 0) {
+      return panel;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  // Final check — panel might be open but empty (video with no transcript).
+  return document.querySelector(sel);
+}
+
+// "0:00" / "1:23" / "1:23:45" → seconds. Returns null on bad input.
+function parseYTTranscriptTimestamp(raw) {
+  if (!raw) return null;
+  const parts = raw.split(":").map((s) => parseInt(s, 10));
+  if (parts.some((n) => Number.isNaN(n))) return null;
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
 }
 
 /**
