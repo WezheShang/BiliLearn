@@ -235,6 +235,21 @@ var YTD_SETTINGS = (() => {
     // most reliable signal, especially when Chrome's CHIPS partitioning
     // hides real auth cookies from chrome.cookies.getAll.
     youtubeCookiesText: "",
+    // 2026-10-01 (Irene: "make cookies automatic, like the Bilibili
+    // path"): cookie-chain mode selector.
+    //   "auto"   (default) — chrome.cookies auto-fetch FIRST: the
+    //             extension reads the user's YouTube cookies straight
+    //             from Chrome (verified 2026-10-01: the full auth set
+    //             lives on .youtube.com, NOT CHIPS-partitioned, so a
+    //             plain domain query reaches it) and forwards them as
+    //             Netscape text. Zero manual steps. No auth cookies
+    //             found → send nothing; public videos still work
+    //             unauthenticated.
+    //   "manual" — the 2026-09-28 chain: pasted text > file path >
+    //             chrome.cookies auto-fetch (auto only consulted when
+    //             both manual fields are empty).
+    //   "none"   — never send cookies (public videos only).
+    youtubeCookiesMode: "auto",
   });
 
   const WHISPER_MODELS = Object.freeze([
@@ -418,6 +433,15 @@ var YTD_SETTINGS = (() => {
         typeof input.youtubeCookiesText === "string"
           ? input.youtubeCookiesText.trim()
           : "",
+      // 2026-10-01: cookie-chain mode. Whitelist guard — anything
+      // unrecognized (including legacy absent) resolves to "auto" so
+      // existing installs pick up the zero-manual-steps behavior
+      // without a migration step.
+      youtubeCookiesMode: ["auto", "manual", "none"].includes(
+        input.youtubeCookiesMode,
+      )
+        ? input.youtubeCookiesMode
+        : "auto",
     };
   }
 

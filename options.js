@@ -1066,6 +1066,17 @@ const YTD_OPTIONS = (() => {
     // sensitive — same trade-off as the file path field, just more
     // convenient to use.
     const youtubeCookiesTextInput = doc.getElementById("youtubeCookiesText");
+    // 2026-10-01 (Irene: auto-first cookie chain): mode selector +
+    // the manual-input wrapper it toggles. Auto (default) = server-side
+    // yt-dlp reads the local Chrome cookie DB directly (zero manual
+    // steps, same spirit as the Bilibili path); Manual = the
+    // 2026-09-28 text/file chain below; None = never send cookies.
+    const youtubeCookiesModeSelect = doc.getElementById("youtubeCookiesMode");
+    const youtubeManualCookiesBlock = doc.getElementById("youtubeManualCookiesBlock");
+    const syncYoutubeManualBlockVisibility = () => {
+      if (!youtubeCookiesModeSelect || !youtubeManualCookiesBlock) return;
+      youtubeManualCookiesBlock.hidden = youtubeCookiesModeSelect.value !== "manual";
+    };
     const whisperCheckBtn = doc.getElementById("whisperCheckBtn");
     // 2026-09-02: notification-prefs toggles. Their stored values are
     // booleans normalized to true (see settings.js normalize) — these
@@ -1440,6 +1451,12 @@ const YTD_OPTIONS = (() => {
         if (youtubeProxyInput) youtubeProxyInput.value = settings.youtubeProxy || "";
         if (youtubeCookiesFileInput) youtubeCookiesFileInput.value = settings.youtubeCookiesFile || "";
         if (youtubeCookiesTextInput) youtubeCookiesTextInput.value = settings.youtubeCookiesText || "";
+        if (youtubeCookiesModeSelect) {
+          // Whitelisted in settings.js normalize; unknown/absent (legacy
+          // installs) renders as "auto" — matches the DEFAULTS value.
+          youtubeCookiesModeSelect.value = settings.youtubeCookiesMode || "auto";
+          syncYoutubeManualBlockVisibility();
+        }
         // 2026-09-02: notification-prefs defaults to ON — `=== false` is
         // the only way to land in the unchecked branch (see settings.js
         // normalize). Mirror the same strict form here so a missing
@@ -1513,6 +1530,7 @@ const YTD_OPTIONS = (() => {
         youtubeProxy: youtubeProxyInput ? youtubeProxyInput.value : "",
         youtubeCookiesFile: youtubeCookiesFileInput ? youtubeCookiesFileInput.value : "",
         youtubeCookiesText: youtubeCookiesTextInput ? youtubeCookiesTextInput.value : "",
+        youtubeCookiesMode: youtubeCookiesModeSelect ? youtubeCookiesModeSelect.value : "auto",
         // 2026-09-02: read the live checkbox state straight into the
         // payload. Save is the only place that converts DOM -> storage;
         // background.js never reads the form, it reads storage.
@@ -2325,6 +2343,13 @@ const YTD_OPTIONS = (() => {
         // no longer auto-runs the env check — the user clicks "检查系统"
         // themselves. The autoCheckWhisperAndExpand helper was removed.
       });
+    }
+    if (youtubeCookiesModeSelect) {
+      // 2026-10-01: manual inputs are only relevant (and visible) in
+      // "manual" mode; auto reads the Chrome cookie DB server-side and
+      // none never sends cookies. form "change" -> markDirty already
+      // covers the dirty flag for this select.
+      youtubeCookiesModeSelect.addEventListener("change", syncYoutubeManualBlockVisibility);
     }
     if (extFolderLink) {
       extFolderLink.addEventListener("click", (event) => {

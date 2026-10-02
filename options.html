@@ -509,15 +509,17 @@
                  inside <details> so the B站-only user does not see it
                  unless they actively expand the section. -->
             <details class="youtube-settings-block">
-              <summary>YouTube 支持（HTTP 代理；浏览器 cookies 自动获取）</summary>
+              <summary>YouTube 支持（HTTP 代理；cookies 自动获取）</summary>
               <p class="help">
                 bililearn 把 YouTube 视频转成可读字幕需要：①
                 youtube.com 在你这台机器上能通（国内网络通常需要填
-                HTTP 代理）；② YouTube 登录态——扩展会自动从
-                Chrome 取你的 YouTube cookies（Netscape 格式）传给
-                yt-dlp，绕过 googlevideo.com 的 403 反爬。前提是你在
-                Chrome 里已经登录 YouTube。下面的 Cookies 文件路径
-                留空即可——除非你用别的浏览器 profile 登录 YouTube。
+                HTTP 代理）；② 登录态——绕过 "Sign in to confirm
+                you're not a bot" 反爬。默认【自动】模式与 B
+                站字幕一样零手动步骤：扩展直接读本机 Chrome 里的
+                YouTube cookies（含登录态）转交 yt-dlp，前提是你在
+                Chrome 里登录过 YouTube。不需要登录就能看的公开视频，
+                扩展拿不到登录态时会以无 cookies 方式请求；只有
+                付费 / 登录墙视频才真的需要登录态。
               </p>
 
               <label for="youtubeProxy">YouTube HTTP 代理（可选）</label>
@@ -530,51 +532,65 @@
                 placeholder="http://127.0.0.1:15236  （留空 = 走直连）"
               />
 
-              <label for="youtubeCookiesFile"
-                >YouTube Cookies 文件路径（高级 / 可选）</label
-              >
-              <input
-                id="youtubeCookiesFile"
-                name="youtubeCookiesFile"
-                type="text"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="（留空 = 自动用 Chrome 当前 profile 的 YouTube cookies）"
-              />
-
-              <label for="youtubeCookiesText"
-                >YouTube Cookies 内容（直接粘贴 Netscape 文本，最稳）</label
-              >
-              <textarea
-                id="youtubeCookiesText"
-                name="youtubeCookiesText"
-                rows="8"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	1825051589	SID	g.a000xxx..."
-                style="width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;resize:vertical;"
-              ></textarea>
+              <label for="youtubeCookiesMode">YouTube 登录态获取方式</label>
+              <select id="youtubeCookiesMode" name="youtubeCookiesMode">
+                <option value="auto">
+                  自动（推荐）— 扩展直接读 Chrome 里的 YouTube cookies，零手动步骤
+                </option>
+                <option value="manual">
+                  手动 — 粘贴 / 指定 cookies.txt（非 Chrome 浏览器或特殊 profile）
+                </option>
+                <option value="none">无 — 永不带 cookies（仅公开视频）</option>
+              </select>
               <p class="help">
-                <strong>优先级：</strong
-                ><code>youtubeCookiesText</code>（粘贴的内容）
-                <code>&gt;</code>
-                <code>youtubeCookiesFile</code>（文件路径）
-                <code>&gt;</code>
-                扩展自动用 <code>chrome.cookies.getAll</code> 抓
-                Chrome 里的 YouTube cookies。<br />
-                <strong>什么时候用这个框：</strong
-                >① Chrome 113+ 默认开启了
-                <em>Cookies Having Independent Partitioned State</em>
-                —— 真正的 auth cookies（SID / HSID / LOGIN_INFO /
-                <code>__Secure-1PSID</code> 等）被分区存到
-                <code>accounts.google.com</code> 这个 top-level site，
-                扩展即使加了权限有时也拿不到；直接粘贴文件就能绕过。
-                ② 你用的是另一个浏览器 profile 登录 YouTube，扩展抓的
-                不是你的会话。格式：Netscape cookies.txt（每行
-                <code>domain  TRUE  /  secure  expiry  name  value</code>，
-                第一行以 <code># Netscape HTTP Cookie File</code> 开头，
-                不超过 64 KB）。粘贴完点 <em>Save settings</em>。
+                <strong>自动</strong>：扩展用
+                <code>chrome.cookies</code> 读取本机 Chrome 的
+                YouTube 登录态（SID / HSID / SAPISID /
+                <code>__Secure-1PSID</code> 等，含 .google.com.hk
+                域），无需任何导出操作。
+                <strong>手动</strong>：仅当你用非 Chrome
+                浏览器登录 YouTube、或自动模式失效时才需要。
               </p>
+
+              <div id="youtubeManualCookiesBlock" hidden>
+                <label for="youtubeCookiesFile"
+                  >YouTube Cookies 文件路径（高级 / 可选）</label
+                >
+                <input
+                  id="youtubeCookiesFile"
+                  name="youtubeCookiesFile"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="（留空 = 回退到 chrome.cookies 自动抓取）"
+                />
+
+                <label for="youtubeCookiesText"
+                  >YouTube Cookies 内容（直接粘贴 Netscape 文本）</label
+                >
+                <textarea
+                  id="youtubeCookiesText"
+                  name="youtubeCookiesText"
+                  rows="8"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	1825051589	SID	g.a000xxx..."
+                  style="width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;resize:vertical;"
+                ></textarea>
+                <p class="help">
+                  <strong>手动模式优先级：</strong
+                  ><code>youtubeCookiesText</code>（粘贴的内容）
+                  <code>&gt;</code>
+                  <code>youtubeCookiesFile</code>（文件路径）
+                  <code>&gt;</code>
+                  扩展自动用 <code>chrome.cookies.getAll</code> 抓
+                  Chrome 里的 YouTube cookies。格式：Netscape
+                  cookies.txt（每行
+                  <code>domain  TRUE  /  secure  expiry  name  value</code>，
+                  第一行以 <code># Netscape HTTP Cookie File</code> 开头，
+                  不超过 64 KB）。粘贴完点 <em>Save settings</em>。
+                </p>
+              </div>
             </details>
 
             <!-- 2026-09-02: notifyOnSummary + notifyOnAnalysis are bound

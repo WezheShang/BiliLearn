@@ -3681,9 +3681,8 @@ async function fetchYouTubeVideoInfo(rawInput, settings) {
   // before we ever get a `subtitles` dict back. Use the shared helper
   // so /info, /audio and /subtitle see identical cookie resolution.
   const cookies = await resolveYouTubeCookies(settings);
-  if (cookies.cookiesFile) payload.cookiesFile = cookies.cookiesFile;
-  if (cookies.cookiesText) payload.cookiesText = cookies.cookiesText;
-  return await whisperServerPostJson("/youtube/info", payload);
+  applyYouTubeCookies(payload, cookies);
+  return await postYouTubeWithCookieFallback("/youtube/info", payload);
 }
 
 // 2026-09-29: ask the content script running in the YouTube watch
@@ -3801,42 +3800,65 @@ function isYouTubeWatchUrl(rawUrl) {
 // whisper_server endpoints (/info, /audio, /subtitle) need cookies
 // when the video is gated by the "Sign in to confirm" wall; this
 // helper returns the cookie payload the extension should pass to the
-// server, in the same priority order the user sees on the options
-// page.
+// server.
 //
-// Priority (2026-09-28):
-//   1. `settings.youtubeCookiesText` — user-pasted raw cookies
-//      (textarea in options page). Wins over both the file path and
-//      the chrome.cookies auto-fetch because explicit paste is the
-//      most reliable signal — especially when Chrome's CHIPS
-//      partitioning hides real auth cookies from
-//      chrome.cookies.getAll.
-//   2. `settings.youtubeCookiesFile` — absolute path to a
-//      user-managed cookies.txt (manual export from a separate
-//      browser profile).
-//   3. `chrome.cookies.getAll` (via fetchYouTubeNetscapeCookies) —
-//      last resort, only works when the extension can actually see
-//      the partitioned auth cookies.
+// Priority (2026-10-01, Irene: "make cookies automatic, like the
+// Bilibili path"):
+//   `settings.youtubeCookiesMode` selects the chain —
+//   "auto"   (default) chrome.cookies auto-fetch FIRST — the
+//            extension reads the user's YouTube cookies straight
+//            from Chrome and forwards them as Netscape text. Zero
+//            manual steps, exactly like the Bilibili fetches ride
+//            on credentials:"include". Storage forensics
+//            (2026-10-01, local Default profile): the full auth set
+//            (SID / HSID / SSID / SAPISID / APISID / LOGIN_INFO /
+//            __Secure-1PSID / __Secure-1PSIDTS) lives on
+//            `.youtube.com` and is NOT CHIPS-partitioned
+//            (top_frame_site_key empty), so the plain
+//            chrome.cookies.getAll domain query reaches it. When no
+//            auth cookies exist (Chrome not logged in) we send
+//            nothing — yt-dlp tries unauthenticated, which works
+//            for public videos on un-flagged IPs.
+//   "manual" pasted text > cookies file path > the same auto-fetch
+//            (the 2026-09-28 chain, but the paste no longer shadows
+//            auto — auto is only consulted when manual fields are
+//            empty, and ONLY in manual mode).
+//   "none"   never send cookies — public videos only.
 //
-// Returns `{cookiesFile?: string, cookiesText?: string}`. Both fields
-// can be absent when the user is not logged into YouTube and the
-// auto-fetch returned nothing — the server still runs (yt-dlp tries
-// unauthenticated) and surfaces a clean 403 for restricted videos.
+// NOT in the auto chain anymore: cookiesFromBrowser ("chrome") —
+// server-side yt-dlp reads Chrome's SQLite cookie store directly.
+// Sounded like the closest match to the Bilibili approach, but
+// live-tested 2026-10-01: "ERROR: Could not copy Chrome cookie
+// database" (yt-dlp issue #7271) whenever Chrome is running on
+// Windows. Dead on arrival for the common case; the server endpoint
+// still accepts the field for exotic setups.
+//
+// Returns `{cookiesFile?, cookiesText?}`. Both fields can be absent
+// — the server still runs (yt-dlp tries unauthenticated) and
+// surfaces a clean 403 for restricted videos.
 async function resolveYouTubeCookies(settings) {
-  const text = (settings.youtubeCookiesText || "").trim();
-  if (text) {
-    // Length guard mirrors whisper_server's 64 KB cap so the user
-    // gets the same error message at the extension layer instead of
-    // only seeing the server's "invalid_input" raise.
-    if (text.length > 64 * 1024) {
-      console.warn(
-        `[bililearn] youtubeCookiesText is ${text.length} bytes; whisper_server caps at 65536 — the field will be truncated.`,
-      );
+  const mode = settings.youtubeCookiesMode || "auto";
+  if (mode === "none") return {};
+  if (mode === "manual") {
+    const text = (settings.youtubeCookiesText || "").trim();
+    if (text) {
+      // Length guard mirrors whisper_server's 64 KB cap so the user
+      // gets the same error message at the extension layer instead
+      // of only seeing the server's "invalid_input" raise.
+      if (text.length > 64 * 1024) {
+        console.warn(
+          `[bililearn] youtubeCookiesText is ${text.length} bytes; whisper_server caps at 65536 — the field will be truncated.`,
+        );
+      }
+      return { cookiesText: text };
     }
-    return { cookiesText: text };
+    const file = (settings.youtubeCookiesFile || "").trim();
+    if (file) return { cookiesFile: file };
   }
-  const file = (settings.youtubeCookiesFile || "").trim();
-  if (file) return { cookiesFile: file };
+  // auto mode (and manual mode with both manual fields empty):
+  // read the browser's YouTube cookies directly. No auth cookies
+  // found → empty object → unauthenticated attempt, which still
+  // succeeds for public videos on IPs YouTube hasn't flagged.
   try {
     const netscape = await fetchYouTubeNetscapeCookies();
     if (netscape) return { cookiesText: netscape };
@@ -3848,6 +3870,51 @@ async function resolveYouTubeCookies(settings) {
   return {};
 }
 
+// Merge resolveYouTubeCookies() output into a /youtube/* request
+// payload. One helper so the three fetch functions can never drift
+// apart on which cookie fields they forward.
+function applyYouTubeCookies(payload, cookies) {
+  if (cookies.cookiesFromBrowser) payload.cookiesFromBrowser = cookies.cookiesFromBrowser;
+  if (cookies.cookiesFromBrowserProfile) payload.cookiesFromBrowserProfile = cookies.cookiesFromBrowserProfile;
+  if (cookies.cookiesFile) payload.cookiesFile = cookies.cookiesFile;
+  if (cookies.cookiesText) payload.cookiesText = cookies.cookiesText;
+  return payload;
+}
+
+// POST to a whisper_server /youtube/* endpoint with a one-shot
+// cookie fallback (2026-10-01, Irene: "if a logged-out browser can
+// see the subtitles, the extension must fetch them").
+//
+// When the request carried cookiesFromBrowser (auto mode) and the
+// server fails with a cookie-STORE error — yt-dlp could not open /
+// find / decrypt the browser's SQLite cookie DB — the browser-login
+// path is dead on this machine, so retry once with NO cookies at
+// all. Public videos then still work exactly like a logged-out
+// browser visit. Video-level auth failures ("Sign in to confirm
+// you're not a bot" 403, members-only, age gate) do NOT match the
+// pattern and propagate untouched — retrying those without cookies
+// would only double the wait for the same 403.
+const YT_COOKIE_STORE_ERROR_RE =
+  /cookies? (database|file)|could not find|unable to open|decrypt|cookiesfrombrowser|from browser|no such (browser|profile)/i;
+async function postYouTubeWithCookieFallback(path, payload) {
+  try {
+    return await whisperServerPostJson(path, payload);
+  } catch (e) {
+    const msg = String(e?.message || "");
+    if (payload.cookiesFromBrowser && YT_COOKIE_STORE_ERROR_RE.test(msg)) {
+      debugLog(
+        "[dk-bililearn BG] cookiesFromBrowser path failed on the server — retrying without cookies:",
+        msg,
+      );
+      const retry = { ...payload };
+      delete retry.cookiesFromBrowser;
+      delete retry.cookiesFromBrowserProfile;
+      return await whisperServerPostJson(path, retry);
+    }
+    throw e;
+  }
+}
+
 // YouTube cookies via chrome.cookies API (2026-09-27)
 //
 // Replaces the previous "export cookies to a .txt file" workflow. The
@@ -3856,15 +3923,16 @@ async function resolveYouTubeCookies(settings) {
 // YouTube session cookies directly — no extra extension install, no
 // manual export, no "where do I put the file" step.
 //
-// IMPORTANT (2026-09-28, Irene regression): YouTube's actual auth
-// cookies (SID / HSID / SSID / APISID / SAPISID / LOGIN_INFO / NID /
-// AEC / 1P_JAR) live under `.google.com`, NOT `.youtube.com`. The
-// `.youtube.com` set only has VISITOR_INFO1_LIVE / YSC / GPS / CONSENT
-// / ST-* — those are public / non-auth cookies that don't survive
-// YouTube's "Sign in to confirm you're not a bot" gate. The extension
-// needs both domains to be effective. The manifest host_permissions
-// must list *.google.com and accounts.google.com as well, or
-// chrome.cookies.getAll returns empty for those scopes.
+// IMPORTANT (2026-10-01, live storage forensics — supersedes the
+// 2026-09-28 note): this machine's full auth set (SID / HSID / SSID /
+// SAPISID / APISID / LOGIN_INFO / __Secure-1PSID / __Secure-1PSIDTS)
+// lives on `.youtube.com` itself and is NOT partitioned, so the plain
+// domain query below reaches it. Auth cookies on `.google.com` /
+// `.google.com.hk` also exist on some installs (mainland-network
+// Google domain hop), so those domains stay in the query list. The
+// manifest host_permissions must keep *.google.com /
+// accounts.google.com, or chrome.cookies.getAll returns empty for
+// those scopes.
 //
 // Output format: Netscape HTTP Cookie File (the same shape yt-dlp
 // reads via its `cookiefile` option). See
@@ -3887,18 +3955,20 @@ async function fetchYouTubeNetscapeCookies() {
   //                    under third-party cookie restrictions
   //                    (Chrome 113+ default).
   //
-  // Background: YouTube's auth cookies (SID / HSID / LOGIN_INFO /
-  // LOGIN_INFO_HIDDEN / __Secure-* — the ones that survive YouTube's
-  // "Sign in to confirm you're not a bot" wall) live on
-  // `.google.com` and were created during a login flow with
-  // `https://accounts.google.com` as the top-level site. Chrome
-  // now marks these cookies with a partitionKey whose topLevelSite
-  // is accounts.google.com. A plain `{domain: ".google.com"}`
-  // query returns ZERO of them — that's why my 2026-04-27 attempt
-  // saw only VISITOR_INFO1_LIVE / YSC / GPS / CONSENT (those are
-  // non-partitioned, uninteresting cookies). To surface partitioned
-  // cookies you must pass the topLevelSite explicitly, which is what
-  // the queries below do.
+  // Background: 2026-10-01 live storage forensics (local Default
+  // profile, Chrome 2026) corrected the earlier theory. The auth
+  // cookies that survive YouTube's "Sign in to confirm you're not a
+  // bot" wall — SID / HSID / SSID / SAPISID / APISID / LOGIN_INFO /
+  // __Secure-1PSID / __Secure-1PSIDTS — are set directly on
+  // `.youtube.com` during a first-party YouTube login, with
+  // top_frame_site_key EMPTY (not CHIPS-partitioned). A plain
+  // `{domain: ".youtube.com"}` query returns all of them. Only the
+  // uninteresting public cookies (VISITOR_INFO1_LIVE / ROLLOUT_TOKEN
+  // from third-party embeds) are partitioned. The `.google.com`
+  // variants below stay for other login shapes, and `.google.com.hk`
+  // covers mainland-network installs where Google properties hop to
+  // the .hk domain (verified locally: full auth set present there
+  // too).
   //
   // Each query is tried once per scope; results are deduped by
   // (name, domain, path).
@@ -3908,6 +3978,10 @@ async function fetchYouTubeNetscapeCookies() {
     { domain: "google.com" },
     { domain: ".youtube.com" },
     { domain: "youtube.com" },
+    // Mainland-network Google domain hop (2026-10-01: local machine
+    // holds a full auth set on .google.com.hk as well).
+    { domain: ".google.com.hk" },
+    { domain: "google.com.hk" },
     // url-form: handles partitioned cookies whose partitionKey's
     // topLevelSite is the URL's eTLD+1.
     { url: "https://www.youtube.com/" },
@@ -3999,18 +4073,15 @@ async function fetchYouTubeAudioBlob(rawInput, settings) {
     url: norm.url,
     proxy: settings.youtubeProxy || "",
   };
-  // 2026-09-28: shared cookie resolver (text > file > auto-fetch).
-  // See resolveYouTubeCookies() above for the priority rationale —
-  // keeping this in one helper means a future change to cookie policy
-  // (e.g. a new "paste cookies URL" option) lands in exactly one
-  // place instead of three fetch functions.
+  // 2026-09-28: shared cookie resolver (see resolveYouTubeCookies for
+  // the 2026-10-01 auto-first flip). applyYouTubeCookies keeps all
+  // three fetch functions forwarding the same fields.
   const cookies = await resolveYouTubeCookies(settings);
-  if (cookies.cookiesFile) requestPayload.cookiesFile = cookies.cookiesFile;
-  if (cookies.cookiesText) requestPayload.cookiesText = cookies.cookiesText;
+  applyYouTubeCookies(requestPayload, cookies);
   // Step 1 — tell server to download. yt-dlp writes to
   // %TEMP%/bililearn_youtube/<videoId>.m4a and returns the relative
   // audio URL.
-  const triggerPayload = await whisperServerPostJson("/youtube/audio", requestPayload);
+  const triggerPayload = await postYouTubeWithCookieFallback("/youtube/audio", requestPayload);
   // Step 2 — fetch the actual bytes. Server has them cached for 1h
   // (see _YT_AUDIO_TTL_SEC); subsequent downloads for the same id are
   // a re-fetch, not a re-download.
@@ -4063,11 +4134,10 @@ async function fetchYouTubeOfficialSubtitle(rawInput, settings) {
   // fail at the audio download for the same reason. Cookies fix both
   // endpoints at once.
   const cookies = await resolveYouTubeCookies(settings);
-  if (cookies.cookiesFile) payload.cookiesFile = cookies.cookiesFile;
-  if (cookies.cookiesText) payload.cookiesText = cookies.cookiesText;
+  applyYouTubeCookies(payload, cookies);
   let data;
   try {
-    data = await whisperServerPostJson("/youtube/subtitle", payload);
+    data = await postYouTubeWithCookieFallback("/youtube/subtitle", payload);
   } catch (e) {
     // whisperServerPostJson throws when the server returns ok:false.
     // Inspect the message — if it's the "no_subtitle" error_type the

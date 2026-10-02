@@ -59,7 +59,8 @@ if not defined PYTHON_EXE (
   echo.
   echo Then either:
   echo   - Re-run this bat after Python is on PATH, or
-  echo   - Set BILILEARN_PYTHON (legacy BILIDOWN_PYTHON also works) to your python.exe absolute path before running.
+  echo   - Set BILILEARN_PYTHON to your python.exe absolute path before running.
+  echo     Legacy BILIDOWN_PYTHON from before the rename still works.
   echo.
   echo Example:
   echo   set BILILEARN_PYTHON=C:\Python312\python.exe
