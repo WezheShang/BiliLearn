@@ -875,50 +875,179 @@ function extractVideoInfo() {
 }
 
 function extractYouTubeVideoInfo() {
-  // YouTube watch page DOM. The title is wrapped in an yt-formatted-string
-  // (custom element); textContent still resolves to the displayed text
-  // because custom elements expose the children through the standard DOM
-  // interface.
-  const titleElement = document.querySelector(
-    "h1.ytd-watch-metadata yt-formatted-string, " +
-    "#title > h1 > yt-formatted-string, " +
-    "#title yt-formatted-string, " +
-    "h1.title yt-formatted-string",
-  );
-  const channelElement = document.querySelector(
-    "ytd-channel-name a, #owner-name a, ytd-video-owner-renderer a, " +
-    "yt-formatted-string#owner-name, " +
-    "ytd-channel-name yt-formatted-string",
-  );
-  const descriptionElement = document.querySelector(
-    "ytd-text-inline-expander#description-inline-expander, " +
-    "meta[name=\"description\"], " +
-    "meta[property=\"og:description\"]",
-  );
-  const videoElement = document.querySelector("video");
-  // YouTube does not surface publish date as a stable visible string.
-  // It does ship a `<meta itemprop="datePublished" content="...">` tag
-  // in the page <head> — usually ISO 8601 (e.g. "2026-05-01T12:34:56Z").
-  const pubdateElement =
+  // 2026-10-04 fix: the DOM-scrape path is unreliable. YouTube ships watch
+  // pages as a skeleton (SSR HTML has zero `<h1>` / `<yt-formatted-string>`
+  // nodes — only empty `<div id="title" class="text-shell skeleton-bg-color">`
+  // placeholders), then hydrates everything client-side. Once hydrated, the
+  // page contains the same `<yt-formatted-string>` custom element under
+  // many siblings: the main video title, "Up next" cards, the description
+  // expander, and the comments / chapters / "In this video" section
+  // headers. The old selector list — `#title yt-formatted-string,
+  // h1.title yt-formatted-string` — was a substring match against an
+  // ambiguous id and a generic class, so depending on hydration order it
+  // would latch onto "Comments" / "Up next" / "In this video" instead of
+  // the real title.
+  //
+  // The authoritative source is the JSON blob YouTube inlines in the page
+  // head as `var ytInitialPlayerResponse = { ..., videoDetails: { title,
+  // author, lengthSeconds, shortDescription, ... } };`. That JSON is
+  // always present in the SSR HTML (it is what the player itself reads),
+  // and `videoDetails.title` is unique per video id. We prefer it; the
+  // DOM is only a fallback for the rare SPA build where the script is
+  // split or minified across tags we don't catch.
+  const playerResponse = extractYouTubePlayerResponse();
+  const details = playerResponse?.videoDetails || {};
+  let title = (details.title || "").toString().trim();
+  let channelName = (details.author || "").toString().trim();
+  // lengthSeconds comes back as a numeric string ("213") — normalise to a
+  // positive integer; 0 means "unknown" so downstream code can detect it.
+  const playerDuration =
+    details.lengthSeconds && Number.isFinite(+details.lengthSeconds)
+      ? Math.max(0, Math.floor(+details.lengthSeconds))
+      : 0;
+  let description = (details.shortDescription || "").toString();
+  // Publish date: SSR ships `<meta itemprop="datePublished" content="...">`
+  // as ISO 8601. Prefer it; otherwise fall back to the player response's
+  // microformat.publishDate (also ISO 8601). Normalise to YYYY-MM-DD.
+  const pubdateMeta =
     document.querySelector('meta[itemprop="datePublished"]') ||
     document.querySelector('meta[itemprop="uploadDate"]');
-  const pubdateRaw = pubdateElement?.getAttribute("content") || "";
-  // Normalise to YYYY-MM-DD (the sidepanel cache layer keys on this).
+  const microPublish =
+    playerResponse?.microformat?.playerMicroformatRenderer?.publishDate ||
+    playerResponse?.microformat?.playerMicroformatRenderer?.uploadDate ||
+    "";
+  const pubdateRaw = pubdateMeta?.getAttribute("content") || microPublish || "";
   const pubdate = pubdateRaw ? pubdateRaw.slice(0, 10) : "";
-  // Description: prefer the inline-expander text, fall back to meta tag.
-  let description = "";
-  if (descriptionElement?.tagName === "META") {
-    description = descriptionElement.getAttribute("content") || "";
-  } else if (descriptionElement) {
-    description = descriptionElement.textContent?.trim() || "";
+
+  // DOM fallback — only consulted when the player JSON didn't yield a
+  // title. Selectors are tightened to the main metadata block AND the
+  // raw textContent check rejects anything that looks like a section
+  // header (Comments, Up next, In this video, Recommended, etc.).
+  if (!title) {
+    const SECTION_HEADER_RE =
+      /^(comments?|description|up next|recommended|in this video|chapters?|people also (watched|viewed)|related|playlist|transcript|description ·|live chat|chat replay)$/i;
+    // The main title lives inside `#title` (id, not class — id="title" is
+    // unique to the primary info block on watch pages) and the yt-formatted-
+    // string inside it has the actual title text. Avoid `h1.title yt-
+    // formatted-string` because class="title" appears on multiple H1s.
+    const domTitle =
+      document.querySelector("#title h1 yt-formatted-string") ||
+      document.querySelector("#title > h1 > yt-formatted-string") ||
+      document.querySelector(
+        "ytd-watch-metadata h1 yt-formatted-string",
+      );
+    const domTitleText = (domTitle?.textContent || "").trim();
+    if (domTitleText && !SECTION_HEADER_RE.test(domTitleText)) {
+      title = domTitleText;
+    }
   }
+  if (!channelName) {
+    // `ytd-channel-name` is the owner block; inside it, the first
+    // `yt-formatted-string` is the channel display name. The plain
+    // `<a>` href carries the channel slug (/@handle) which is more
+    // reliable than visible text when localisation splits the name.
+    const channelAnchor =
+      document.querySelector("ytd-channel-name a") ||
+      document.querySelector("ytd-video-owner-renderer a") ||
+      document.querySelector("#owner-name a");
+    channelName =
+      (channelAnchor?.textContent || "").trim() ||
+      (channelAnchor?.getAttribute("href") || "")
+        .replace(/^\//, "")
+        .replace(/^@/, "")
+        .split("/")
+        .filter(Boolean)
+        .join(" ") ||
+      "";
+  }
+  if (!description) {
+    const descriptionElement = document.querySelector(
+      "ytd-text-inline-expander#description-inline-expander, " +
+        'meta[name="description"], ' +
+        'meta[property="og:description"]',
+    );
+    if (descriptionElement?.tagName === "META") {
+      description = descriptionElement.getAttribute("content") || "";
+    } else if (descriptionElement) {
+      description = descriptionElement.textContent?.trim() || "";
+    }
+  }
+  // Duration fallback: `<video>` is the actual <video> element rendered
+  // in the player; its `duration` is NaN until metadata loads, which is
+  // why we always coerce.
+  const videoElement = document.querySelector("video");
+  const domDuration =
+    videoElement && Number.isFinite(videoElement.duration)
+      ? Math.max(0, Math.floor(videoElement.duration))
+      : 0;
+  const duration = playerDuration || domDuration;
+
   return {
-    title: titleElement?.textContent?.trim() || "",
-    channelName: channelElement?.textContent?.trim() || "",
-    duration: videoElement?.duration || 0,
+    title,
+    channelName,
+    duration,
     description,
     pubdate,
   };
+}
+
+// Extracts the `ytInitialPlayerResponse` JSON blob YouTube inlines in
+// the watch page head. This is the same blob the YouTube player itself
+// reads on first paint, so it is present in the SSR HTML (i.e. before
+// any SPA hydration) and `videoDetails` is always keyed to the URL's
+// video id. Returns the parsed object, or null when the page didn't
+// expose one (rare — old / broken SPA builds).
+//
+// 2026-10-04: extracted from extractYouTubeTranscriptFromPageState so
+// both the transcript path and the title/channel/description path can
+// use the same canonical source. Avoids the drift where subtitles
+// "know" the correct video metadata while the title fallback still
+// scrapes the (post-hydration, unstable) DOM.
+function extractYouTubePlayerResponse() {
+  const scripts = Array.from(document.querySelectorAll("script"));
+  for (const s of scripts) {
+    const text = s.textContent || "";
+    const idx = text.indexOf("ytInitialPlayerResponse");
+    if (idx === -1) continue;
+    // Walk forward to the opening brace of the JSON object.
+    const eqIdx = text.indexOf("{", idx);
+    if (eqIdx === -1) continue;
+    // Brace-match to find the matching closing brace (the JSON object
+    // is large and may contain nested objects/strings with braces).
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let i = eqIdx;
+    while (i < text.length) {
+      const ch = text[i];
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = !inString;
+      } else if (!inString) {
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            i++;
+            break;
+          }
+        }
+      }
+      i++;
+    }
+    const blob = text.substring(eqIdx, i);
+    try {
+      return JSON.parse(blob);
+    } catch {
+      // JSON.parse failed — try the next script tag. This is normal
+      // when there's a minified wrapper that splits the JSON across
+      // multiple script elements.
+    }
+  }
+  return null;
 }
 
 // 2026-09-29: DOM-based YouTube transcript extraction. Avoids the
@@ -957,53 +1086,10 @@ function extractYouTubeVideoInfo() {
 async function extractYouTubeTranscriptFromPageState() {
   // 1. Locate `ytInitialPlayerResponse` in any <script> tag on the page.
   //    YouTube ships it inline as `var ytInitialPlayerResponse = {...};`
-  //    early in the head. We scan all script tags because the markup
-  //    shifts around between SPA builds; the variable name is stable.
-  const scripts = Array.from(document.querySelectorAll("script"));
-  let playerResponse = null;
-  for (const s of scripts) {
-    const text = s.textContent || "";
-    const idx = text.indexOf("ytInitialPlayerResponse");
-    if (idx === -1) continue;
-    // Walk forward to the opening brace of the JSON object.
-    const eqIdx = text.indexOf("{", idx);
-    if (eqIdx === -1) continue;
-    // Brace-match to find the matching closing brace (the JSON object
-    // is large and may contain nested objects/strings with braces).
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    let i = eqIdx;
-    while (i < text.length) {
-      const ch = text[i];
-      if (escape) {
-        escape = false;
-      } else if (ch === "\\") {
-        escape = true;
-      } else if (ch === '"') {
-        inString = !inString;
-      } else if (!inString) {
-        if (ch === "{") depth++;
-        else if (ch === "}") {
-          depth--;
-          if (depth === 0) {
-            i++;
-            break;
-          }
-        }
-      }
-      i++;
-    }
-    const blob = text.substring(eqIdx, i);
-    try {
-      playerResponse = JSON.parse(blob);
-      break;
-    } catch {
-      // JSON.parse failed — try the next script tag. This is normal
-      // when there's a minified wrapper that splits the JSON across
-      // multiple script elements.
-    }
-  }
+  //    early in the head. We share the JSON extraction with the title /
+  //    channel / description path via extractYouTubePlayerResponse() so
+  //    the two readers can't drift apart on parsing.
+  const playerResponse = extractYouTubePlayerResponse();
   if (!playerResponse) {
     return { success: false, reason: "no-page-state" };
   }

@@ -14,6 +14,19 @@
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
 importScripts("settings.js");
+// KB management (2026-10-03 spec): shared pure helpers, server fetch
+// wrapper, and the background queue consumer for incremental LLM updates.
+importScripts("kb-shared.js");
+importScripts("kb-client.js");
+importScripts("kb-queue.js");
+
+// KB queue consumer: bind alarm listener + restore schedule on SW wake.
+try {
+  KbQueue.bindAlarm();
+  KbQueue.reschedule();
+} catch (e) {
+  console.warn("[kb] init failed:", e);
+}
 
 const DEBUG = true;
 const formatTimestamp = (seconds) => {
@@ -655,6 +668,17 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true; // Keep the message channel open for async response
+  }
+
+  // KB queue: sidepanel/options ask the SW to consume pending LLM updates
+  // right away (manual mode button, or after adding a video).
+  if (message.action === "kbKickQueue") {
+    KbQueue.reschedule();
+    KbQueue.consumeAllQueues().then(
+      (r) => sendResponse(r),
+      (e) => sendResponse({ ok: false, error: String(e && e.message || e) })
+    );
+    return true; // async response
   }
 
   if (message.action === "triggerWhisperTranscription") {
@@ -3639,6 +3663,21 @@ function detectVideoSource(raw) {
   return null;
 }
 
+// 2026-10-03: canonical watch URL for BOTH platforms. The note-save
+// handlers (handleSaveNote / handleSaveSummaryNote) used to call
+// canonicalBilibiliUrl unguarded, which threw "Invalid Bilibili BV ID."
+// on 11-char YouTube ids — every "保存整篇至笔记" on a YouTube video
+// failed with 保存失败. YouTube ids never contain "@p" (charset is
+// [A-Za-z0-9_-]), so the split is bilibili-only, same as before.
+function canonicalWatchUrlForVideoId(rawVideoId) {
+  const [bvid, partToken] = String(rawVideoId || "").split("@p");
+  if (detectVideoSource(bvid) === "youtube") {
+    return `https://www.youtube.com/watch?v=${bvid}`;
+  }
+  const part = Math.max(1, Number(partToken) || 1);
+  return `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
+}
+
 async function whisperServerPostJson(path, body, signal) {
   const url = (settings_whisperUrl_get()).replace(/\/+$/, "") + path;
   const res = await fetch(url, {
@@ -5155,7 +5194,9 @@ async function handleSaveNote(
   try {
     const [bvid, partToken] = String(videoId || "").split("@p");
     const part = Math.max(1, Number(partToken) || 1);
-    const canonicalVideoUrl = `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
+    // 2026-10-03: platform-aware URL — canonicalBilibiliUrl throws on
+    // YouTube ids (see canonicalWatchUrlForVideoId).
+    const canonicalVideoUrl = canonicalWatchUrlForVideoId(videoId);
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
 
     // First, try to get the transcript from the bililearn cache. The side panel
@@ -5308,9 +5349,9 @@ async function handleSaveNote(
  */
 async function handleSaveSummaryNote(videoId, videoTitle, channelName, summaryText) {
   try {
-    const [bvid, partToken] = String(videoId || "").split("@p");
-    const part = Math.max(1, Number(partToken) || 1);
-    const canonicalVideoUrl = `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
+    // 2026-10-03: platform-aware URL — canonicalBilibiliUrl throws on
+    // YouTube ids, which made 保存整篇至笔记 fail on every YouTube video.
+    const canonicalVideoUrl = canonicalWatchUrlForVideoId(videoId);
     const text = typeof summaryText === "string" ? summaryText.trim() : "";
 
     if (!text) {

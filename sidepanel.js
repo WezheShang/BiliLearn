@@ -928,6 +928,7 @@ function renderVideoInfoHeader() {
   document.getElementById("videoChannel").textContent = currentChannelName || "";
   videoInfo.style.display =
     currentVideoTitle || currentChannelName ? "block" : "none";
+  refreshKbButton();
 }
 
 async function startBililearn(videoId, videoUrl) {
@@ -1476,8 +1477,14 @@ function renderTranscript() {
 }
 
 function currentCanonicalVideoUrl() {
-  const [bvid, partToken] = String(currentVideoId || "").split("@p");
-  return `https://www.bilibili.com/video/${bvid}${Number(partToken) > 1 ? `?p=${Number(partToken)}` : ""}`;
+  const [vid, partToken] = String(currentVideoId || "").split("@p");
+  // 2026-10-03: YouTube ids are exactly 11 chars of [A-Za-z0-9_-]
+  // (same shape as background.js YT_ID_RE); B站 BV ids are 12+ chars
+  // and BV-prefixed. Platform-aware so exports/notes link correctly.
+  if (/^[A-Za-z0-9_-]{11}$/.test(vid)) {
+    return `https://www.youtube.com/watch?v=${vid}`;
+  }
+  return `https://www.bilibili.com/video/${vid}${Number(partToken) > 1 ? `?p=${Number(partToken)}` : ""}`;
 }
 
 function timestampLabel(seconds) {
@@ -3379,17 +3386,18 @@ async function loadFromCache(videoId) {
       return null;
     }
 
-    const storedSettings = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
-    const wantsAsr = !!YTD_SETTINGS.normalize(
-      storedSettings[YTD_SETTINGS.STORAGE_KEY],
-    ).asrApiKey;
-    if (wantsAsr) {
-      // Provider field kept for backward compat with stored user settings;
-      // never used at runtime (default is "none"). Cache is invalidated so a
-      // future settings change re-triggers the fetch path.
-      await removeVideoCache(videoId);
-      return null;
-    }
+    // (2026-10-02) Removed the legacy wantsAsr guard that used to sit
+    // here. It checked the long-dead asrApiKey field (DashScope era —
+    // the asrProvider enum no longer even has a dashscope option) and
+    // DELETED the video's cache entry on EVERY load when the key was
+    // merely present in storage. With a leftover key, summaries and
+    // analyses saved minutes earlier vanished the moment the user
+    // switched away and returned, and the panel started a fresh LLM
+    // run each time. A leftover key must never invalidate the cache:
+    // nothing reads it at runtime (asrProvider === "none" default).
+    // Same for its partner-in-crime mergeLlmResultToCache: with the
+    // guard gone, a finished summary parked after a mid-call video
+    // switch finds its entry and persists again.
 
     // Earlier Bilibili builds parsed "@p2" with Number("p2"), silently
     // fetching P1 and caching that transcript under another part. Never reuse
@@ -4087,3 +4095,186 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
 };
+
+// ============================================================
+// KB management (2026-10-03 spec
+// docs/superpowers/specs/2026-10-03-bililearn-kb-management-design.md)
+// ============================================================
+let kbSettingsCache = null;
+
+async function kbGetSettings() {
+  const result = await chrome.storage.local.get("ytd_settings");
+  const raw = result && result.ytd_settings ? result.ytd_settings : {};
+  const normalized = (typeof YTD_SETTINGS !== "undefined" && YTD_SETTINGS.normalize)
+    ? YTD_SETTINGS.normalize(raw) : raw;
+  if (normalized && normalized.whisperUrl) KbClient.setBaseUrl(normalized.whisperUrl);
+  return normalized;
+}
+
+async function kbSaveSettingsPatch(patch) {
+  const cur = await kbGetSettings();
+  const next = { ...cur, ...patch };
+  await chrome.storage.local.set({ ytd_settings: next });
+  kbSettingsCache = next;
+  return next;
+}
+
+function kbToast(msg, isError) {
+  const btn = document.getElementById("addToKbBtn");
+  if (!btn) return;
+  const old = btn.textContent;
+  btn.textContent = isError ? `⚠ ${msg}` : `✓ ${msg}`;
+  btn.disabled = true;
+  setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2400);
+}
+
+async function refreshKbButton() {
+  const btn = document.getElementById("addToKbBtn");
+  if (!btn) return;
+  kbSettingsCache = await kbGetSettings();
+  const disabled = kbSettingsCache.kbEnabled === false; // 用户显式关才隐藏
+  btn.style.display = disabled ? "none" : "";
+  if (disabled) return;
+  const hasRoot = !!kbSettingsCache.kbRootDir;
+  if (!hasRoot) { btn.disabled = true; btn.title = "请先在「设置 → KB 管理」里启用并选 KB 主目录"; return; }
+  const health = await KbClient.health();
+  btn.disabled = !health;
+  btn.title = health ? "添加到KB" : "需要本地 whisper server（127.0.0.1:7860）";
+}
+
+async function toggleKbDropdown() {
+  const dd = document.getElementById("kbDropdown");
+  if (dd.style.display !== "none") { dd.style.display = "none"; return; }
+  const settings = await kbGetSettings();
+  let kbs;
+  try { kbs = await KbClient.list(settings.kbRootDir); }
+  catch (e) { kbToast("KB server 不在线", true); return; }
+  dd.innerHTML = "";
+  for (const kb of kbs.filter((k) => !k.archived)) {
+    const b = document.createElement("button");
+    b.className = "kb-item";
+    b.innerHTML = `${escapeHtml(kb.name)}<span class="kb-badge">${escapeHtml(kb.build_method || "未配置")}</span>`;
+    b.addEventListener("click", () => { dd.style.display = "none"; addCurrentVideoToKb(kb.name); });
+    dd.appendChild(b);
+  }
+  const sep = document.createElement("div"); sep.className = "kb-sep"; dd.appendChild(sep);
+  const create = document.createElement("button");
+  create.className = "kb-item";
+  create.textContent = "＋ 新建 KB…";
+  create.addEventListener("click", () => { dd.style.display = "none"; openKbNewDialog(); });
+  dd.appendChild(create);
+  const btn = document.getElementById("addToKbBtn");
+  const rect = btn.getBoundingClientRect();
+  dd.style.left = `${rect.left}px`; dd.style.top = `${rect.bottom + 6}px`;
+  dd.style.display = "";
+}
+
+function openKbNewDialog() {
+  document.getElementById("kbNewName").value = currentChannelName || "新KB";
+  document.getElementById("kbNewSpeaker").value = currentChannelName || "";
+  document.getElementById("kbNewMethod").value = "karpathy";
+  document.getElementById("kbNewDialog").style.display = "";
+}
+
+async function saveNewKbAndAdd() {
+  const settings = await kbGetSettings();
+  const name = KbShared.sanitizeKbName(document.getElementById("kbNewName").value);
+  const method = document.getElementById("kbNewMethod").value;
+  const speaker = document.getElementById("kbNewSpeaker").value.trim();
+  if (!name) { kbToast("KB 名不能为空", true); return; }
+  try { await KbClient.create(settings.kbRootDir, name, method, speaker); }
+  catch (e) {
+    kbToast(String(e.message).includes("exists") ? "同名 KB 已存在" : "创建失败: " + e.message, true);
+    return;
+  }
+  document.getElementById("kbNewDialog").style.display = "none";
+  await addCurrentVideoToKb(name);
+}
+
+async function addCurrentVideoToKb(kbName) {
+  if (!currentVideoId) { kbToast("当前无视频", true); return; }
+  const settings = await kbGetSettings();
+  const kbDir = `${settings.kbRootDir}\\${kbName}`;
+  const { id, page, platform } = KbShared.parseVideoId(currentVideoId);
+
+  // kb.json（无则现场补建——扫描发现的外来子目录首次添加走这里）
+  let buildMethod = null, defaultSpeaker = "";
+  try {
+    const cfg = JSON.parse((await KbClient.read(settings.kbRootDir, `${kbDir}\\kb.json`)).content);
+    buildMethod = cfg.build_method || null;
+    defaultSpeaker = cfg.default_speaker || "";
+  } catch {}
+  if (!buildMethod) {
+    const pick = window.prompt("该目录还没有 kb.json。选择构建方法：karpathy / nvwa / raw", "raw");
+    if (!pick || !["karpathy", "nvwa", "raw"].includes(pick.trim())) { kbToast("已取消", true); return; }
+    buildMethod = pick.trim();
+    await KbClient.write(settings.kbRootDir, `${kbDir}\\kb.json`, JSON.stringify({
+      name: kbName, build_method: buildMethod, default_speaker: "",
+      created_at: new Date().toISOString(), archived: false, version: 1,
+    }, null, 2));
+  }
+
+  // 查重（bvid+page）
+  let existing = null;
+  try {
+    const vids = await KbClient.videos(settings.kbRootDir, kbName);
+    existing = vids.find((v) => v.bvid === id && Number(v.page || 1) === page) || null;
+  } catch {}
+  if (existing) { kbToast(`已在 KB 中（${existing.date || "?"} 版本）`, false); return; }
+
+  // 组装并写入
+  const fallbackToday = new Date().toISOString().slice(0, 10);
+  const meta = {
+    speaker: defaultSpeaker || currentChannelName || "未知",
+    author: currentChannelName || "",
+    platform, bvid: id, page,
+    date: currentPubDate || fallbackToday,
+    dateSource: currentPubDate ? "pubdate" : "fallback_today",
+    addedAt: new Date().toISOString(),
+    lang: currentTranscriptLanguage || "",
+    topic: currentVideoTitle || "untitled",
+    url: currentCanonicalVideoUrl(),
+    durationS: Math.round(currentVideoDuration || 0),
+  };
+  const fileName = KbShared.videoFileName(meta.topic, meta.date, page);
+  const segments = Array.isArray(currentTranscript) ? currentTranscript : [];
+  const doc = KbShared.buildKbDocument(meta, segments);
+  try {
+    await KbClient.write(settings.kbRootDir, `${kbDir}\\videos\\${fileName}`, doc);
+  } catch (e) { kbToast("写入失败: " + e.message, true); return; }
+
+  // 入队（raw 不入队）+ 记住上次 KB
+  if (buildMethod !== "raw") {
+    const task = {
+      kb_name: kbName, video_file: fileName,
+      meta: { bvid: meta.bvid, page, date: meta.date, topic: meta.topic, speaker: meta.speaker },
+      enqueued_at: new Date().toISOString(), attempts: 0,
+    };
+    await KbClient.write(settings.kbRootDir,
+      `${kbDir}\\queue\\pending\\${Date.now()}_${meta.bvid}@p${page}.json`, JSON.stringify(task, null, 2));
+    chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => {});
+    kbToast(`已加入《${kbName}》，更新中`);
+  } else {
+    kbToast(`已加入《${kbName}》`);
+  }
+  await kbSaveSettingsPatch({ lastKbName: kbName });
+}
+
+// 绑定（DOM ready 后挂事件）
+document.getElementById("addToKbBtn")?.addEventListener("click", async (e) => {
+  if (e.offsetX > e.currentTarget.clientWidth - 24) { toggleKbDropdown(); return; } // 右侧箭头区
+  const settings = await kbGetSettings();
+  if (settings.lastKbName) { addCurrentVideoToKb(settings.lastKbName); }
+  else { toggleKbDropdown(); }
+});
+document.getElementById("kbNewCancel")?.addEventListener("click", () => {
+  document.getElementById("kbNewDialog").style.display = "none";
+});
+document.getElementById("kbNewSave")?.addEventListener("click", saveNewKbAndAdd);
+document.addEventListener("click", (e) => {
+  const dd = document.getElementById("kbDropdown");
+  if (dd && dd.style.display !== "none" && !dd.contains(e.target) && e.target?.id !== "addToKbBtn") {
+    dd.style.display = "none";
+  }
+});
+refreshKbButton();

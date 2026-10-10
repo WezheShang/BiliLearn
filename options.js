@@ -2718,3 +2718,213 @@ if (typeof module !== "undefined" && module.exports) {
 if (typeof document !== "undefined") {
   YTD_OPTIONS.initialize();
 }
+
+// ============================================================
+// KB management module (2026-10-03 spec) — self-initializing,
+// storage-direct but visually a peer section in the main settings form,
+// before the Save button so the user sees it as a peer of all other settings.
+// ============================================================
+(async function initKbManager() {
+  // Node require (test harness) has no DOM — same guard convention as the
+  // YTD_OPTIONS.initialize() call above. In the browser the script tags sit
+  // at the end of <body>, so the KB card below is already parsed.
+  if (typeof document === "undefined") return;
+  const $ = (id) => document.getElementById(id);
+  if (!$("kbManagerCard")) return;
+
+  function kbEscape(s) {
+    return String(s).replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[ch]));
+  }
+
+  async function getSettings() {
+    const r = await chrome.storage.local.get("ytd_settings");
+    const normalized = (typeof YTD_SETTINGS !== "undefined" && YTD_SETTINGS.normalize)
+      ? YTD_SETTINGS.normalize(r.ytd_settings || {}) : (r.ytd_settings || {});
+    if (normalized && normalized.whisperUrl) KbClient.setBaseUrl(normalized.whisperUrl);
+    return normalized;
+  }
+  async function savePatch(patch) {
+    const next = { ...(await getSettings()), ...patch };
+    await chrome.storage.local.set({ ytd_settings: next });
+    render(next);
+  }
+
+  async function render(settings) {
+    const enabled = settings.kbEnabled === true;
+    $("kbEnabled").checked = enabled;
+    $("kbRootDir").value = settings.kbRootDir || "";
+    $("kbUpdateMode").value = settings.kbUpdateMode || "realtime";
+    $("kbRunNowBtn").style.display = settings.kbUpdateMode === "manual" ? "" : "none";
+    if (enabled && settings.kbRootDir) await renderKbList(settings.kbRootDir);
+    else $("kbListBody").innerHTML = `<tr><td colspan="5" style="color:#888">${settings.kbRootDir ? "启用后这里显示 KB 列表（启动 whisper server 后刷新）" : "填写 KB 主目录后这里显示 KB 列表"}</td></tr>`;
+  }
+
+  let _kbListInflight = 0; // guard against concurrent renderKbList (race doubles rows)
+
+  async function renderKbList(root) {
+    const ticket = ++_kbListInflight;
+    const body = $("kbListBody");
+    body.innerHTML = "";
+    $("kbFailedList").innerHTML = "";
+    let kbs;
+    try { kbs = await KbClient.list(root); }
+    catch (e) {
+      if (ticket !== _kbListInflight) return; // a newer renderKbList has taken over
+      body.innerHTML = `<tr><td colspan="5">无法连接 whisper server（${kbEscape(e.message)}）</td></tr>`;
+      $("kbFailedBlock").classList.add("is-hidden");
+      return;
+    }
+    if (ticket !== _kbListInflight) return; // stale render — newer call will paint
+    let anyFailed = false;
+    for (const kb of kbs) {
+      const tr = document.createElement("tr");
+      const methodSel = document.createElement("select");
+      for (const m of KbShared.KB_BUILD_METHODS) {
+        const o = document.createElement("option");
+        o.value = m; o.textContent = m; if (kb.build_method === m) o.selected = true;
+        methodSel.appendChild(o);
+      }
+      if (!kb.has_kb_json) {
+        const o = document.createElement("option");
+        o.value = ""; o.textContent = "未配置"; o.selected = true; methodSel.prepend(o);
+      }
+      methodSel.addEventListener("change", async () => {
+        const method = methodSel.value || "raw";
+        // karpathy/nvwa 需要的子目录在消费端 mkdir 前不可写文件——先补齐骨架
+        try {
+          if (method !== "raw") {
+            await KbClient.write(root, `${kb.dir}\\videos\\.keep`, "");
+            await KbClient.deletePath(root, `${kb.dir}\\videos\\.keep`, false);
+          }
+        } catch {}
+        const cfg = { name: kb.name, build_method: method, default_speaker: "",
+          created_at: new Date().toISOString(), archived: false, version: 1 };
+        await KbClient.write(root, `${kb.dir}\\kb.json`, JSON.stringify(cfg, null, 2));
+        renderKbList(root);
+      });
+      // 名字单元格：直接点击改名（contenteditable + blur/Enter 触发）
+      const nameCell = td("");
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "kb-name-edit";
+      nameSpan.contentEditable = "true";
+      nameSpan.tabIndex = 0;
+      nameSpan.spellcheck = false;
+      nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
+      nameSpan.title = "点击改名";
+      const commitRename = async () => {
+        const newName = KbShared.sanitizeKbName(nameSpan.textContent || "");
+        if (!newName || newName === kb.name) {
+          nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
+          return;
+        }
+        try {
+          await KbClient.move(root, kb.dir, `${root}\\${newName}`);
+          renderKbList(root);
+        } catch (e) {
+          window.alert("改名失败: " + e.message);
+          nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
+        }
+      };
+      nameSpan.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); nameSpan.blur(); }
+        if (e.key === "Escape") { e.preventDefault(); nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : ""); nameSpan.blur(); }
+      });
+      nameSpan.addEventListener("blur", commitRename);
+      nameCell.appendChild(nameSpan);
+      tr.appendChild(nameCell);
+      tr.appendChild(tdEl(methodSel));
+      tr.appendChild(td(String(kb.video_count)));
+      const qState = kb.pending_count > 0 ? `pending ${kb.pending_count}` : "空";
+      tr.appendChild(td(qState));
+      // 操作列：只放一个红色 ×（delete）
+      const ops = document.createElement("td");
+      ops.className = "kb-ops";
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "kb-delete-btn";
+      delBtn.textContent = "×";
+      delBtn.title = "删除 KB";
+      delBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!window.confirm(`删除 KB「${kb.name}」？默认只解绑（目录保留）。`)) return;
+        if (window.confirm("连磁盘目录一起删除？此操作不可恢复！（取消 = 只解绑）")) {
+          try { await KbClient.deletePath(root, kb.dir, true); }
+          catch (err) { window.alert("删除失败: " + err.message); return; }
+        } else {
+          const cfgRaw = (await KbClient.read(root, `${kb.dir}\\kb.json`).catch(() => ({ content: "{}" }))).content;
+          const cfg = JSON.parse(cfgRaw || "{}"); cfg.archived = true;
+          await KbClient.write(root, `${kb.dir}\\kb.json`, JSON.stringify(cfg, null, 2));
+        }
+        renderKbList(root);
+      });
+      ops.appendChild(delBtn);
+      tr.appendChild(ops);
+      body.appendChild(tr);
+      // failed 队列渲染
+      try {
+        const failed = await KbClient.queue(root, kb.name, "failed");
+        if (failed.length) {
+          anyFailed = true;
+          const li = document.createElement("li");
+          li.textContent = `${kb.name} · ${failed.map((f) => f.file).join(", ")}`;
+          const retry = mkBtn("重试", async () => {
+            for (const f of failed) {
+              const task = f.task; task.attempts = 0;
+              await KbClient.write(root, `${kb.dir}\\queue\\pending\\${f.file}`, JSON.stringify(task, null, 2));
+              await KbClient.deletePath(root, `${kb.dir}\\queue\\failed\\${f.file}`, false);
+            }
+            chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => {});
+            renderKbList(root);
+          });
+          li.appendChild(retry);
+          $("kbFailedList").appendChild(li);
+        }
+      } catch {}
+    }
+    $("kbFailedBlock").classList.toggle("is-hidden", !anyFailed);
+  }
+
+  function td(text) { const c = document.createElement("td"); c.textContent = text; return c; }
+  function tdEl(el) { const c = document.createElement("td"); c.appendChild(el); return c; }
+  function mkBtn(label, onClick) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "secondary"; b.textContent = label;
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  // 启用/取消开关 → 即时存到 storage。选目录可以之后再补（按钮 disabled 会提示）。
+  $("kbEnabled").addEventListener("change", async () => {
+    await savePatch({ kbEnabled: !!$("kbEnabled").checked });
+    // 取消时清空列表，避免残留显示；启用 + 有目录时才刷新
+    if (!($("kbEnabled").checked)) $("kbListBody").innerHTML = "";
+    else if ($("kbRootDir").value.trim()) await renderKbList($("kbRootDir").value.trim().replace(/[\\/]+$/, ""));
+  });
+
+  $("kbBrowseBtn").addEventListener("click", async () => {
+    const picked = await KbClient.pickRoot().catch(() => ({ path: null }));
+    if (picked && picked.path) { $("kbRootDir").value = picked.path; }
+  });
+  $("kbRootDir").addEventListener("change", async () => {
+    const root = $("kbRootDir").value.trim().replace(/[\\/]+$/, "");
+    await savePatch({ kbRootDir: root });
+  });
+  $("kbRescanBtn").addEventListener("click", async () => {
+    await savePatch({}); // 重新渲染 = 重新扫描
+  });
+  $("kbUpdateMode").addEventListener("change", async () => {
+    await savePatch({ kbUpdateMode: $("kbUpdateMode").value });
+    chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => {}); // 触发 reschedule
+  });
+  $("kbRunNowBtn").addEventListener("click", async () => {
+    $("kbRunNowBtn").disabled = true;
+    const r = await chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => null);
+    $("kbRunNowBtn").disabled = false;
+    window.alert(r && r.ok ? `更新完成（消费 ${r.consumed ?? 0} 条）` : `更新失败：${r && r.error}`);
+    render(await getSettings());
+  });
+
+  render(await getSettings());
+})();

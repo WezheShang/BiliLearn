@@ -250,6 +250,22 @@ var YTD_SETTINGS = (() => {
     //             both manual fields are empty).
     //   "none"   — never send cookies (public videos only).
     youtubeCookiesMode: "auto",
+    // ---- KB management (2026-10-03 KB feature, spec
+    //      docs/superpowers/specs/2026-10-03-bililearn-kb-management-design.md).
+    // Master switch, default OFF. Turning it on forces the user through a
+    // KB root directory selection flow (options page) before anything else.
+    kbEnabled: false,
+    // Absolute path to the KB root. NO silent default: stays empty until the
+    // user explicitly picks one (the picker pre-fills the BiliSubs path as a
+    // suggestion only). Empty + kbEnabled=true means "setup incomplete" —
+    // the KB UI treats that as disabled.
+    kbRootDir: "",
+    // Queue consumption schedule: "realtime" (30s alarm) | "manual"
+    // (Settings "update now" button only) | "daily" (01:00 local batch;
+    // skipped if the browser/server is unavailable at trigger time).
+    kbUpdateMode: "realtime",
+    // Remembered last-used KB name for the split-button's primary action.
+    lastKbName: "",
   });
 
   const WHISPER_MODELS = Object.freeze([
@@ -442,6 +458,18 @@ var YTD_SETTINGS = (() => {
       )
         ? input.youtubeCookiesMode
         : "auto",
+      // ---- KB management (2026-10-03). Strict boolean / whitelist /
+      //      trim normalization, same defensive posture as the fields above.
+      kbEnabled: input.kbEnabled === true,
+      kbRootDir: (() => {
+        const raw = typeof input.kbRootDir === "string" ? input.kbRootDir.trim() : "";
+        return raw ? raw.replace(/[\\/]+$/, "") : "";
+      })(),
+      kbUpdateMode: ["realtime", "manual", "daily"].includes(input.kbUpdateMode)
+        ? input.kbUpdateMode
+        : DEFAULTS.kbUpdateMode,
+      lastKbName:
+        typeof input.lastKbName === "string" ? input.lastKbName.trim() : "",
     };
   }
 

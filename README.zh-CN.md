@@ -13,6 +13,7 @@
 - 笔记与摘要缓存在 Chrome 本地
 - 导出带时间戳的 Markdown 文本
 - 不需要 Supadata，不经过开发者服务器
+- KB 管理（2026-10-03）：字幕一键入库（B 站 + YouTube），三种构建方法（karpathy LLM wiki / nvwa 心智模型 / raw 只落盘），后台 LLM 增量更新（实时 / 手动 / 每日凌晨），options 页可视化管理（改名 / 解绑 / 删盘 / 失败重试）。详见 `docs/superpowers/specs/2026-10-03-bililearn-kb-management-design.md`
 
 ## 限制
 

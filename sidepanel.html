@@ -196,6 +196,7 @@
                   <option value="html">HTML 网页</option>
                 </select>
                 <button class="enhance-btn" id="exportTranscriptBtn">导出</button>
+                <button class="enhance-btn" id="addToKbBtn" title="添加到KB">📚 添加到KB ▾</button>
               </div>
             </div>
             <div id="transcriptList"></div>
@@ -413,7 +414,34 @@
       </div>
     </div>
 
+    <div id="kbDropdown" class="kb-dropdown" style="display: none"></div>
+
+    <div id="kbNewDialog" class="kb-dialog-backdrop" style="display: none">
+      <div class="kb-dialog">
+        <h3>新建 KB</h3>
+        <label class="kb-field">KB 名（即目录名）
+          <input id="kbNewName" type="text" maxlength="60" />
+        </label>
+        <label class="kb-field">构建方法
+          <select id="kbNewMethod">
+            <option value="karpathy">karpathy · LLM wiki（索引 + 主题地图）</option>
+            <option value="nvwa">nvwa · 心智模型（思维框架 + 案例集）</option>
+            <option value="raw">raw · 只记录原始数据，不构建知识库</option>
+          </select>
+        </label>
+        <label class="kb-field">默认讲者名（写入字幕 frontmatter 的 speaker）
+          <input id="kbNewSpeaker" type="text" maxlength="60" />
+        </label>
+        <div class="kb-dialog-actions">
+          <button id="kbNewCancel" class="enhance-btn" style="background:transparent;color:#444;border:1px solid #d0d4dc">取消</button>
+          <button id="kbNewSave" class="enhance-btn">创建并添加当前视频</button>
+        </div>
+      </div>
+    </div>
+
     <script src="settings.js"></script>
+    <script src="kb-shared.js"></script>
+    <script src="kb-client.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

@@ -842,3 +842,50 @@ details > summary::before {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
 }
+
+/* ---- KB management (2026-10-03) ---- */
+.kb-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.kb-table th, .kb-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #e5e7eb; }
+.kb-table th { color: #667; font-weight: 600; }
+.kb-table select { padding: 4px 6px; border: 1px solid #ccc; border-radius: 6px; }
+.kb-table td .secondary { margin-right: 6px; }
+
+/* ---- KB management toggle (2026-10-04) ---- */
+.toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; flex-direction: row; }
+.toggle input[type="checkbox"] { margin: 0; flex: 0 0 auto; }
+.toggle > span { display: inline-block; white-space: nowrap; writing-mode: horizontal-tb; }
+
+/* ---- KB list inline actions (2026-10-04) ---- */
+.kb-name-edit {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: text;
+  border: 1px solid transparent;
+  outline: none;
+  min-width: 60px;
+  user-select: text;
+  -webkit-user-select: text;
+  caret-color: #fb7299;
+}
+.kb-name-edit[contenteditable="true"]:hover { background: rgba(0,0,0,.04); border-color: #e5e7eb; }
+.kb-name-edit:focus { background: #fff; border-color: #fb7299; box-shadow: 0 0 0 2px rgba(251,114,153,.18); }
+.kb-table .kb-ops { text-align: center; width: 32px; }
+.kb-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #d92f3a;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  font-weight: 700;
+}
+.kb-delete-btn:hover { background: rgba(217,47,58,.1); }
+.kb-delete-btn:focus { outline: 2px solid rgba(217,47,58,.35); outline-offset: 1px; }

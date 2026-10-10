@@ -600,6 +600,50 @@
           </div>
         </section>
 
+        <!-- KB management (2026-10-03). 自管存储, 独立 section, 视觉上
+             与其他 settings section 平级, 放在 Save 按钮之前 -->
+        <section class="card" id="kbManagerCard">
+          <h2>KB 管理</h2>
+
+          <div class="setting-row">
+            <label class="toggle" for="kbEnabled">
+              <input type="checkbox" id="kbEnabled" />
+              <span>启用 KB 管理</span>
+            </label>
+          </div>
+
+          <div class="setting-row">
+            <label for="kbRootDir">KB 主目录</label>
+            <div style="display:flex; gap:8px">
+              <input type="text" id="kbRootDir" placeholder="例如 C:\Users\you\Downloads\BiliSubs" style="flex:1" />
+              <button id="kbBrowseBtn" class="secondary" type="button">浏览…</button>
+              <button id="kbRescanBtn" class="secondary" type="button">重新扫描</button>
+            </div>
+          </div>
+          <p class="help">KB = 此目录下的第一层子目录。目录名即 KB 名；没有 kb.json 的子目录也可用（首次添加时选构建方法）。</p>
+
+          <div class="setting-row">
+            <label for="kbUpdateMode">更新频次</label>
+            <select id="kbUpdateMode">
+              <option value="realtime">每次新增实时更新（30 秒内）</option>
+              <option value="manual">手动更新</option>
+              <option value="daily">每日凌晨 1 点自动更新（host 不可用则跳过）</option>
+            </select>
+            <button id="kbRunNowBtn" class="secondary" type="button" style="display:none">立即更新</button>
+          </div>
+
+          <h3>KB 列表</h3>
+          <table id="kbListTable" class="kb-table">
+            <thead><tr><th>名字</th><th>方法</th><th>视频</th><th>队列</th><th>操作</th></tr></thead>
+            <tbody id="kbListBody"></tbody>
+          </table>
+
+          <div id="kbFailedBlock" class="is-hidden">
+            <h3>失败队列</h3>
+            <ul id="kbFailedList" class="diagnostics-list"></ul>
+          </div>
+        </section>
+
         <div class="form-actions">
           <button class="primary" type="submit" data-i18n="saveSettings">
             Save settings
@@ -781,6 +825,8 @@
     </div>
 
     <script src="settings.js"></script>
+    <script src="kb-shared.js"></script>
+    <script src="kb-client.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

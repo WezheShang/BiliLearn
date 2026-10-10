@@ -2231,3 +2231,21 @@ body {
   background: var(--accent-hover);
   transform: translateY(-1px);
 }
+
+/* ---- KB management (2026-10-03) ---- */
+.kb-dropdown { position: fixed; z-index: 9999; background: var(--bg-card, #fff);
+  border: 1px solid #d0d4dc; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  min-width: 220px; padding: 6px 0; max-height: 320px; overflow: auto; }
+.kb-dropdown .kb-item { display: block; width: 100%; text-align: left; padding: 8px 14px;
+  border: 0; background: none; cursor: pointer; font-size: 13px; }
+.kb-dropdown .kb-item:hover { background: rgba(0,0,0,.06); }
+.kb-dropdown .kb-item .kb-badge { font-size: 11px; color: #888; margin-left: 6px; }
+.kb-dropdown .kb-sep { border-top: 1px solid #e5e7eb; margin: 4px 0; }
+.kb-dialog-backdrop { position: fixed; inset: 0; z-index: 10000; background: rgba(0,0,0,.4);
+  display: flex; align-items: center; justify-content: center; }
+.kb-dialog { background: var(--bg-card, #fff); border-radius: 12px; padding: 20px;
+  width: min(420px, 92vw); display: flex; flex-direction: column; gap: 12px; }
+.kb-dialog h3 { margin: 0; }
+.kb-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #444; }
+.kb-field input, .kb-field select { padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+.kb-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }

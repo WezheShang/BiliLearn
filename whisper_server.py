@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -1048,6 +1049,58 @@ def _parse_srt(path: Path) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# KB management endpoints (/kb/*), 2026-10-03 spec.
+#
+# The extension treats the FIRST-LEVEL SUBDIRECTORIES of a user-chosen root
+# as knowledge bases. Every path-taking endpoint enforces a sandbox: after
+# realpath() resolution the target must stay inside the given root, so `..`
+# traversal and symlink escapes are rejected with 400.
+# ---------------------------------------------------------------------------
+
+def _kb_realpath_under_root(path: str, root: str) -> Path:
+    """Resolve `path` and require it to live under `root`. Raise ValueError otherwise."""
+    root_real = Path(root).resolve()
+    target = Path(path).resolve()
+    if target != root_real and root_real not in target.parents:
+        raise ValueError(f"path escapes KB root: {path}")
+    return target
+
+
+def _kb_read_frontmatter(md_text: str) -> dict:
+    """Parse a flat YAML frontmatter block (key: value) from a videos/*.md."""
+    meta = {}
+    if md_text.startswith("---"):
+        for line in md_text.split("---")[1].strip().splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                meta[key.strip()] = value.strip().strip('"')
+    return meta
+
+
+def _kb_load_kbs(entry: Path) -> dict:
+    """Build the /kb/list info dict for one first-level directory under root."""
+    kb_json = entry / "kb.json"
+    info = {
+        "name": entry.name,
+        "has_kb_json": kb_json.is_file(),
+        "archived": False,
+        "build_method": None,
+        "video_count": len(list((entry / "videos").glob("*.md"))) if (entry / "videos").is_dir() else 0,
+        "pending_count": len(list((entry / "queue" / "pending").glob("*.json")))
+        if (entry / "queue" / "pending").is_dir() else 0,
+        "dir": str(entry),
+    }
+    if kb_json.is_file():
+        try:
+            cfg = json.loads(kb_json.read_text(encoding="utf-8"))
+            info["archived"] = bool(cfg.get("archived"))
+            info["build_method"] = cfg.get("build_method")
+        except Exception:  # noqa: BLE001 - unreadable kb.json still lists the dir
+            pass
+    return info
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "bililearn-whisper/1.0"
 
@@ -1077,6 +1130,69 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- GET ----------
 
     def do_GET(self):  # noqa: N802
+        if self.path.startswith("/kb/"):
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            if parsed.path == "/kb/list":
+                try:
+                    root = (qs.get("root") or [""])[0]
+                    root_dir = Path(root)
+                    items = [_kb_load_kbs(entry) for entry in sorted(root_dir.iterdir())
+                             if entry.is_dir()] if root_dir.is_dir() else []
+                    self._send_json(HTTPStatus.OK, items)
+                except Exception as exc:  # noqa: BLE001
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            if parsed.path == "/kb/read":
+                try:
+                    path = _kb_realpath_under_root(qs["path"][0], qs["root"][0])
+                    self._send_json(HTTPStatus.OK, {"content": path.read_text(encoding="utf-8")})
+                except ValueError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                except OSError as exc:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                except KeyError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"missing param: {exc}"})
+                return
+            if parsed.path == "/kb/videos":
+                try:
+                    kb_dir = _kb_realpath_under_root(str(Path(qs["root"][0]) / qs["kb"][0]), qs["root"][0])
+                    vids_dir = kb_dir / "videos"
+                    vids = []
+                    if vids_dir.is_dir():
+                        for md in sorted(vids_dir.glob("*.md")):
+                            meta = _kb_read_frontmatter(md.read_text(encoding="utf-8"))
+                            vids.append({"bvid": meta.get("bvid"), "page": meta.get("page"),
+                                         "date": meta.get("date"), "topic": meta.get("topic"),
+                                         "file": md.name})
+                    self._send_json(HTTPStatus.OK, vids)
+                except ValueError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                except KeyError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"missing param: {exc}"})
+                except Exception as exc:  # noqa: BLE001
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            if parsed.path == "/kb/queue":
+                try:
+                    state = qs.get("state", ["pending"])[0]
+                    if state not in ("pending", "done", "failed"):
+                        raise ValueError(f"bad queue state: {state}")
+                    kb_dir = _kb_realpath_under_root(str(Path(qs["root"][0]) / qs["kb"][0]), qs["root"][0])
+                    qdir = kb_dir / "queue" / state
+                    items = [{"file": p.name, "task": json.loads(p.read_text(encoding="utf-8"))}
+                             for p in sorted(qdir.glob("*.json"))] if qdir.is_dir() else []
+                    self._send_json(HTTPStatus.OK, items)
+                except ValueError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                except KeyError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"missing param: {exc}"})
+                except Exception as exc:  # noqa: BLE001
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found", "path": parsed.path})
+            return
         if self.path == "/health":
             missing = _missing_deps()
             self._send_json(HTTPStatus.OK, {
@@ -1157,6 +1273,135 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- POST ----------
 
     def do_POST(self):  # noqa: N802
+        if self.path == "/kb/create":
+            try:
+                body = self._read_json()
+                root = (body.get("root") or "").strip()
+                name = (body.get("name") or "").strip()
+                method = body.get("build_method") or "raw"
+                speaker = (body.get("default_speaker") or "").strip()
+                if not root or not name:
+                    raise ValueError("root and name are required")
+                if "/" in name or "\\" in name:
+                    raise ValueError(f"bad KB name: {name}")
+                if method not in ("karpathy", "nvwa", "raw"):
+                    raise ValueError(f"bad build_method: {method}")
+                kb_dir = _kb_realpath_under_root(str(Path(root) / name), root)
+                kb_dir.mkdir(parents=True, exist_ok=False)
+                (kb_dir / "videos").mkdir()
+                if method != "raw":
+                    for sub in ("queue/pending", "queue/done", "queue/failed"):
+                        (kb_dir / sub).mkdir(parents=True)
+                    if method == "karpathy":
+                        (kb_dir / "wiki" / "moc").mkdir(parents=True)
+                        (kb_dir / "wiki" / "_meta").mkdir(parents=True)
+                        (kb_dir / "wiki" / "index.md").write_text(
+                            f"# {name} · 索引\n\n由 bililearn 创建，待首次增量更新。\n", encoding="utf-8")
+                    else:
+                        (kb_dir / "nvwa" / "案例集").mkdir(parents=True)
+                        (kb_dir / "nvwa" / "_meta").mkdir(parents=True)
+                from datetime import datetime
+                (kb_dir / "kb.json").write_text(json.dumps({
+                    "name": name, "build_method": method, "default_speaker": speaker,
+                    "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "archived": False, "version": 1,
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+                (kb_dir / "README.md").write_text(
+                    f"# {name}\n\nbililearn 知识库。构建方法：{method}。默认讲者：{speaker or '（未设置）'}。\n",
+                    encoding="utf-8")
+                self._send_json(HTTPStatus.OK, {"dir": str(kb_dir)})
+            except FileExistsError:
+                self._send_json(HTTPStatus.CONFLICT, {"error": "KB name already exists"})
+            except (ValueError, KeyError) as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("kb create failed")
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
+        if self.path == "/kb/write":
+            try:
+                body = self._read_json()
+                path = _kb_realpath_under_root(body["path"], body["root"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body["content"], encoding="utf-8")
+                self._send_json(HTTPStatus.OK, {"ok": True, "path": str(path)})
+            except (ValueError, KeyError) as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if self.path == "/kb/delete":
+            try:
+                body = self._read_json()
+                path = _kb_realpath_under_root(body["path"], body["root"])
+                if body.get("recursive"):
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                self._send_json(HTTPStatus.OK, {"ok": True})
+            except (ValueError, KeyError) as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if self.path == "/kb/move":
+            try:
+                body = self._read_json()
+                src = _kb_realpath_under_root(body["from"], body["root"])
+                dst = _kb_realpath_under_root(body["to"], body["root"])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                self._send_json(HTTPStatus.OK, {"ok": True})
+            except (ValueError, KeyError) as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if self.path == "/kb/pick_root" or self.path.startswith("/kb/pick_root?"):
+            # Native Windows folder picker (same FolderBrowserDialog as
+            # /pick-dir). `?probe=1` short-circuits WITHOUT popping any
+            # dialog so headless tests can verify the contract shape.
+            # Cancel / failure -> {"path": null}; the extension then falls
+            # back to a manual text input.
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                if length > 0:
+                    _ = self.rfile.read(length)
+            except (ValueError, OSError):
+                pass
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            if qs.get("probe"):
+                self._send_json(HTTPStatus.OK, {"path": None, "probe": True})
+                return
+            initial = self.headers.get("X-Initial-Dir") or ""
+            title = self.headers.get("X-Dialog-Title") or "选择 KB 主目录"
+            initial_ps = initial.replace("'", "''")
+            title_ps = title.replace("'", "''")
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms | Out-Null;"
+                "$owner = New-Object System.Windows.Forms.Form;"
+                "$owner.TopMost = $true;"
+                "$owner.Visible = $false;"
+                "Add-Type -AssemblyName System.Drawing | Out-Null;"
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                f"$f.Description = '{title_ps}';"
+                f"if ('{initial_ps}' -ne '') {{ try {{ $f.SelectedPath = '{initial_ps}' }} catch {{ }} }};"
+                "$r = $f.ShowDialog($owner);"
+                "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.SelectedPath }"
+            )
+            try:
+                completed = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", script],
+                    capture_output=True, text=True, timeout=120,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:  # noqa: BLE001 - any picker failure is a soft null
+                self._send_json(HTTPStatus.OK, {"path": None})
+                return
+            picked = completed.stdout.strip()
+            self._send_json(HTTPStatus.OK, {"path": (picked.replace("\\", "/") or None) if picked else None})
+            return
         if self.path == "/cache":
             try:
                 body = self._read_json()
@@ -1610,7 +1855,10 @@ class Handler(BaseHTTPRequestHandler):
                     if filename.lower() in target_filenames:
                         candidate = Path(root) / filename
                         if cid and filename.lower().endswith(".json") and not self._json_head_pins(candidate, bvid, cid):
-                            continue
+                            # 2026-10-03: same whole-video exception as Pass 2 —
+                            # bvid-only backups with no cid field may pass.
+                            if not self._json_pins_bvid_no_cid(candidate, bvid):
+                                continue
                         result = self._read_subtitle_file(candidate)
                         if result is not None:
                             self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
@@ -1631,6 +1879,22 @@ class Handler(BaseHTTPRequestHandler):
                     r"^#\s*source\s*[:=]\s*(" + re.escape(target_bvid) + r")\s*$",
                     re.IGNORECASE | re.MULTILINE,
                 )
+                # 2026-10-03: the 靳卫萍-KB / bilibili-transcribe pipelines
+                # label their exports with two OTHER header shapes —
+                #   1) YAML front matter:      `bvid: BVxxxxxxxxxx` (own line)
+                #   2) bold metadata line:     `**BV 号**: BVxxxxxxxxxx`
+                # Both are line-anchored matches inside the header block
+                # (first 2KB), so they can't false-positive on transcript
+                # body text.
+                text_pattern_yaml = re.compile(
+                    r"^bvid\s*[:=]\s*" + re.escape(target_bvid) + r"\s*$",
+                    re.MULTILINE,
+                )
+                text_pattern_bvline = re.compile(
+                    r"^\*{0,2}BV\s*号\*{0,2}\s*[:：]\s*" + re.escape(target_bvid) + r"\s*$",
+                    re.MULTILINE,
+                )
+                text_patterns = (text_pattern, text_pattern_yaml, text_pattern_bvline)
                 json_pattern = re.compile(
                     r'"bvid"\s*:\s*"' + re.escape(target_bvid) + r'"',
                 )
@@ -1647,11 +1911,18 @@ class Handler(BaseHTTPRequestHandler):
                         if is_json and cid:
                             # CID pinned: require the doc to pin BOTH bvid
                             # and cid (part-exact). No bvid-only fallback —
-                            # a sibling part's cached subtitles would
-                            # silently be the wrong content; a miss lets
+                            # a sibling part's cached subtitles would be
+                            # silently the wrong content; a miss lets
                             # the panel offer a fresh transcription.
+                            # 2026-10-03 exception: external whisper-backup
+                            # pipelines (靳卫萍 KB etc.) write
+                            # {bvid, title, date, transcript} with NO cid —
+                            # those backups cover the WHOLE video, so a
+                            # bvid-only match is safe for any part. A doc
+                            # that HAS a different cid still fails.
                             if not self._json_head_pins(file_path, bvid, cid):
-                                continue
+                                if not self._json_pins_bvid_no_cid(file_path, target_bvid):
+                                    continue
                         else:
                             try:
                                 # Read the first ~2KB only — headers live at the top.
@@ -1661,8 +1932,10 @@ class Handler(BaseHTTPRequestHandler):
                                     head = f.read(2048)
                             except OSError:
                                 continue
-                            pattern = json_pattern if is_json else text_pattern
-                            if not pattern.search(head):
+                            if is_json:
+                                if not json_pattern.search(head):
+                                    continue
+                            elif not any(p.search(head) for p in text_patterns):
                                 continue
                         # Confirmed — re-read the whole file for the actual content.
                         result = self._read_subtitle_file(file_path)
@@ -1702,6 +1975,27 @@ class Handler(BaseHTTPRequestHandler):
             return False
         want_cid = re.sub(r"\D", "", str(cid or ""))
         return bool(want_cid) and m_cid.group(1) == want_cid
+
+    @staticmethod
+    def _json_pins_bvid_no_cid(file_path, bvid):
+        """True if the JSON doc pins `bvid` and carries NO cid field.
+
+        2026-10-03: external whisper-backup pipelines (靳卫萍 KB /
+        bilibili-transcribe) write {bvid, title, date, transcript} without
+        a cid. Those backups cover the WHOLE video, so a bvid-only match is
+        safe for any part. Distinct from _json_head_pins semantics, where a
+        PRESENT-but-different cid is a genuine multi-part mismatch and must
+        keep failing.
+        """
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read(2048)
+        except OSError:
+            return False
+        m_bvid = re.search(r'"bvid"\s*:\s*"([^"]+)"', head)
+        if not m_bvid or m_bvid.group(1) != bvid:
+            return False
+        return re.search(r'"cid"\s*:', head) is None
 
     def _read_subtitle_file(self, file_path):
         """Read a subtitle file and return (content, filename, path) tuple.

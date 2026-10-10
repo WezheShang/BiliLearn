@@ -4,6 +4,23 @@ bililearn 的所有可记录改动。按"用户能感知到的影响"维度写�
 
 ## Unreleased
 
+### 2026-10-03：KB 管理功能（字幕 → 知识库）
+
+**新能力**：字幕 tab 一键把当前视频加入本地知识库；B 站与 YouTube 字段统一（`author`/`bvid`/`platform`/`date`=发布日）。总开关默认关闭，开启时强制先选 KB 主目录。
+
+**三种构建方法**（新建或补建 kb.json 时三选一）：
+- `karpathy`：LLM wiki（`wiki/index.md` 索引 + `wiki/moc/` 主题地图）
+- `nvwa`：心智模型（`nvwa/心智模型.md` + `nvwa/案例集/`）
+- `raw`：只落盘 `videos/*.md`（带 YAML frontmatter），零 LLM 调用
+
+**更新频次三档**：realtime（30 秒 alarm，默认）/ manual（options「立即更新」按钮）/ daily（每日 01:00，whisper server 不可用则跳过）。增量更新走磁盘队列 `queue/pending → done|failed`（attempts≥3 进 failed，options 可重试），由 background service worker 消费；LLM 写回前校验 patch JSON 与文件名合法性。
+
+**文件与端点**：新增 `kb-shared.js`（纯函数）/ `kb-client.js`（fetch 封装）/ `kb-queue.js`（后台消费者）；`whisper_server.py` 新增 `/kb/list|read|videos|queue|create|write|delete|move|pick_root`（路径沙箱：越界一律 400）；settings 新增 `kbEnabled`/`kbRootDir`/`kbUpdateMode`/`lastKbName`。
+
+**删除语义**：默认解绑（kb.json 标 `archived`，目录保留）；二次红字确认才删盘。
+
+**测试**：`tests/kb-shared.test.js`、`tests/kb-queue.test.js`（node，已并入 `npm test`）、`tests/kb-routes.test.py`（契约+沙箱）。
+
 ### 2026-08-22（夜）：CID 成为字幕查找的权威键
 
 **用户观察**："查找字幕应该优先 CID，不会重复。"——在 B 站里一个 bvid 下的多 P 视频共享标题、UP、日期，所以 `{date}_{title}_{UP}` 文件名和 bvid grep 在多 P 视频下会互相拿错分P的字幕。
