@@ -13,7 +13,7 @@
       ]
     },
     "condition": {
-      "regexFilter": "^https://[^/]+\\.(bilivideo\\.com|akamaized\\.net)/",
+      "regexFilter": "^https://[^/]+(\\.bilivideo\\.com|\\.bilivideo\\.cn|\\.akamaized\\.net|\\.hdslb\\.com)(:\\d+)?/",
       "resourceTypes": ["xmlhttprequest"]
     }
   }

@@ -27,8 +27,24 @@ try {
 } catch (e) {
   console.warn("[kb] init failed:", e);
 }
+// 2026-10-10: bootstrap "notes" KB on SW wake so it always exists once the
+// user has opted into KB management. Best-effort — server may be offline.
+try {
+  ensureNotesKbOnInit();
+} catch (e) {
+  console.warn("[kb-notes] ensure on init failed:", e);
+}
 
 const DEBUG = true;
+// 2026-10-27: 构建指纹 —— 侧边栏启动时跟后台握手比对。
+// 改了 background.js 之后，浏览器里的 Service Worker 可能还在跑内存里的
+// 旧脚本（必须去 chrome://extensions 点一次"刷新"才会换），而侧边栏是每次
+// 打开都重新读盘的 —— 于是出现"面板是新的、后台是旧的"这种半新半旧状态。
+// 症状是报错长得莫名其妙：2026-10-27 学堂在线那次，旧后台不认识 xt- 开头的
+// videoId，把它当 B 站处理，抛出 "Invalid Bilibili BV ID."。
+// 版本对不上时侧边栏直接提示去刷新扩展，而不是让旧后台把请求处理坏。
+const BG_BUILD = "2026-11-06.1";
+const SW_STARTED_AT = Date.now();
 const formatTimestamp = (seconds) => {
   const secs = Math.max(0, Number(seconds) || 0);
   const mins = Math.floor(secs / 60);
@@ -101,6 +117,33 @@ async function getSettings() {
     }
   }
   return normalized;
+}
+
+/**
+ * 合并写入设置（保留其它字段）。
+ *
+ * 2026-11-05: 自动修复旧 whisper server 时要把 whisperUrl 切到备用端口。
+ * 之前没有这个辅助函数 —— 只有 options.js 的表单保存路径能写设置，
+ * background 这边写不了。
+ */
+async function setSettings(patch) {
+  const stored = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
+  const previous = stored[YTD_SETTINGS.STORAGE_KEY] || {};
+  const merged = YTD_SETTINGS.normalize({ ...previous, ...patch });
+  await chrome.storage.local.set({ [YTD_SETTINGS.STORAGE_KEY]: merged });
+  return merged;
+}
+
+/**
+ * 从 whisperUrl 里取端口号，取不到就用默认的 7860。
+ *
+ * 2026-11-06：自动修复旧 server 时扩展会把 whisperUrl 切到备用端口 7861，
+ * 所以"启动 server"必须知道用户当前配的是哪个端口 —— 否则拉起来的实例
+ * 和扩展连的不是一个端口，永远连不上。
+ */
+function portFromWhisperUrl(url) {
+  const m = /:(\d{2,5})(?:[\/?#]|$)/.exec(String(url || "").trim());
+  return m ? Number(m[1]) || 7860 : 7860;
 }
 
 // Lightweight path join that normalises to forward slashes (whisper_server
@@ -263,9 +306,45 @@ async function requestAiCompletion({
   maxTokens,
   temperature,
   responseFormat,
+  // Optional: when present, bypass storage settings entirely (used by the
+  // Ask-AI drawer's per-question provider switcher so picking a different
+  // model in the dropdown doesn't mutate the user's global provider).
+  settingsOverride,
+  // 2026-10-16: ask the provider to skip its reasoning pass. Only honoured
+  // for providers that document the field (see THINKING_CAPABLE below). This
+  // exists because of the Ask-AI classifier: it asks for a bare YES/NO with
+  // a tiny max_tokens budget, and a thinking model (glm-4.6) spends that
+  // whole budget on `reasoning_content` and never emits `content` at all —
+  // which surfaced to the user as "AI provider returned an empty response."
+  disableThinking,
 }) {
-  const settings = await getSettings();
-  const activeKey = YTD_SETTINGS.activeApiKey(settings);
+  const settings = settingsOverride || (await getSettings());
+  const activeKey = settingsOverride
+    ? settingsOverride.apiKey
+    : YTD_SETTINGS.activeApiKey(settings);
+  // 2026-10-16: 防御 —— 解析最终请求 URL, 任何环节掉链子 .replace() 都会抛
+  // "Cannot read properties of undefined (reading 'replace')"。这是 9/3
+  // 实测反复出现的 fail 模式 (用户 10/16 截图). 改用 chatCompletionsUrl() 单
+  // 入口, 然后再 strip 末尾的 /chat/completions 得到 baseUrl; 任何一步返回
+  // 空串 / 异常就抛 NO_BASE_URL 让上层能定位, 而不是 generic replace 错。
+  let baseUrl = "";
+  try {
+    if (settingsOverride && settingsOverride.baseUrl) {
+      baseUrl = String(settingsOverride.baseUrl);
+    } else {
+      const fullUrl = YTD_SETTINGS.chatCompletionsUrl(settings);
+      baseUrl = String(fullUrl).replace(/\/chat\/completions$/, "");
+    }
+  } catch (e) {
+    baseUrl = "";
+  }
+  if (!baseUrl || typeof baseUrl !== "string") {
+    const error = new Error(
+      "AI provider base URL is missing. Re-save AI Provider in options.",
+    );
+    error.code = "NO_BASE_URL";
+    throw error;
+  }
   if (!activeKey) {
     const error = new Error(
       "AI provider API key not configured. Open bililearn Settings.",
@@ -307,6 +386,18 @@ async function requestAiCompletion({
   } else {
     body.max_tokens = maxTokens;
   }
+  // 2026-10-16: GLM (Zhipu) also understands `thinking.type = "disabled"`.
+  // Only sent when the caller opted in AND the provider is known to accept
+  // it — an unrecognised field is not worth risking a 400 on a provider that
+  // validates strictly.
+  const THINKING_CAPABLE = new Set(["minimax", "glm"]);
+  if (
+    disableThinking &&
+    !isMinimax &&
+    THINKING_CAPABLE.has(settings.provider)
+  ) {
+    body.thinking = { type: "disabled" };
+  }
   if (typeof temperature === "number") body.temperature = temperature;
   if (responseFormat) {
     body.response_format = responseFormat;
@@ -335,13 +426,16 @@ async function requestAiCompletion({
   );
   resetIdleTimeout();
   try {
+    // 2026-10-16: 改用上面解析的 baseUrl, 不再依赖 settingsOverride.baseUrl
+    // (那个值可能在某些 provider 路径下是 undefined, .replace 抛错).
+    const apiUrl = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
     const response = await fetch(
-      YTD_SETTINGS.chatCompletionsUrl(settings),
+      apiUrl,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${YTD_SETTINGS.activeApiKey(settings)}`,
+          Authorization: `Bearer ${activeKey}`,
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -657,17 +751,193 @@ chrome.tabs?.onActivated?.addListener(async ({ tabId }) => {
 // MESSAGE HANDLING
 // ============================================================
 
+// ---- Native messaging launcher (2026-10-10 rewrite) ----------------
+// The old "launch whisper server" path (stage the .vbs into Downloads
+// via chrome.downloads, then downloads.open) was dead on arrival twice:
+// chrome.runtime.getURL() in MV3 ALWAYS returns chrome-extension:// URLs
+// so the file:// co-location guard could never pass, and .vbs/.bat sit
+// on Chrome's dangerous-file list so downloads.open() refuses them
+// anyway. Native messaging is the one Chrome-sanctioned way for an
+// extension to start a local program, so the whisper launch / autostart
+// buttons now talk to a registered host (bililearn_whisper_launcher.bat
+// in this repo). Registration is a one-time double-click of a generated
+// .bat; see buildNativeRegisterBat below and the options-page card.
+const NATIVE_HOST_NAME = "com.bililearn.launcher";
+
+// Resolve sendNativeMessage's callback style into a promise. Never
+// rejects: failures come back as {response:null, error:"..."} so callers
+// can classify (not-registered vs host-side failure) in one place.
+function sendNativeLaunch(payload, timeoutMs) {
+  return new Promise((resolve) => {
+    if (
+      typeof chrome === "undefined" ||
+      !chrome.runtime ||
+      typeof chrome.runtime.sendNativeMessage !== "function"
+    ) {
+      resolve({
+        response: null,
+        error: "nativeMessaging API unavailable (extension needs reload)",
+      });
+      return;
+    }
+    let settled = false;
+    const finish = (response, error) => {
+      if (settled) return;
+      settled = true;
+      resolve({ response: response || null, error: error || "" });
+    };
+    try {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, payload, (response) => {
+        const err =
+          chrome.runtime.lastError && chrome.runtime.lastError.message
+            ? chrome.runtime.lastError.message
+            : "";
+        finish(response, err);
+      });
+    } catch (e) {
+      finish(null, String((e && e.message) || e));
+    }
+    setTimeout(
+      () => finish(null, "native host timeout"),
+      timeoutMs || 15000,
+    );
+  });
+}
+
+// True when the error text means "the host is not registered for THIS
+// extension id" (never registered, stale id after a reinstall, or the
+// nativeMessaging permission missing after an update) — all of which the
+// options page answers with the one-time registration card. Matched
+// against Chrome's own error phrasing only: a HOST-side failure such as
+// "vbs not found" must NOT trigger the registration card.
+function isNativeNotRegisteredError(errText) {
+  return /native messaging host not found|forbidden|native host has exited|communicating with the native|nativeMessaging/i.test(
+    String(errText || ""),
+  );
+}
+
+// Build the one-time native-host registration .bat. Pure function (no
+// chrome.* access) so the test suite can exercise it directly. `extId`
+// is the calling extension's runtime id; `repoDir` is the on-disk
+// extension folder, or "" — the bat then prompts interactively, because
+// a page context has no other way to learn an unpacked extension's disk
+// path. The bat writes the host manifest JSON (path escapes doubled for
+// JSON via %BILILEARN_DIR:\=\\%) and the HKCU registry key; both are
+// per-user, so no admin prompt is needed and no Chrome restart either.
+function buildNativeRegisterBat(extId, repoDir) {
+  const dir = String(repoDir || "")
+    .replace(/["]+/g, "")
+    .replace(/[\\]+$/, "");
+  return [
+    "@echo off",
+    "setlocal enableextensions",
+    "rem BiliLearn native launcher registration (one-time).",
+    "rem Registers " +
+      NATIVE_HOST_NAME +
+      " for chrome-extension://" +
+      extId +
+      "/",
+    "",
+    'set "BILILEARN_DIR=' + dir + '"',
+    "if not defined BILILEARN_DIR set /p BILILEARN_DIR=BiliLearn extension folder (e.g. C:\\Users\\you\\bilidown): ",
+    'if "%BILILEARN_DIR%"=="" (echo No folder given. & pause & exit /b 1)',
+    'if "%BILILEARN_DIR:~-1%"=="\\" set "BILILEARN_DIR=%BILILEARN_DIR:~0,-1%"',
+    'if not exist "%BILILEARN_DIR%\\start_whisper_server_silent.vbs" (echo That folder does not look like the BiliLearn extension - start_whisper_server_silent.vbs not found. & pause & exit /b 1)',
+    "",
+    'set "HOSTDIR=%LOCALAPPDATA%\\bililearn-native"',
+    'if not exist "%HOSTDIR%" mkdir "%HOSTDIR%"',
+    "",
+    '>"%HOSTDIR%\\com.bililearn.launcher.json" echo {"name":"com.bililearn.launcher","description":"BiliLearn whisper server launcher","path":"%BILILEARN_DIR:\\=\\\\%\\\\bililearn_whisper_launcher.bat","type":"stdio","allowed_origins":["chrome-extension://' +
+      extId +
+      '/"]}',
+    "",
+    'reg add "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\' +
+      NATIVE_HOST_NAME +
+      '" /ve /t REG_SZ /d "%HOSTDIR%\\com.bililearn.launcher.json" /f >nul',
+    "if errorlevel 1 (echo Failed to write the registry key. & pause & exit /b 1)",
+    "",
+    "echo.",
+    "echo Registered! Go back to the BiliLearn options page and press the start button again.",
+    "pause",
+  ].join("\r\n");
+}
+
 /**
  * Listen for messages from the side panel and content script.
  * This is like a switchboard — different "actions" trigger different handlers.
  */
 chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
+  // 2026-10-27: 版本握手。侧边栏靠它判断"后台是不是还在跑旧代码"。
+  if (message.action === "getExtensionBuild") {
+    sendResponse({ success: true, build: BG_BUILD, startedAt: SW_STARTED_AT });
+    return false;
+  }
+
+  // 2026-10-27: 学堂在线官方章节摘要（leaf_knowledge）。
+  // 课程自带的章节 → 直接当「章节时间线」用，不跑 AI。
+  // 数据是页面上下文里抓的（带页面自己的 cookie），这里只做转发。
+  if (message.action === "getXuetangxKnowledgeGuide") {
+    (async () => {
+      try {
+        const tabId = await findXuetangxTabId();
+        const state = await getXuetangxStateForTab(tabId);
+        const chapters = pickXuetangxOfficialChapters(state);
+        sendResponse({
+          success: true,
+          // chapters = 官方章节（AI 概览同款形状）
+          chapters,
+          // guide 保留字段但恒为 null —— 知识图谱那套 content 列表已经不用了
+          guide: null,
+        });
+      } catch (error) {
+        sendResponse({
+          success: false,
+          error: (error && error.message) || String(error),
+        });
+      }
+    })();
+    return true;
+  }
+
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
-    handleFetchTranscript(message.videoId, message.videoUrl, message.pageNumber)
+    handleFetchTranscript(
+      message.videoId,
+      message.videoUrl,
+      message.pageNumber,
+      { force: !!message.force },
+    )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true; // Keep the message channel open for async response
+  }
+
+  // 2026-10-26: 学堂在线 —— 内容脚本（隔离世界）转来的页面状态。
+  // 换小节时 URL 不变，侧边栏靠这条消息知道"要重新加载了"。
+  if (message.action === "xuetangxStateChanged") {
+    const tabId = sender?.tab?.id;
+    const state = message.state || null;
+    if (typeof tabId === "number" && state) {
+      rememberXuetangxState(tabId, state);
+      const videoId = state.videoId || `xt-${state.cid || "0"}-${state.leafId || "0"}`;
+      debugLog(
+        "[dk-bililearn BG] xuetangx state changed:",
+        tabId,
+        videoId,
+        state.leafTitle || "",
+      );
+      // 通知侧边栏刷新（换小节 = 换视频）
+      try {
+        const p = chrome.runtime.sendMessage({
+          action: "xuetangxVideoChanged",
+          tabId,
+          videoId,
+        });
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      } catch (_e) {}
+    }
+    sendResponse({ success: true });
+    return false;
   }
 
   // KB queue: sidepanel/options ask the SW to consume pending LLM updates
@@ -745,6 +1015,15 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === "askAiChat") {
+    // Ask AI drawer chat — LLM decides per question whether the video
+    // context is needed (two-stage: classifier call, then answer).
+    handleAskAiChat(message)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   if (message.action === "saveNote") {
     // Save a note at the current timestamp
     handleSaveNote(
@@ -766,6 +1045,28 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
       message.channelName,
       message.summaryText,
     )
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.action === "saveAskAiNote") {
+    // 2026-10-10: ask-AI drawer's "save answer to notes" icon. Same shape as
+    // saveSummaryNote but routed through handleSaveAskAiNote so we tag the
+    // note with source="ask-ai" and a deterministic id prefix.
+    handleSaveAskAiNote(message)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.action === "saveSelectionNote") {
+    // 2026-10-16: the 📝 pill on the text-selection bar (字幕/概览/总结).
+    // Saves the selection verbatim, anchored to a transcript timestamp when
+    // one is available. Routed to its own handler because the note shape
+    // differs from both saveSummaryNote and saveAskAiNote: it keeps the
+    // quote-style note schema so ▶ Play / 🔗 Copy timestamp stay usable.
+    handleSaveSelectionNote(message)
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -816,6 +1117,25 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
         }),
       )
       .catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+
+  if (message.action === "getSubtitleCacheDir") {
+    // 2026-11-05: 侧边栏的"读字幕超时"路径要把真实的字幕缓存目录显示
+    // 出来。以前那条路径硬编码空串，于是提示语永远是"请先在设置里配置
+    // 字幕缓存目录" —— 哪怕用户明明配了。getSettings 里有默认值兜底
+    // （没配时落到 <下载目录>/BiliSubs），所以这里返回的一定是可用的
+    // 绝对路径。
+    getSettings()
+      .then((settings) =>
+        sendResponse({
+          success: true,
+          subtitlesDir: settings.subtitlesDir || "",
+        }),
+      )
+      .catch((error) =>
+        sendResponse({ success: false, error: error?.message || String(error) }),
+      );
     return true;
   }
 
@@ -1123,52 +1443,236 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // 2026-09-23 (Irene directive): a one-click "start Whisper server
-  // now" path. The old copyBatPath handler only copied the bat path
-  // to the clipboard and popped a modal telling the user to find and
-  // double-click it — they did, but only after digging through
-  // chrome://extensions for the folder. This handler short-circuits that:
-  // it stages the silent vbs launcher into Downloads via
-  // chrome.downloads.download, then calls chrome.downloads.open on
-  // completion — the OS opens .vbs through wscript.exe, which runs
-  // start_whisper_server.bat hidden. The user is prompted by Windows
-  // the FIRST time (and can tick "always use this app" to skip it on
-  // subsequent starts), so subsequent presses are truly one click.
-  // On non-Windows the .vbs has no OS launcher; the handler falls
-  // back to copying the path + the batModal modal so the user can
-  // still locate and run it manually.
+  // One-click "start Whisper server now". History: the 2026-09-23
+  // version staged the silent vbs into Downloads and called
+  // chrome.downloads.open on completion — that path never worked (see
+  // the native-launcher comment above the sendNativeLaunch helper for
+  // the two reasons), so the button was dead from birth.
+  // 2026-10-10 rewrite: the whisper-server launch button now goes
+  // through the registered native messaging host (see
+  // sendNativeLaunch above). The response shape the options page acts
+  // on: {success:true, via:"native"} on a clean launch;
+  // {success:false, nativeNotRegistered:true, error} when the host
+  // isn't registered for this extension (one-time registration card);
+  // {success:false, error} for host-side failures (missing vbs, etc).
   if (message.action === "launchWhisperServerOnce") {
     (async () => {
       try {
-        const url = chrome.runtime.getURL("start_whisper_server_silent.vbs");
-        if (!url.startsWith("file://")) {
+        // 2026-11-06: 端口感知 + 自愈。
+        //
+        // ① 端口感知：扩展的 whisperUrl 可能被切到备用端口（7861）——
+        //    当默认端口上跑的是旧代码（不会解析本地 HF 缓存 → 转写必 500）
+        //    时，repairWhisperServer 会把扩展切过去。这时"启动 server"
+        //    必须把 server 拉在**同一个端口**上，否则 server 起来了、扩展
+        //    却还连着一个没人监听的端口 → 用户点一次启动、面板还是说
+        //    "没在跑"，死循环。
+        //
+        // ② 自愈：开机自启任务（SYSTEM）永远把 server 拉在默认端口 7860，
+        //    重启之后那上面跑的就是**新代码**了。所以"启动"的时候先探一下
+        //    7860 —— 如果它在线、而且是新代码（/health 带 model_resolution
+        //    字段），直接把 whisperUrl 切回去，连实例都不用再拉一个。
+        const settings = await getSettings();
+        const configuredUrl = (settings.whisperUrl || "").trim();
+        const configuredPort = portFromWhisperUrl(configuredUrl);
+
+        if (configuredPort !== 7860) {
+          try {
+            const r = await whisperServerFetch(
+              "http://127.0.0.1:7860/health",
+              { method: "GET" },
+              3000,
+            );
+            if (r && r.ok) {
+              const h = await r.json();
+              if (h && h.model_resolution) {
+                await setSettings({ whisperUrl: "http://127.0.0.1:7860" });
+                sendResponse({
+                  success: true,
+                  via: "native",
+                  switchedTo: 7860,
+                  note:
+                    "默认端口 7860 上的 server 已经是新代码，已直接切回去（不需要再拉实例）。",
+                });
+                return;
+              }
+            }
+          } catch (_e) {
+            /* 7860 上没有实例 → 下面按配置端口拉起 */
+          }
+        }
+
+        const nat = await sendNativeLaunch({ cmd: "launch", port: configuredPort });
+        if (nat.response && nat.response.success) {
+          sendResponse({ success: true, via: "native", port: configuredPort });
+          return;
+        }
+        const errText =
+          nat.error ||
+          (nat.response && nat.response.error) ||
+          "native launch failed";
+        sendResponse({
+          success: false,
+          via: "native",
+          nativeNotRegistered: isNativeNotRegisteredError(errText),
+          error: errText,
+        });
+      } catch (e) {
+        sendResponse({
+          success: false,
+          error: String((e && e.message) || e),
+        });
+      }
+    })();
+    return true;
+  }
+
+  // 2026-11-05: 诊断 whisper server 的版本 + 自动修复旧实例。
+  //
+  // 用户报："点 Whisper 转录 → 500 LocalEntryNotFoundError: ConnectTimeout"
+  // 根因：跑着的 server 是**开机自启任务拉起来的 SYSTEM 实例**，用的是
+  // 旧代码 —— 旧代码不会解析本地 HF 缓存，每次都去 huggingface.co 下载，
+  // 而本机直连不通 → ConnectTimeout。
+  //
+  // 那个进程普通用户权限杀不掉（taskkill: Access is denied），任务本身
+  // 也查不了（schtasks: Access is denied）。所以"让用户去管理员终端重启"
+  // 是唯一的老办法，但用户经常忘 / 懒得做。
+  //
+  // 这里做两件事：
+  //   1) diagnoseWhisperServer —— 读 /health，看有没有 model_resolution
+  //      字段（新代码才有）→ 判断跑的是不是旧代码。
+  //   2) repairWhisperServer —— 在**备用端口**（7861）用用户权限拉起一个
+  //      新实例，然后把 whisperUrl 切过去。完全不需要管理员权限。
+  //      SYSTEM 那个旧进程变成无害僵尸，用户以后想清理再用管理员脚本。
+  if (
+    message.action === "diagnoseWhisperServer" ||
+    message.action === "repairWhisperServer"
+  ) {
+    (async () => {
+      const repair = message.action === "repairWhisperServer";
+      try {
+        const settings = await getSettings();
+        const baseUrl = (settings.whisperUrl || "").replace(/\/+$/, "");
+        let health = null;
+        let reachable = false;
+        try {
+          const r = await whisperServerFetch(`${baseUrl}/health`, { method: "GET" }, 5000);
+          if (r && r.ok) {
+            reachable = true;
+            health = await r.json();
+          }
+        } catch (_e) {
+          /* server 不在线 */
+        }
+        // model_resolution 是 2026-11-05 新代码才有的字段。旧代码的
+        // /health 没有它 → 判定为"跑的是旧代码"。
+        const isStale = reachable && health && !health.model_resolution;
+        const diag = {
+          success: true,
+          reachable,
+          stale: !!isStale,
+          baseUrl,
+          health: health || null,
+        };
+        if (!repair) {
+          sendResponse(diag);
+          return;
+        }
+
+        // ---- 修复：备用端口起新实例 ----
+        const sparePort = 7861;
+        const spareUrl = `http://127.0.0.1:${sparePort}`;
+        // 先看备用端口上是不是已经有健康的新实例了（避免重复拉起）
+        try {
+          const r = await whisperServerFetch(`${spareUrl}/health`, { method: "GET" }, 3000);
+          if (r && r.ok) {
+            const h = await r.json();
+            if (h && h.model_resolution) {
+              await setSettings({ whisperUrl: spareUrl });
+              sendResponse({
+                ...diag,
+                success: true,
+                repaired: true,
+                alreadyRunning: true,
+                whisperUrl: spareUrl,
+              });
+              return;
+            }
+          }
+        } catch (_e) {
+          /* 备用端口没有实例 —— 下面拉起 */
+        }
+
+        const nat = await sendNativeLaunch({ cmd: "restart", port: sparePort });
+        if (!nat.response || !nat.response.success) {
           sendResponse({
+            ...diag,
             success: false,
-            error: "vbs not co-located with manifest (non-file:// URL)",
+            error:
+              nat.error ||
+              (nat.response && nat.response.error) ||
+              "启动新实例失败",
+            nativeNotRegistered: isNativeNotRegisteredError(
+              nat.error || (nat.response && nat.response.error) || "",
+            ),
           });
           return;
         }
-        // file:///C:/.../start_whisper_server_silent.vbs → fetch the
-        // bytes so we can re-host via downloads.download. Downloading
-        // a data URL is the only way chrome.downloads.open() will
-        // hand the file back to the OS for vbs association — opening
-        // a file:// URL via chrome.tabs.create just makes Chrome
-        // download the .vbs instead of running it through wscript.
-        const res = await fetch(url);
-        if (!res.ok) {
-          sendResponse({
-            success: false,
-            error: "vbs fetch failed: HTTP " + res.status,
-          });
-          return;
+        // 等新实例就绪
+        const deadline = Date.now() + 60000;
+        while (Date.now() < deadline) {
+          try {
+            const r = await whisperServerFetch(`${spareUrl}/health`, { method: "GET" }, 3000);
+            if (r && r.ok) {
+              const h = await r.json();
+              if (h && h.model_resolution) {
+                await setSettings({ whisperUrl: spareUrl });
+                sendResponse({
+                  ...diag,
+                  success: true,
+                  repaired: true,
+                  whisperUrl: spareUrl,
+                  port: sparePort,
+                });
+                return;
+              }
+            }
+          } catch (_e) {
+            /* 还没起来 */
+          }
+          await new Promise((res) => setTimeout(res, 1500));
         }
-        const buf = new Uint8Array(await res.arrayBuffer());
-        // Build a binary-safe base64 data URL. btoa() chokes on bytes
-        // >0xFF, so we walk the buffer manually.
-        let bin = "";
-        for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+        sendResponse({
+          ...diag,
+          success: false,
+          error: "新实例 60 秒内没有就绪，请查看 logs 目录下的日志。",
+        });
+      } catch (e) {
+        sendResponse({
+          success: false,
+          error: String((e && e.message) || e),
+        });
+      }
+    })();
+    return true;
+  }
+
+  // One-time native-host registration: generate the register .bat with
+  // THIS extension's runtime id baked in and hand it to Downloads. We
+  // deliberately do NOT downloads.open it — .bat is on Chrome's
+  // dangerous-file list (that is what killed the old launch button),
+  // so the options card walks the user through opening Downloads and
+  // double-clicking it once. After that the registry key exists and
+  // every later "start" press goes straight through the native host.
+  if (message.action === "downloadWhisperNativeRegister") {
+    (async () => {
+      try {
+        const bat = buildNativeRegisterBat(
+          chrome.runtime.id,
+          (message.payload && message.payload.repoDir) || "",
+        );
         const dataUrl =
-          "data:application/octet-stream;base64," + btoa(bin);
+          "data:application/octet-stream;base64," +
+          btoa(unescape(encodeURIComponent(bat)));
         if (
           !chrome.downloads ||
           typeof chrome.downloads.download !== "function"
@@ -1179,7 +1683,7 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
         chrome.downloads.download(
           {
             url: dataUrl,
-            filename: "bililearn_start_whisper_server_silent.vbs",
+            filename: "bililearn_register_native_launcher.bat",
             saveAs: false,
           },
           (downloadId) => {
@@ -1192,65 +1696,7 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
               });
               return;
             }
-            try {
-              const listener = (delta) => {
-                if (
-                  delta &&
-                  delta.id === downloadId &&
-                  delta.state &&
-                  delta.state.current
-                ) {
-                  if (delta.state.current === "complete") {
-                    try {
-                      chrome.downloads.open(downloadId);
-                    } catch (_e) {}
-                    try {
-                      chrome.downloads.onChanged.removeListener(listener);
-                    } catch (_e) {}
-                    sendResponse({ success: true, downloadId });
-                  } else if (delta.state.current === "interrupted") {
-                    try {
-                      chrome.downloads.onChanged.removeListener(listener);
-                    } catch (_e) {}
-                    sendResponse({
-                      success: false,
-                      error: "download interrupted",
-                    });
-                  }
-                }
-              };
-              chrome.downloads.onChanged.addListener(listener);
-              // Safety net: if onChanged never fires (some Chrome versions
-              // when the file is already in cache), poll once after 2s.
-              setTimeout(() => {
-                chrome.downloads.search(
-                  { id: downloadId },
-                  (results) => {
-                    const r = results && results[0];
-                    if (r && r.state === "complete") {
-                      try {
-                        chrome.downloads.open(downloadId);
-                      } catch (_e) {}
-                      try {
-                        chrome.downloads.onChanged.removeListener(listener);
-                      } catch (_e) {}
-                      if (!responseStarted) {
-                        responseStarted = true;
-                        sendResponse({ success: true, downloadId });
-                      }
-                    }
-                  },
-                );
-              }, 2000);
-              let responseStarted = false;
-              const origSendResponse = sendResponse;
-              sendResponse = (resp) => {
-                responseStarted = true;
-                origSendResponse(resp);
-              };
-            } catch (_e) {
-              sendResponse({ success: true, downloadId });
-            }
+            sendResponse({ success: true, downloadId });
           },
         );
       } catch (e) {
@@ -1263,119 +1709,43 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // 2026-09-23 (Irene directive): one-click "auto-start at boot" path.
-  // Stages a tiny ps1 wrapper that invokes
-  // setup_whisper_autostart_system.ps1 -Action install (the script
-  // already shipped with the extension — registers an AtStartup task
-  // that runs start_whisper_server_silent.vbs hidden under SYSTEM).
-  // The wrapper is downloaded into the user's Downloads folder and
-  // handed to the OS via chrome.downloads.open — Windows will pop
-  // UAC (the script needs admin to write the machine-level env var
-  // + register the SYSTEM task). The first time the user accepts
-  // UAC once; the task is permanent from then on.
-  //
-  // Mirrors the launchWhisperServerOnce downloads pattern — same
-  // shape, different content. We can't spawn wscript / PowerShell
-  // directly from MV3 service worker, but downloads.open is the same
-  // hook pipInstall has used since the start of this extension.
+  // 2026-10-10 rewrite: auto-start install now goes through the same
+  // registered native messaging host as the whisper launch button (the
+  // old download-a-wrapper-ps1 path died on the same two bugs: the
+  // file:// co-location guard that never passes in MV3, and a wrapper
+  // that referenced setup_whisper_autostart_system.ps1 next to itself
+  // in Downloads — where it never existed). The host spawns the real
+  // setup ps1 from the extension folder with -Verb RunAs, so Windows
+  // pops the same UAC prompt as before; the SYSTEM AtStartup task and
+  // machine env var logic in that ps1 are unchanged.
   if (message.action === "installWhisperAutostart") {
     (async () => {
       try {
-        const ps1Url = chrome.runtime.getURL(
-          "setup_whisper_autostart_system.ps1",
-        );
-        if (!ps1Url.startsWith("file://")) {
-          sendResponse({
-            success: false,
-            error: "ps1 not co-located with manifest",
-          });
-          return;
-        }
-        const wrapper = [
-          "# bililearn auto-start installer",
-          "# Generated 2026-09-23 — run as Administrator once; the SYSTEM",
-          "# scheduled task survives reboots from then on. Re-running this",
-          "# wrapper is harmless (the ps1 uses -Force on Register-ScheduledTask).",
-          "$ErrorActionPreference = 'Stop'",
-          "$here = Split-Path -Parent $MyInvocation.MyCommand.Path",
-          "Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
-          "  '-NoProfile',",
-          "  '-ExecutionPolicy', 'Bypass',",
-          "  '-File', (Join-Path $here 'setup_whisper_autostart_system.ps1'),",
-          "  '-Action', 'install'",
-          ") -Verb RunAs -Wait",
-          "Read-Host 'Press Enter to exit'",
-        ].join("\r\n");
-        const dataUrl =
-          "data:application/octet-stream;base64," +
-          btoa(unescape(encodeURIComponent(wrapper)));
-        if (
-          !chrome.downloads ||
-          typeof chrome.downloads.download !== "function"
-        ) {
-          sendResponse({ success: false, error: "downloads API unavailable" });
-          return;
-        }
-        chrome.downloads.download(
-          {
-            url: dataUrl,
-            filename: "bililearn_install_autostart.ps1",
-            saveAs: false,
-          },
-          (downloadId) => {
-            if (chrome.runtime.lastError || !downloadId) {
-              sendResponse({
-                success: false,
-                error:
-                  (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
-                  "download failed",
+        const nat = await sendNativeLaunch({ cmd: "autostart", action: "install" });
+        if (nat.response && nat.response.success) {
+          // Mark in storage so the options page can flip its button to
+          // an "uninstall" affordance next render.
+          try {
+            chrome.storage &&
+              chrome.storage.local &&
+              chrome.storage.local.set &&
+              chrome.storage.local.set({
+                bililearn_autostart_attempted: Date.now(),
               });
-              return;
-            }
-            try {
-              const listener = (delta) => {
-                if (
-                  delta &&
-                  delta.id === downloadId &&
-                  delta.state &&
-                  delta.state.current
-                ) {
-                  if (delta.state.current === "complete") {
-                    try {
-                      chrome.downloads.open(downloadId);
-                    } catch (_e) {}
-                    try {
-                      chrome.downloads.onChanged.removeChangedListener &&
-                        chrome.downloads.onChanged.removeListener(listener);
-                    } catch (_e) {}
-                    // Mark in storage so the options page can flip its
-                    // button to an "uninstall" affordance next render.
-                    try {
-                      chrome.storage &&
-                        chrome.storage.local &&
-                        chrome.storage.local.set &&
-                        chrome.storage.local.set({
-                          bililearn_autostart_attempted: Date.now(),
-                        });
-                    } catch (_e) {}
-                    sendResponse({ success: true, downloadId });
-                  } else if (delta.state.current === "interrupted") {
-                    try {
-                      chrome.downloads.onChanged.removeListener(listener);
-                    } catch (_e) {}
-                    sendResponse({
-                      success: false,
-                      error: "download interrupted",
-                    });
-                  }
-                }
-              };
-              chrome.downloads.onChanged.addListener(listener);
-            } catch (_e) {
-              sendResponse({ success: true, downloadId });
-            }
-          },
-        );
+          } catch (_e) {}
+          sendResponse({ success: true, via: "native" });
+          return;
+        }
+        const errText =
+          nat.error ||
+          (nat.response && nat.response.error) ||
+          "native autostart install failed";
+        sendResponse({
+          success: false,
+          via: "native",
+          nativeNotRegistered: isNativeNotRegisteredError(errText),
+          error: errText,
+        });
       } catch (e) {
         sendResponse({
           success: false,
@@ -1386,95 +1756,36 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // 2026-09-23 (Irene directive): uninstall counterpart for
-  // installWhisperAutostart — same download-and-open shape, calls
-  // the same ps1 with -Action uninstall. The user is expected to
-  // run this with admin elevation too (ps1 silently no-ops if not
-  // admin). On completion we clear the local flag so the options
-  // page can fall back to showing "install" again.
+  // Uninstall counterpart — same native host, -Action uninstall. Same
+  // UAC elevation (the setup ps1 silently no-ops if not admin). On a
+  // clean launch we clear the local flag so the options page falls
+  // back to showing "install" again.
   if (message.action === "uninstallWhisperAutostart") {
     (async () => {
       try {
-        const wrapper = [
-          "# bililearn auto-start uninstaller",
-          "# Run as Administrator once.",
-          "$ErrorActionPreference = 'Stop'",
-          "$here = Split-Path -Parent $MyInvocation.MyCommand.Path",
-          "Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
-          "  '-NoProfile',",
-          "  '-ExecutionPolicy', 'Bypass',",
-          "  '-File', (Join-Path $here 'setup_whisper_autostart_system.ps1'),",
-          "  '-Action', 'uninstall'",
-          ") -Verb RunAs -Wait",
-          "Read-Host 'Press Enter to exit'",
-        ].join("\r\n");
-        const dataUrl =
-          "data:application/octet-stream;base64," +
-          btoa(unescape(encodeURIComponent(wrapper)));
-        if (
-          !chrome.downloads ||
-          typeof chrome.downloads.download !== "function"
-        ) {
-          sendResponse({ success: false, error: "downloads API unavailable" });
+        const nat = await sendNativeLaunch({ cmd: "autostart", action: "uninstall" });
+        if (nat.response && nat.response.success) {
+          try {
+            chrome.storage &&
+              chrome.storage.local &&
+              chrome.storage.local.remove &&
+              chrome.storage.local.remove(
+                "bililearn_autostart_attempted",
+              );
+          } catch (_e) {}
+          sendResponse({ success: true, via: "native" });
           return;
         }
-        chrome.downloads.download(
-          {
-            url: dataUrl,
-            filename: "bililearn_uninstall_autostart.ps1",
-            saveAs: false,
-          },
-          (downloadId) => {
-            if (chrome.runtime.lastError || !downloadId) {
-              sendResponse({
-                success: false,
-                error:
-                  (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
-                  "download failed",
-              });
-              return;
-            }
-            try {
-              const listener = (delta) => {
-                if (
-                  delta &&
-                  delta.id === downloadId &&
-                  delta.state &&
-                  delta.state.current
-                ) {
-                  if (delta.state.current === "complete") {
-                    try {
-                      chrome.downloads.open(downloadId);
-                    } catch (_e) {}
-                    try {
-                      chrome.downloads.onChanged.removeListener(listener);
-                    } catch (_e) {}
-                    try {
-                      chrome.storage &&
-                        chrome.storage.local &&
-                        chrome.storage.local.remove &&
-                        chrome.storage.local.remove(
-                          "bililearn_autostart_attempted",
-                        );
-                    } catch (_e) {}
-                    sendResponse({ success: true, downloadId });
-                  } else if (delta.state.current === "interrupted") {
-                    try {
-                      chrome.downloads.onChanged.removeListener(listener);
-                    } catch (_e) {}
-                    sendResponse({
-                      success: false,
-                      error: "download interrupted",
-                    });
-                  }
-                }
-              };
-              chrome.downloads.onChanged.addListener(listener);
-            } catch (_e) {
-              sendResponse({ success: true, downloadId });
-            }
-          },
-        );
+        const errText =
+          nat.error ||
+          (nat.response && nat.response.error) ||
+          "native autostart uninstall failed";
+        sendResponse({
+          success: false,
+          via: "native",
+          nativeNotRegistered: isNativeNotRegisteredError(errText),
+          error: errText,
+        });
       } catch (e) {
         sendResponse({
           success: false,
@@ -1587,7 +1898,9 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
           if (!u) return false;
           return (
             u.includes("bilibili.com/video/") ||
-            /^https:\/\/(www\.|m\.)?youtube\.com\/watch/.test(u)
+            /^https:\/\/(www\.|m\.)?youtube\.com\/watch/.test(u) ||
+            // 2026-10-26: 学堂在线课程播放页
+            /(?:^|\.)xuetangx\.com\/(?:course|lesson|training)\//.test(u)
           );
         };
 
@@ -1612,6 +1925,7 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
               "https://www.youtube.com/watch*",
               "https://m.youtube.com/watch*",
               "https://youtube.com/watch*",
+              "https://*.xuetangx.com/*",
             ],
             active: true,
           });
@@ -1626,6 +1940,7 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
               "https://www.youtube.com/watch*",
               "https://m.youtube.com/watch*",
               "https://youtube.com/watch*",
+              "https://*.xuetangx.com/*",
             ],
           });
           debugLog("[dk-bililearn BG] Any supported tabs:", tabs.length);
@@ -1904,7 +2219,7 @@ async function recoverOrphanedWhisperJob(job) {
       pub_date: meta.pubDate || "",
       cache_dir: meta.cacheDir || settings.subtitlesDir || "",
     });
-    const response = await fetch(`${url}/cache?${qs}`);
+    const response = await whisperServerFetch(`${url}/cache?${qs}`, { method: "GET" });
     if (response.ok) {
       const data = await response.json();
       if (data.ok && data.payload && Array.isArray(data.payload.transcript)) {
@@ -2899,7 +3214,7 @@ async function loadLocalSubtitleFile(bvid, videoTitle, channelName, pubDate, set
       cid: cid != null ? String(cid) : "",
       cache_dir: dir,
     });
-    const response = await fetch(
+    const response = await whisperServerFetch(
       `${settings.whisperUrl}/local-file?${qs.toString()}`,
       { method: "GET" },
     );
@@ -3156,6 +3471,56 @@ function parseLocalSubtitleContent(content, filename) {
   };
 }
 
+/**
+ * 带硬超时的 fetch —— 用于所有对本地 whisper server 的请求。
+ *
+ * 2026-11-05（用户报"没字幕的视频要等 45 秒才出现 Whisper 按钮"）：
+ *
+ * 之前这些请求**完全没有超时**。fetch 只有在连接被拒/网络层出错时才会
+ * 失败；server 进程"活着但卡住"（SYSTEM 账户跑旧代码、正在做 3 秒的
+ * 全目录扫描、或在等一个永远不回的 socket）时，fetch 会**无限期挂着**。
+ *
+ * 后果链：background 的 handleFetchTranscript 一直 await → 永远不
+ * sendResponse → sidepanel 的 45 秒 FETCH_TIMEOUT_MS 到点兜底 → 用户
+ * 看到"正在获取字幕"转了 45 秒。
+ *
+ * 这个超时把"无限等"变成"最多等 N 秒就当没找到"，让链路能走到
+ * WHISPER_NEEDED 提示。
+ *
+ * 注意：AbortError 要**吞掉**（当"没找到"处理），不能往上抛 ——
+ * 否则整个 handleFetchTranscript 会跳进 catch，用户看到的是错误页
+ * 而不是 Whisper 出路。
+ */
+const WHISPER_SERVER_FETCH_TIMEOUT_MS = 8000;
+
+async function whisperServerFetch(url, options = {}, timeoutMs) {
+  const limit = timeoutMs || WHISPER_SERVER_FETCH_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), limit);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      debugLog(
+        `[dk-bililearn BG] whisper server request timed out after ${limit}ms:`,
+        url,
+      );
+      // 返回一个"服务器没响应"的假响应，让调用方按 404/null 处理。
+      return {
+        ok: false,
+        status: 0,
+        statusText: "timeout",
+        timedOut: true,
+        json: async () => ({}),
+        text: async () => "",
+      };
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function loadCachedTranscript(bvid, cid, settings, videoTitle, channelName, pubDate) {
   const url = (settings.whisperUrl || "").replace(/\/+$/, "");
   if (!url || !YTD_SETTINGS.whisperCachePath(settings, bvid, cid, videoTitle, channelName, pubDate)) {
@@ -3175,7 +3540,7 @@ async function loadCachedTranscript(bvid, cid, settings, videoTitle, channelName
     if (videoTitle) qs.set("title", videoTitle);
     if (channelName) qs.set("channel", channelName);
     if (pubDate) qs.set("pub_date", pubDate);
-    const response = await fetch(
+    const response = await whisperServerFetch(
       `${url}/cache?${qs.toString()}`,
       { method: "GET" },
     );
@@ -3362,6 +3727,23 @@ async function handleTriggerWhisperTranscription(
   // the local whisper_server); everything else (BV... or bilibili.com)
   // falls back to the original B站 pipeline.
   const source = detectVideoSource(videoId) || detectVideoSource(videoUrl || "");
+  if (source === "xuetangx") {
+    // 2026-10-26: 学堂在线 —— 视频直链和字幕信息都在页面钩子捕获的状态里。
+    const tabId = await findXuetangxTabId();
+    const state = await getXuetangxStateForTab(tabId);
+    if (!state) {
+      throw new Error(
+        "没拿到学堂在线当前小节的信息。请刷新课程页面后重试。",
+      );
+    }
+    runXuetangxWhisperPipeline(state, settings).catch((e) =>
+      debugLog(
+        "[dk-bililearn BG] xuetangx whisper pipeline detached error:",
+        e?.message || e,
+      ),
+    );
+    return { success: true, started: true };
+  }
   if (source === "youtube") {
     runYouTubeWhisperPipeline(videoId || videoUrl, settings).catch(
       (e) => debugLog("[dk-bililearn BG] youtube whisper pipeline detached error:", e?.message || e),
@@ -3554,8 +3936,39 @@ async function runWhisperPipeline(videoId, videoUrl, requestedPageNumber, settin
  *
  * Errors (network, bvid mismatch) bubble up so `handleFetchTranscript` can
  * report them, but a missing track is a normal "fall through" condition.
+ *
+ * 2026-11-05: 改成**先走页面上下文，再走直连**。
+ *
+ * B站只对**登录用户**下发字幕列表；未登录时 /x/player/wbi/v2 返回
+ * `need_login_subtitle: true` + 空列表（实测：无签名 / 旧版 / 正确 wbi
+ * 签名三种调用方式结果完全一样 —— 问题不在签名，在登录态）。
+ *
+ * service worker 里 `credentials: "include"` 的跨站请求属于第三方上下文，
+ * 浏览器默认挡第三方 cookie → 登录 cookie 送不出去 → 面板误判成
+ * "这视频没有字幕"，直接叫用户上 Whisper。用户观察到的"明明有字幕，
+ * sidebar 却让我用 whisper；过一会儿页面切来切去它自己出现了"，实际是
+ * whisper 转录后落盘的本地文件命中了本地文件路径，不是官方字幕出现了。
+ *
+ * 所以第一优先：让**页面主世界**去取（Origin 是 www.bilibili.com、
+ * cookie 是这一份登录态 —— B 站自己的播放器就是这么读的）。
+ * 直连保留为兜底（比如用户没打开该 B 站视频页时）。
  */
 async function fetchBilibiliOfficialSubtitle(videoId, cid) {
+  // ---- 第一优先：页面上下文（带登录态） ----
+  try {
+    const pageResult = await fetchBilibiliOfficialSubtitleViaPage(videoId, cid);
+    if (pageResult) return pageResult;
+    // null = 页面上下文明确表示"这个视频没有字幕轨" → 不再往下试直连
+    //（直连同样拿不到，白白多打一次接口）。
+    return null;
+  } catch (error) {
+    debugLog(
+      "[dk-bililearn BG] page-context subtitle lookup failed, falling back to direct:",
+      error?.message || error,
+    );
+  }
+
+  // ---- 兜底：service worker 直连 ----
   const playerResponse = await fetch(
     `https://api.bilibili.com/x/player/wbi/v2?bvid=${encodeURIComponent(videoId)}&cid=${encodeURIComponent(cid)}`,
     { credentials: "include", cache: "no-store" },
@@ -3586,29 +3999,279 @@ async function fetchBilibiliOfficialSubtitle(videoId, cid) {
   if (!subtitleResponse.ok) throw new Error("B 站字幕文件下载失败。");
   const data = await subtitleResponse.json();
 
+  return buildBilibiliSubtitlePayload(data, preferred.lan || null, "direct");
+}
+
+/**
+ * 2026-11-05: 通过**页面主世界**取 B站官方字幕。
+ *
+ * 链路：background → chrome.tabs.sendMessage → content.js（隔离世界）
+ *        → window.postMessage → bilibili-subtitle-hook.js（主世界）
+ *        → fetch(api.bilibili.com，带页面登录态）→ postMessage 回来。
+ *
+ * 返回：
+ *   - transcript payload 对象 = 拿到了字幕
+ *   - null                   = 页面上下文确认这个视频没有字幕轨（正常回退）
+ *   - 抛异常                 = 链路本身坏了（没有 B 站标签页 / hook 没回话），
+ *                               由调用方决定要不要退到直连。
+ */
+async function fetchBilibiliOfficialSubtitleViaPage(videoId, cid) {
+  const tabId = await findBilibiliVideoTab(videoId);
+  if (!tabId) {
+    throw new Error("没有找到对应的 B 站视频标签页。");
+  }
+
+  // 第一发用短超时探测主世界钩子在不在。扩展刚更新/重载时，页面里
+  // 早就存在的钩子不会被 manifest 重新注入（content_scripts 只在页面
+  // 加载时跑一次），第一发必然超时 —— 这时我们自己注入一次钩子再重试，
+  // 免得逼用户 F5 刷新页面。
+  let response = await sendToBilibiliTab(tabId, {
+    action: "getBilibiliOfficialSubtitles",
+    bvid: videoId,
+    cid: String(cid),
+  });
+
+  if (!response?.success && response?.reason === "hook_missing") {
+    debugLog(
+      "[dk-bililearn BG] Main-world hook missing on tab",
+      tabId,
+      "— injecting bilibili-subtitle-hook.js and retrying",
+    );
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["bilibili-subtitle-hook.js"],
+        world: "MAIN",
+      });
+    } catch (injectErr) {
+      debugLog(
+        "[dk-bililearn BG] Hook injection reported (may be benign):",
+        injectErr?.message || injectErr,
+      );
+    }
+    response = await sendToBilibiliTab(tabId, {
+      action: "getBilibiliOfficialSubtitles",
+      bvid: videoId,
+      cid: String(cid),
+      timeoutMs: 6000,
+    });
+  }
+
+  if (!response) {
+    throw new Error("B 站页面没有返回字幕列表。");
+  }
+  if (!response.success) {
+    // no_tracks 是"确认没有字幕"，不是错误 → 正常回退，不抛。
+    if (response.reason === "no_tracks") {
+      debugLog(
+        "[dk-bililearn BG] page context reports no subtitle tracks:",
+        response.error,
+      );
+      return null;
+    }
+    throw new Error(response.error || "B 站页面取字幕失败。");
+  }
+
+  const tracks = Array.isArray(response.tracks) ? response.tracks : [];
+  if (!tracks.length) return null;
+
+  // 选轨顺序与直连一致：人工中文 → 任意中文（含 ai-zh）→ 第一条。
+  const preferred =
+    tracks.find((item) => /^(zh|zh-CN|zh-Hans|zh-TW)/i.test(item.lan || "") && !item.isAi) ||
+    tracks.find((item) => /zh/i.test(item.lan || "")) ||
+    tracks[0];
+  if (!preferred?.subtitleUrl) return null;
+
+  const payload = await downloadBilibiliSubtitleFile(
+    preferred.subtitleUrl,
+    videoId,
+    cid,
+  );
+  if (!payload) return null;
+  return buildBilibiliSubtitlePayload(payload, preferred.lan || null, "page-context");
+}
+
+/**
+ * 发消息给 B 站标签页的内容脚本。
+ * 内容脚本成孤儿（页面在扩展加载之前就打开了）时，先重新注入再试一次。
+ *
+ * 2026-11-05: 加**硬超时**。
+ *
+ * `chrome.tabs.sendMessage` 本身**没有超时机制** —— 如果内容脚本的
+ * 监听器因为任何原因没有调用 sendResponse（页面正在跳转、监听器抛错、
+ * 页面被冻结后恢复……），这个 Promise 会**无限期挂起**。
+ *
+ * 后果：sidepanel 的 fetchTranscript 有 45 秒兜底超时，但 45 秒一到就
+ * 直接把整个读取判成失败 —— 而后台其实还挂在那里。用户看到的是
+ * "load 半天 + 后台没有响应：读取字幕超时（45 秒没有响应）"，却拿不到
+ * 任何有用的诊断信息（连"到底卡在哪一步"都看不到）。
+ *
+ * 这里给每次 sendMessage 加 8 秒上限：挂死就当"这次没通"，让上层走
+ * 兜底路径（直连 / 报错），而不是把整个链路拖到 45 秒。
+ */
+const BILIBILI_TAB_MESSAGE_TIMEOUT_MS = 8000;
+
+async function sendToBilibiliTab(tabId, message) {
+  try {
+    return await sendToBilibiliTabWithTimeout(tabId, message);
+  } catch (sendErr) {
+    const msg = sendErr?.message || String(sendErr);
+    const noReceiver =
+      /Receiving end does not exist/i.test(msg) ||
+      /Could not establish connection/i.test(msg);
+    if (!noReceiver) throw sendErr;
+
+    // 孤儿内容脚本：重新注入 content.js（隔离世界）后重试。
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"],
+      });
+    } catch (injectErr) {
+      debugLog(
+        "[dk-bililearn BG] content.js re-inject reported (may be benign):",
+        injectErr?.message || injectErr,
+      );
+    }
+    // content.js 重新注入后，主世界钩子大概率还是旧的/没有的 —— 但
+    // content.js 里的请求会自己带 hook_missing 标记，这里再抛上去，
+    // 由上层决定要不要注入钩子。
+    return await sendToBilibiliTabWithTimeout(tabId, message);
+  }
+}
+
+/** 带硬超时的 tabs.sendMessage —— 超时按失败抛，不让调用方无限等。 */
+function sendToBilibiliTabWithTimeout(tabId, message) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(
+        new Error(
+          `B 站页面 ${BILIBILI_TAB_MESSAGE_TIMEOUT_MS / 1000} 秒没有回话（内容脚本可能卡住了）。`,
+        ),
+      );
+    }, BILIBILI_TAB_MESSAGE_TIMEOUT_MS);
+    try {
+      Promise.resolve(chrome.tabs.sendMessage(tabId, message)).then(
+        (res) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(res);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    } catch (err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+/**
+ * 下载 B站字幕文件本体。
+ *
+ * 主路径：service worker 直连（manifest 里有 https://*.hdslb.com/* 的
+ * host 权限，DNR 规则还给它补了 Referer）。
+ * 备用：SW 直连失败（403 / 跨域被拦）→ 让页面主世界用页面的身份再试。
+ */
+async function downloadBilibiliSubtitleFile(subtitleUrl, videoId, cid) {
+  try {
+    const res = await fetch(subtitleUrl, { credentials: "include", cache: "no-store" });
+    if (res.ok) return await res.json();
+    debugLog("[dk-bililearn BG] SW subtitle download failed:", res.status, subtitleUrl);
+  } catch (error) {
+    debugLog("[dk-bililearn BG] SW subtitle download threw:", error?.message || error);
+  }
+
+  // 备用：页面主世界
+  try {
+    const tabId = await findBilibiliVideoTab(videoId);
+    if (!tabId) return null;
+    const response = await chrome.tabs.sendMessage(tabId, {
+      action: "getBilibiliSubtitleFile",
+      url: subtitleUrl,
+      bvid: videoId,
+      cid: String(cid),
+    });
+    if (response?.success && response.body) {
+      return { body: response.body };
+    }
+  } catch (error) {
+    debugLog(
+      "[dk-bililearn BG] page-context subtitle file download failed:",
+      error?.message || error,
+    );
+  }
+  return null;
+}
+
+/**
+ * 找当前打开的 B 站视频标签页（优先匹配 videoId 所在的那一个）。
+ * 找不到返回 null —— 调用方据此退到直连。
+ */
+async function findBilibiliVideoTab(videoId) {
+  const patterns = ["https://www.bilibili.com/video/*"];
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: patterns });
+  } catch (_e) {
+    tabs = [];
+  }
+  if (!tabs.length) return null;
+
+  // 优先：URL 里带这个 bvid 的标签页
+  if (videoId) {
+    const match = tabs.find((tab) => String(tab.url || "").includes(videoId));
+    if (match) return match.id;
+  }
+  // 其次：当前活动标签页
+  try {
+    const active = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const activeMatch = active.find((tab) => String(tab.url || "").includes("bilibili.com/video/"));
+    if (activeMatch) return activeMatch.id;
+  } catch (_e) {
+    /* ignore */
+  }
+  return tabs[0].id ?? null;
+}
+
+/**
+ * 把 B站字幕文件（{ body: [{from,to,content}] }）转成统一的 transcript 形状。
+ * via 用来标记这条字幕是从哪条链路拿到的（page-context / direct）。
+ */
+function buildBilibiliSubtitlePayload(data, language, via) {
   const transcript = [];
   let transcriptTextPlain = "";
   let transcriptTextTimestamped = "";
 
-  if (data.body && Array.isArray(data.body)) {
-    for (const chunk of data.body) {
-      const cleanText = (chunk.content || "").trim();
-      if (!cleanText) continue;
+  const body = data && Array.isArray(data.body) ? data.body : [];
+  for (const chunk of body) {
+    const cleanText = (chunk.content || "").trim();
+    if (!cleanText) continue;
 
-      const startSeconds = Math.max(0, Number(chunk.from) || 0);
-      const minutes = Math.floor(startSeconds / 60);
-      const seconds = startSeconds % 60;
-      const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+    const startSeconds = Math.max(0, Number(chunk.from) || 0);
+    const minutes = Math.floor(startSeconds / 60);
+    const seconds = startSeconds % 60;
+    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
 
-      transcript.push({
-        text: cleanText,
-        start: startSeconds,
-        duration: Math.max(0, (Number(chunk.to) || startSeconds) - startSeconds),
-        language: preferred.lan || null,
-      });
-      transcriptTextPlain += cleanText + " ";
-      transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
-    }
+    transcript.push({
+      text: cleanText,
+      start: startSeconds,
+      duration: Math.max(0, (Number(chunk.to) || startSeconds) - startSeconds),
+      language: language || null,
+    });
+    transcriptTextPlain += cleanText + " ";
+    transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
   }
 
   if (transcript.length === 0) return null;
@@ -3618,8 +4281,9 @@ async function fetchBilibiliOfficialSubtitle(videoId, cid) {
     transcript,
     transcriptText: transcriptTextPlain.trim(),
     transcriptTextTimestamped: transcriptTextTimestamped.trim(),
-    language: preferred.lan || null,
+    language: language || null,
     source: "bilibili-subtitle",
+    via,
   };
 }
 
@@ -3654,12 +4318,21 @@ function normalizeYouTubeInput(raw) {
 }
 
 function detectVideoSource(raw) {
-  // "bilibili" | "youtube" | null. The sidepanel uses this to route
-  // transcripts / button-injection to the right pipeline.
+  // "bilibili" | "youtube" | "xuetangx" | null. The sidepanel uses this to
+  // route transcripts / button-injection to the right pipeline.
   if (!raw) return null;
-  const s = String(raw).trim();
+  // 2026-10-27: videoId 可能带 "@pN" 后缀（B站分 P / 学堂在线小节）。
+  // 判定平台之前先把这个后缀摘掉 —— 否则 "xt-123-456@p1" 认不出来，
+  // 会一路掉进 B 站分支，报出 "Invalid Bilibili BV ID." 这种天书。
+  const s = String(raw).trim().replace(/@p\d+$/i, "");
+  if (!s) return null;
   if (YT_ID_RE.test(s) || /youtube\.com|youtu\.be/.test(s)) return "youtube";
   if (/^BV[0-9A-Za-z]+$/i.test(s) || /bilibili\.com\/video\//.test(s)) return "bilibili";
+  // 2026-10-26: 学堂在线。id 形如 xt-{classroomId}-{leafId}；
+  // URL 形如 https://www.xuetangx.com/course/{products_sign}/{classroom_id}
+  if (/^xt-\d+-\d+$/i.test(s) || /(?:^|\.)xuetangx\.com\//i.test(s)) {
+    return "xuetangx";
+  }
   return null;
 }
 
@@ -3673,6 +4346,22 @@ function canonicalWatchUrlForVideoId(rawVideoId) {
   const [bvid, partToken] = String(rawVideoId || "").split("@p");
   if (detectVideoSource(bvid) === "youtube") {
     return `https://www.youtube.com/watch?v=${bvid}`;
+  }
+  // 2026-10-26: 学堂在线。id 形如 xt-{cid}-{leafId}，课程 URL 需要
+  // products_sign —— 页面钩子捕获状态时记下来了，这里查表还原。
+  if (detectVideoSource(bvid) === "xuetangx") {
+    const meta = xuetangxMetaByVideoId.get(bvid);
+    // 页面地址本身带小节 id，笔记/导出直接用它最准
+    if (meta && meta.pageUrl) return meta.pageUrl;
+    if (meta && meta.sign) {
+      const leaf = meta.leafId ? `?leaf_id=${meta.leafId}` : "";
+      return `https://www.xuetangx.com/course/${meta.sign}/${meta.cid}${leaf}`;
+    }
+    const m = /^xt-(\d+)-(\d+)$/i.exec(bvid);
+    const cid = m ? m[1] : "";
+    return cid
+      ? `https://www.xuetangx.com/course/${cid}`
+      : "https://www.xuetangx.com/";
   }
   const part = Math.max(1, Number(partToken) || 1);
   return `${YTD_SETTINGS.canonicalBilibiliUrl(bvid)}${part > 1 ? `?p=${part}` : ""}`;
@@ -4387,14 +5076,880 @@ async function runYouTubeWhisperPipeline(rawInput, settings) {
   };
 }
 
-async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) {
+// ---------------------------------------------------------------------------
+// 学堂在线 (xuetangx.com) 支持 —— 2026-10-26
+// ---------------------------------------------------------------------------
+//
+// 学堂在线的学习接口全部要求登录态，从扩展的 service worker 直接调会被拒：
+//   GET /api/v1/lms/learn/menu/          → {"detail":"身份认证信息未提供。"}
+//   GET /api/v1/lms/learn/course/chapter → {"msg":"user is not login"}
+//
+// 所以我们不去复刻它的鉴权，而是让页面自己把数据带出来：
+//   content.js（隔离世界）→ xuetangx-hook.js（主世界，document_start 注入）
+//   → 拦截页面自己的 fetch/XHR，记下 leaf_info / s_t_c / s_t_g_p / playurl
+//   → postMessage 回 content.js → 转发给 background（本文件的这一段）
+//
+// 于是这里拿到的 state 里已经有：cid / leafId / ccid / 小节名 /
+// 字幕文件地址 / 视频直链。字幕文件本体再由 service worker 去下载
+// （扩展有 host 权限，跨域没问题）。
+// ---------------------------------------------------------------------------
+
+const xuetangxStateByTab = new Map();
+// videoId → {sign, cid, leafId}，用来拼出课程页 URL（notes / 导出链接）
+const xuetangxMetaByVideoId = new Map();
+
+// 2026-10-27: 我们期望的主世界钩子版本。扩展刷新**不会**更新已经打开的
+// 页面里的钩子 JS —— 页面里的旧钩子会一直活着、一直发状态。后台读到旧版
+// 状态时（版本号对不上）就重新注入一次：钩子的守卫按版本判断，所以新版
+// 能装进去，同一个版本不会重复注入。
+// （2026-10-27 踩过：页面里跑着第一版钩子，它的 state 没有诊断字段、字幕
+//  地址也没抓到，后台拿着半新半旧的状态排查了很久。）
+const XUETANGX_HOOK_VERSION = 7;
+
+/** 找到承载当前学堂在线课程页的标签页 id。 */
+async function findXuetangxTabId() {
+  try {
+    const tabs = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true,
+    });
+    const active = tabs && tabs[0];
+    if (active && /(?:^|\.)xuetangx\.com\//i.test(active.url || "")) {
+      return active.id;
+    }
+  } catch (_e) {}
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ["https://*.xuetangx.com/*"],
+      active: true,
+    });
+    if (tabs && tabs[0]) return tabs[0].id;
+  } catch (_e) {}
+  try {
+    const tabs = await chrome.tabs.query({ url: ["https://*.xuetangx.com/*"] });
+    if (tabs && tabs[0]) return tabs[0].id;
+  } catch (_e) {}
+  return null;
+}
+
+/** 记住某个标签页的学堂在线状态（换小节时更新）。 */
+function rememberXuetangxState(tabId, state) {
+  if (typeof tabId !== "number" || !state) return null;
+  const normalized = {
+    ...state,
+    videoId: state.videoId || `xt-${state.cid || "0"}-${state.leafId || "0"}`,
+  };
+  xuetangxStateByTab.set(tabId, normalized);
+  xuetangxMetaByVideoId.set(normalized.videoId, {
+    sign: normalized.sign || "",
+    cid: normalized.cid || "",
+    leafId: normalized.leafId || "",
+    pageUrl: normalized.pageUrl || "",
+  });
+  return normalized;
+}
+
+/** 向内容脚本要当前标签页的学堂在线状态。 */
+async function getXuetangxStateForTab(tabId, options = {}) {
+  if (typeof tabId !== "number") return null;
+  const force = !!options.force;
+  const cached = xuetangxStateByTab.get(tabId);
+  const ask = async (askForce = false) => {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      action: "getXuetangxState",
+      force: askForce,
+    });
+    if (response && response.success && response.state) {
+      rememberXuetangxState(tabId, response.state);
+      return response.state;
+    }
+    return null;
+  };
+
+  // 只注主世界钩子。content.js 在隔离世界里，重注会多出一个 onMessage
+  // 监听器跟现有的抢响应权 —— 所以先只问，联系不上再补 content.js。
+  const injectHook = async () => {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["xuetangx-hook.js"],
+        world: "MAIN",
+      });
+    } catch (error) {
+      debugLog(
+        "[dk-bililearn BG] xuetangx hook injection failed:",
+        error?.message || error,
+      );
+    }
+  };
+  const injectContent = async () => {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"],
+      });
+    } catch (error) {
+      debugLog(
+        "[dk-bililearn BG] xuetangx content.js injection failed:",
+        error?.message || error,
+      );
+    }
+  };
+
+  const versionOk = (state) =>
+    !!state && Number(state.hookVersion || 0) >= XUETANGX_HOOK_VERSION;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  try {
+    let state = await ask(force);
+
+    // 版本对不上（页面里跑的是旧钩子）→ 换新的，再等它就位。
+    //
+    // 2026-10-27 踩过：换完只问一次就放弃 —— 新钩子刚注进去还在跑它的
+    // 字幕探针矩阵（十来个请求，要几秒），这一问肯定拿不到东西，
+    // 于是"注入完就返回空"，谁都没等到结果。这里改成轮询到版本对上为止。
+    if (!versionOk(state)) {
+      await injectHook();
+      // 2026-10-27: 探针矩阵带限速（每发 700ms + 403 重试 2.5s），
+      // 跑完要十几秒 —— 12 秒不够，会把还在跑的结果判成"拿不到"。
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        await sleep(500);
+        state = await ask(false);
+        if (versionOk(state)) break;
+      }
+    }
+
+    // 还是联系不上 → 隔离世界的内容脚本压根没在（页面在扩展装好之前就打开的）
+    if (!state) {
+      await injectContent();
+      await injectHook();
+      state = await ask(force);
+      if (!state) {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) {
+          await sleep(500);
+          state = await ask(false);
+          if (state) break;
+        }
+      }
+    }
+
+    if (state) return state;
+  } catch (error) {
+    debugLog(
+      "[dk-bililearn BG] getXuetangxState failed:",
+      error?.message || error,
+    );
+  }
+
+  return cached || null;
+}
+
+/** 学堂在线的时间串 → 秒。支持 "hh:mm:ss(.ms)" / "mm:ss" / 纯秒数。 */
+function xuetangxTimeToSeconds(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  // SRT 用逗号当毫秒分隔符（"00:00:01,000"），VTT 用点 —— 统一成点。
+  const text = String(value ?? "").trim().replace(",", ".");
+  if (!text) return 0;
+  if (/^\d+(\.\d+)?$/.test(text)) return Number(text);
+  const parts = text.split(":").map((p) => Number(p) || 0);
+  if (parts.length >= 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0] || 0;
+}
+
+/**
+ * 学堂在线字幕文件本体有两种形态：
+ *   1. JSON：{ subtitle_list: [{ start, end, content }] }  ← 播放器用的是这种
+ *   2. SRT / VTT 纯文本
+ * 两种都归一成 {start, duration, text} 的标准形状。
+ */
+/**
+ * 从一条字幕条目里抽出 {text, start, duration}。
+ * 各家字段名五花八门（start/startTime/from/begin、content/text/value/c…），
+ * 这里挨个试。
+ */
+function xuetangxRowFromEntry(item) {
+  if (!item || typeof item !== "object") return null;
+  const rawText = item.content ?? item.text ?? item.value ?? item.c ?? item.words;
+  const text = String(
+    typeof rawText === "object" && rawText
+      ? rawText.text ?? rawText.content ?? ""
+      : rawText ?? "",
+  )
+    .replace(/<[^>]+>/g, "")
+    .trim();
+  if (!text) return null;
+  const start = xuetangxTimeToSeconds(
+    item.start ?? item.startTime ?? item.from ?? item.begin ?? item.time ?? 0,
+  );
+  const end = xuetangxTimeToSeconds(
+    item.end ?? item.endTime ?? item.to ?? item.finish ?? item.stop ?? item.start,
+  );
+  return { text, start, duration: Math.max(0, end - start) };
+}
+
+/**
+ * 兜底：字幕文件的字段名各种各样（subtitle_list / data / subtitles / list…），
+ * 深搜整棵 JSON 树，找"看起来像字幕条目"的数组。
+ */
+function deepFindXuetangxSubtitleRows(node, depth = 0, out = []) {
+  if (!node || depth > 6 || out.length > 5000) return out;
+  if (Array.isArray(node)) {
+    const looksLikeRows =
+      node.length > 0 &&
+      node.every(
+        (it) =>
+          it &&
+          typeof it === "object" &&
+          !Array.isArray(it) &&
+          (it.content != null ||
+            it.text != null ||
+            it.value != null ||
+            it.c != null ||
+            it.words != null) &&
+          (it.start != null ||
+            it.startTime != null ||
+            it.from != null ||
+            it.begin != null ||
+            it.time != null),
+      );
+    if (looksLikeRows) {
+      for (const it of node) {
+        const row = xuetangxRowFromEntry(it);
+        if (row) out.push(row);
+      }
+      return out;
+    }
+    for (const item of node) deepFindXuetangxSubtitleRows(item, depth + 1, out);
+    return out;
+  }
+  if (typeof node === "object") {
+    for (const key of Object.keys(node)) {
+      deepFindXuetangxSubtitleRows(node[key], depth + 1, out);
+    }
+  }
+  return out;
+}
+
+function parseXuetangxSubtitlePayload(raw) {
+  const rows = [];
+  if (!raw) return rows;
+
+  const fromJson = (json) => {
+    const list =
+      (json && Array.isArray(json.subtitle_list) && json.subtitle_list) ||
+      (json && Array.isArray(json.data) && json.data) ||
+      (Array.isArray(json) ? json : null);
+    if (!list) return false;
+    for (const item of list) {
+      if (!item) continue;
+      const text = String(
+        item.content ?? item.text ?? item.value ?? "",
+      )
+        .replace(/<[^>]+>/g, "")
+        .trim();
+      if (!text) continue;
+      const start = xuetangxTimeToSeconds(item.start ?? item.startTime ?? item.from);
+      const end = xuetangxTimeToSeconds(
+        item.end ?? item.endTime ?? item.to ?? item.start,
+      );
+      rows.push({ text, start, duration: Math.max(0, end - start) });
+    }
+    return rows.length > 0;
+  };
+
+  if (typeof raw === "object") {
+    if (fromJson(raw)) return rows;
+    // 2026-10-27: 快路径没命中 → 深搜整棵树（字段名不认识的兜底）
+    const deep = deepFindXuetangxSubtitleRows(raw);
+    if (deep.length) return deep;
+    return rows;
+  }
+
+  const text = String(raw);
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const json = JSON.parse(trimmed);
+      if (fromJson(json)) return rows;
+      // 2026-10-27: 同上 —— 深搜
+      const deep = deepFindXuetangxSubtitleRows(json);
+      if (deep.length) return deep;
+    } catch (_e) {
+      /* 不是 JSON 就走 SRT */
+    }
+  }
+
+  // SRT / VTT
+  const blocks = trimmed
+    .replace(/^WEBVTT[^\n]*\n/i, "")
+    .replace(/\r/g, "")
+    .split(/\n\s*\n/);
+  for (const block of blocks) {
+    const lines = block.split("\n").filter((l) => l.trim());
+    if (!lines.length) continue;
+    const timeLine = lines.find((l) => l.includes("-->"));
+    if (!timeLine) continue;
+    const [left, right] = timeLine.split("-->").map((s) => s.trim());
+    const start = xuetangxTimeToSeconds(left);
+    const end = xuetangxTimeToSeconds((right || "").split(" ")[0]);
+    const body = lines
+      .slice(lines.indexOf(timeLine) + 1)
+      .join(" ")
+      .replace(/<[^>]+>/g, "")
+      .trim();
+    if (!body) continue;
+    rows.push({ text: body, start, duration: Math.max(0, end - start) });
+  }
+  return rows;
+}
+
+/**
+ * 学堂在线字幕抓不到时，把诊断信息落到本地磁盘
+ * （下载目录下的 BiliSubs/xuetangx-debug.json）——
+ * 卡在哪一步（sign 不对 / ccid 没拿到 / s_t_g_p 空 / 字幕文件下载失败）
+ * 一眼可见，不用猜。
+ */
+async function dumpXuetangxDebug(state, reason) {
+  try {
+    if (!chrome.downloads || typeof chrome.downloads.download !== "function") return "";
+    const raw = state?.raw || {};
+    const payload = {
+      时间: new Date().toISOString(),
+      原因: reason,
+      hookVersion: state?.hookVersion ?? null,
+      hookBuild: state?.hookBuild || "",
+      cid: state?.cid || "",
+      leafId: state?.leafId || "",
+      ccid: state?.ccid || "",
+      contentId: state?.contentId || "",
+      videoIdLeaf: state?.videoId || "",
+      sign: state?.sign || "",
+      signCandidates: state?.signCandidates || [],
+      leafTitle: state?.leafTitle || "",
+      courseTitle: state?.courseTitle || "",
+      hasSubtitle: state?.hasSubtitle ?? null,
+      subtitleLang: state?.subtitleLang || "",
+      subtitleLangName: state?.subtitleLangName || "",
+      subtitleUrl: state?.subtitleUrl || "",
+      subtitleFileError: state?.subtitleFileError || "",
+      subtitleSource: state?.subtitleSource || "",
+      // 2026-10-27: 讲稿（leaf_lecture_note）与章节（leaf_knowledge）
+      讲稿段数: Array.isArray(state?.lectureNote) ? state.lectureNote.length : 0,
+      讲稿来源: state?.lectureNoteSource || "",
+      章节数: Array.isArray(state?.leafKnowledge) ? state.leafKnowledge.length : 0,
+      章节预览: Array.isArray(state?.leafKnowledge)
+        ? state.leafKnowledge.slice(0, 5).map((c) => ({
+            标题: c?.title || "",
+            起点秒: c?.start ?? null,
+            终点秒: c?.end ?? null,
+          }))
+        : [],
+      讲稿首段: Array.isArray(state?.lectureNote) && state.lectureNote.length
+        ? {
+            起点秒: state.lectureNote[0]?.start ?? null,
+            内容: String(state.lectureNote[0]?.content || "").slice(0, 120),
+          }
+        : null,
+      subtitleBody长度: String(state?.subtitleBody || "").length,
+      videoUrl: (state?.videoUrl || "").slice(0, 300),
+      notes: raw.notes || [],
+      rawLeafInfo: raw.leafInfo || "",
+      rawSubtitleConfig: raw.subtitleConfig || "",
+      rawSubtitleList: raw.subtitleList || "",
+      rawSubtitleFile: raw.subtitleFile || "",
+      // 2026-10-27: 字幕探针矩阵的每一步结果 —— 一次刷新就能看清
+      // "到底是哪个姿势对上了 / 全都对不上"。
+      probe: raw.probe || [],
+      pageRequests: raw.pageRequests || [],
+      pageResponses: raw.pageResponses || [],
+    };
+    const text = JSON.stringify(payload, null, 2);
+    const dataUrl =
+      "data:application/json;charset=utf-8;base64," +
+      btoa(unescape(encodeURIComponent(text)));
+    await new Promise((resolve) => {
+      chrome.downloads.download(
+        {
+          url: dataUrl,
+          filename: "BiliSubs/xuetangx-debug.json",
+          conflictAction: "overwrite",
+          saveAs: false,
+        },
+        () => resolve(),
+      );
+    });
+    return "BiliSubs/xuetangx-debug.json";
+  } catch (_e) {
+    return "";
+  }
+}
+
+/** 给用户看的一句人话：到底卡在哪一步。 */
+function describeXuetangxState(state) {
+  if (!state) return "没拿到页面状态";
+  const bits = [];
+  bits.push(`cid=${state.cid || "?"} leaf=${state.leafId || "?"}`);
+  if (!state.ccid) bits.push("没拿到 ccid（sign 不对或 leaf_info 失败）");
+  else bits.push("ccid✓");
+  bits.push(state.hasSubtitle ? "接口说有字幕" : "接口说没字幕");
+  if (state.subtitleUrl) bits.push("字幕地址✓");
+  else bits.push("没拿到字幕文件地址");
+  if (state.subtitleFileError) bits.push(`字幕文件抓取失败：${state.subtitleFileError}`);
+  if (state.subtitleBody) bits.push(`字幕正文 ${String(state.subtitleBody).length} 字`);
+  // 2026-10-27: 讲稿是官方逐段文字稿（带时间戳）—— 有它就等于拿到了字幕。
+  const noteCount = Array.isArray(state.lectureNote)
+    ? state.lectureNote.length
+    : 0;
+  if (state.hasLectureNote || noteCount) {
+    bits.push(`官方讲稿 ${noteCount} 段`);
+  } else {
+    bits.push("没拿到官方讲稿");
+  }
+  const chapterCount = Array.isArray(state.leafKnowledge)
+    ? state.leafKnowledge.length
+    : 0;
+  if (chapterCount) bits.push(`官方章节 ${chapterCount} 个`);
+  // 2026-10-27: 把探针矩阵的结果也摆出来 —— 用户一眼能看出
+  // "是全没试对"还是"试对了但文件挂了"。
+  const probe = Array.isArray(state?.raw?.probe) ? state.raw.probe : [];
+  if (probe.length) {
+    const hit = probe.find((p) => /命中/.test(p));
+    bits.push(
+      hit
+        ? `探针命中：${hit.slice(0, 60)}`
+        : `探针 ${probe.length} 种姿势全未命中`,
+    );
+  }
+  if (state?.staleHookSeen) bits.push("页面里还有旧版钩子在抢接口");
+  return bits.join("；");
+}
+
+/**
+ * 学堂在线的官方章节摘要（leaf_knowledge）。
+ *
+ * 2026-10-27: 原来这里挑的是"知识导引"（知识图谱那棵 300KB+ 的知识点树）。
+ * 用户看过之后明确说概览里不需要那个 content 列表 —— 现在概览只认官方
+ * 章节摘要：标题 + 概要 + 时间区间，足够填「章节时间线」。
+ *
+ * 归一化成 AI 概览同款形状（{title, summary, timestampSeconds, timestamp}），
+ * 这样侧边栏可以用同一套渲染代码。
+ */
+function pickXuetangxOfficialChapters(state) {
+  const list = Array.isArray(state?.leafKnowledge) ? state.leafKnowledge : [];
+  const chapters = [];
+  for (const item of list) {
+    const seconds = Number(item?.start);
+    const title = String(item?.title || "").trim();
+    if (!Number.isFinite(seconds) || seconds < 0 || !title) continue;
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    chapters.push({
+      title: title.slice(0, 300),
+      summary: String(item?.body || "").trim().slice(0, 1500),
+      timestampSeconds: Math.floor(seconds),
+      timestamp: `${mins}:${String(secs).padStart(2, "0")}`,
+      endSeconds: Number.isFinite(Number(item?.end))
+        ? Math.floor(Number(item.end))
+        : null,
+    });
+  }
+  return chapters.sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+}
+
+/**
+ * 抓学堂在线官方字幕。
+ * 优先用页面钩子顺手截到的字幕本体（省一次跨域请求），
+ * 否则用钩子记下的字幕文件地址去下载。
+ */
+async function fetchXuetangxOfficialSubtitle(state) {
+  if (!state) return null;
+
+  let rows = [];
+  let language = state.subtitleLang || "";
+
+  if (state.subtitleBody) {
+    rows = parseXuetangxSubtitlePayload(state.subtitleBody);
+  }
+
+  if (!rows.length && state.subtitleUrl) {
+    try {
+      const response = await fetch(state.subtitleUrl, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`学堂在线字幕文件下载失败（HTTP ${response.status}）。`);
+      }
+      const text = await response.text();
+      if (state.raw && !state.raw.subtitleFile) {
+        state.raw.subtitleFile = String(text).slice(0, 4000);
+      }
+      rows = parseXuetangxSubtitlePayload(text);
+    } catch (error) {
+      // 记下来，诊断文件里能看到"是下载挂了还是解析挂了"
+      if (state.raw) {
+        state.raw.subtitleFileError = String(
+          (error && error.message) || error,
+        );
+      }
+      throw error;
+    }
+  }
+
+  if (!rows.length) return null;
+
+  const transcript = [];
+  let transcriptTextPlain = "";
+  let transcriptTextTimestamped = "";
+  for (const row of rows) {
+    const start = Math.max(0, Number(row.start) || 0);
+    const minutes = Math.floor(start / 60);
+    const seconds = Math.floor(start % 60);
+    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
+    transcript.push({
+      text: row.text,
+      start,
+      duration: Math.max(0, Number(row.duration) || 0),
+      language: language || null,
+    });
+    transcriptTextPlain += row.text + " ";
+    transcriptTextTimestamped += `[${timestamp}] ${row.text}\n`;
+  }
+
+  return {
+    success: true,
+    transcript,
+    transcriptText: transcriptTextPlain.trim(),
+    transcriptTextTimestamped: transcriptTextTimestamped.trim(),
+    language: language || "zh",
+    // 2026-10-27: 讲稿（leaf_lecture_note）也是官方来源，但跟字幕文件
+    // 不是一回事 —— 标出来，侧边栏/诊断里能看清到底拿到了什么。
+    source:
+      state.subtitleSource === "lecture-note"
+        ? "xuetangx-lecture-note"
+        : "xuetangx-subtitle",
+    videoTitle: state.leafTitle || "",
+    channelName: state.courseTitle || "",
+    pubDate: "",
+  };
+}
+
+/** 下载学堂在线视频直链（整段 mp4，含音轨）给 whisper_server 用。 */
+async function fetchXuetangxVideoBlob(state) {
+  const url = state?.videoUrl;
+  if (!url) {
+    throw new Error("没能拿到学堂在线的视频直链（页面可能还没开始播放）。");
+  }
+  const response = await fetch(url, { credentials: "include" });
+  if (!response.ok) {
+    throw new Error(`学堂在线视频下载失败（HTTP ${response.status}）。`);
+  }
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("学堂在线视频内容为空。");
+  return blob;
+}
+
+/** 学堂在线版本的 Whisper 转录（结构对齐 B 站 / YouTube 两条链路）。 */
+async function transcribeXuetangxWithLocalWhisper(state, settings) {
+  const url = (settings.whisperUrl || "http://127.0.0.1:7860").replace(/\/+$/, "");
+  if (!url) {
+    throw new Error(
+      "Local Whisper is selected as the ASR provider but whisperUrl is empty.",
+    );
+  }
+  sendWhisperProgress(
+    WHISPER_STAGES.DOWNLOADING,
+    "正在下载学堂在线视频",
+    "转录在后台进行，可随意切换页面",
+  );
+  const blob = await fetchXuetangxVideoBlob(state);
+  sendWhisperProgress(
+    WHISPER_STAGES.READY_TO_TRANSCRIBE,
+    "音频下载完成，准备调用 Whisper",
+    `模型 ${settings.whisperModel || "base"} · ${url}`,
+  );
+
+  const title = state.leafTitle || "";
+  const channel = state.courseTitle || "";
+  const headers = {
+    "Content-Type": blob.type || "audio/mp4",
+    "X-Whisper-Model": settings.whisperModel || "base",
+    "X-Bvid": state.videoId || `xt-${state.cid || "0"}`,
+    "X-Cid": `xt-${state.cid || "0"}-${state.leafId || "0"}`,
+    "X-Title": encodeURIComponent(title),
+    "X-Channel": encodeURIComponent(channel),
+    "X-Pubdate": "",
+    "X-Cache-Dir": encodeURIComponent(settings.subtitlesDir || ""),
+  };
+  if (settings.whisperLanguage) {
+    headers["X-Whisper-Language"] = settings.whisperLanguage;
+  }
+  sendWhisperProgress(
+    WHISPER_STAGES.TRANSCRIBING,
+    "Whisper 转录中",
+    "长视频通常需要几分钟，可在终端查看 whisper_server.py 日志",
+  );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30 * 60 * 1000);
+  let response;
+  try {
+    response = await fetch(`${url}/transcribe`, {
+      method: "POST",
+      headers,
+      body: blob,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  if (!response.ok) {
+    let detail = "";
+    try {
+      detail = (await response.text()).slice(0, 200);
+    } catch (_e) {}
+    throw new Error(
+      `Whisper server returned ${response.status}${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  const data = await response.json();
+  if (data.error) {
+    throw new Error(`Whisper server error: ${data.error}`);
+  }
+  const rawSegments = (data.segments || []).map((seg) => ({
+    from: Number(seg.start) || 0,
+    to: Number(seg.end) || 0,
+    content: String(seg.text || "").trim(),
+  }));
+  const corrected = await correctWhisperTranscript(rawSegments, data.language, settings);
+  return {
+    transcript: corrected,
+    language: data.language,
+    source: "whisper-xuetangx",
+  };
+}
+
+/** 学堂在线版本的 Whisper 管线（对齐 runWhisperPipeline / runYouTubeWhisperPipeline）。 */
+async function runXuetangxWhisperPipeline(state, settings) {
+  const videoId = state.videoId || `xt-${state.cid || "0"}-${state.leafId || "0"}`;
+  const cid = `xt-${state.cid || "0"}-${state.leafId || "0"}`;
+  await setWhisperJob({
+    ...(activeWhisperJob || {}),
+    recoveryMeta: {
+      bvid: videoId,
+      cid,
+      title: state.leafTitle || "",
+      channel: state.courseTitle || "",
+      pubDate: "",
+      cacheDir: settings.subtitlesDir || "",
+    },
+    videoMeta: {
+      is_upower_expert: 0,
+      is_ugc_pay: 0,
+      is_cooperation: 0,
+      aid: null,
+      bvid: videoId,
+      title: state.leafTitle || null,
+    },
+  });
+
+  const result = await transcribeXuetangxWithLocalWhisper(state, settings);
+  const canonicalTranscript = (result.transcript || []).map(normalizeSegment);
+  const cachePayload = {
+    bvid: videoId,
+    cid,
+    source: result.source,
+    language: result.language,
+    savedAt: new Date().toISOString(),
+    transcript: canonicalTranscript,
+    chapters: [],
+  };
+  const saved = await saveCachedTranscript(
+    videoId,
+    cid,
+    cachePayload,
+    settings,
+    state.leafTitle || "",
+    state.courseTitle || "",
+    "",
+  );
+  if (!saved) {
+    throw new Error(
+      "字幕缓存保存失败（whisper_server 写入错误）。请确认 whisper_server.py 仍在 7860 端口运行后重试。",
+    );
+  }
+  await setWhisperJob({
+    ...activeWhisperJob,
+    type: "whisper-job",
+    stage: WHISPER_STAGES.SUCCEEDED,
+    title: "Whisper 转录完成",
+    subtitle: "正在加载字幕…",
+    stageStartedAt: Date.now(),
+    finishedAt: Date.now(),
+    result: {
+      videoId,
+      pageNumber: 1,
+      title: state.leafTitle || "",
+      channel: state.courseTitle || "",
+      pubDate: "",
+      duration: Number(state.duration) || 0,
+      source: result.source,
+      language: result.language,
+    },
+  });
+  setTimeout(() => clearWhisperJob(), 8000);
+  return {
+    videoId,
+    pageNumber: 1,
+    title: state.leafTitle || "",
+    channel: state.courseTitle || "",
+    pubDate: "",
+    duration: Number(state.duration) || 0,
+    transcript: canonicalTranscript,
+    source: result.source,
+    language: result.language,
+  };
+}
+
+async function handleFetchTranscript(
+  videoId,
+  videoUrl = "",
+  requestedPage = 1,
+  options = {},
+) {
+  // 2026-10-27: 来源提到 try 外面 —— 外层 catch 也要用它来决定
+  // "出错时给不给 Whisper 出路"（B 站这条路必须有，见下面 catch）。
+  const source = detectVideoSource(videoId) || detectVideoSource(videoUrl || "");
   try {
     // 2026-09-27: route YouTube URLs / bare ids to the YouTube
     // subtitle path before any B站-specific work. The B站 path
     // (canonicalBilibiliUrl below) would otherwise throw on a bare
     // 11-char YouTube id, which is a fine fallback signal — but we
     // want a clean dispatch, not a thrown exception.
-    const source = detectVideoSource(videoId) || detectVideoSource(videoUrl || "");
+    if (source === "xuetangx") {
+      // 2026-10-26: 学堂在线。字幕来自页面钩子捕获的字幕文件地址，
+      // 拿不到就退回 Whisper（视频直链也在状态里）。
+      const tabId = await findXuetangxTabId();
+      const state = await getXuetangxStateForTab(tabId, {
+        force: !!options.force,
+      });
+      if (!state) {
+        return {
+          success: false,
+          error: "XUETANGX_STATE_MISSING",
+          message:
+            "没拿到学堂在线当前小节的信息。请刷新课程页面后重试（扩展刚安装/更新时需要刷新一次）。",
+          transcript: [],
+          transcriptText: "",
+          language: null,
+          source: "xuetangx-none",
+        };
+      }
+      let subtitleError = "";
+      try {
+        const subtitle = await fetchXuetangxOfficialSubtitle(state);
+        if (subtitle) {
+          return {
+            ...subtitle,
+            videoTitle: subtitle.videoTitle || state.leafTitle || "",
+            channelName: subtitle.channelName || state.courseTitle || "",
+          };
+        }
+        subtitleError = "官方字幕接口/文件里没解析出内容";
+      } catch (error) {
+        subtitleError = (error && error.message) || String(error);
+        debugLog(
+          "[dk-bililearn BG] xuetangx subtitle fetch failed:",
+          subtitleError,
+        );
+      }
+
+      // 没有官方字幕 —— 先看 Whisper 之前有没有存过（第二次打开就该秒出）
+      try {
+        const settings = await getSettings();
+        const cid = `xt-${state.cid || "0"}-${state.leafId || "0"}`;
+        const cached = await loadCachedTranscript(
+          state.videoId || cid,
+          cid,
+          settings,
+          state.leafTitle || "",
+          state.courseTitle || "",
+          "",
+        );
+        if (cached) {
+          const canonicalTranscript = (cached.transcript || [])
+            .map(normalizeSegment)
+            .filter(Boolean);
+          const plainText = canonicalTranscript
+            .map((seg) => seg.text)
+            .join(" ");
+          const timestampedText = canonicalTranscript
+            .map((seg) => `[${formatTimestamp(seg.start)}] ${seg.text}`)
+            .join("\n");
+          return {
+            success: true,
+            source: "local-cache",
+            language: cached.language || "unknown",
+            chapters: cached.chapters || [],
+            transcript: canonicalTranscript,
+            transcriptText: plainText,
+            transcriptTextTimestamped: timestampedText,
+            cachePath: cached.cachePath,
+            videoTitle: state.leafTitle || "",
+            channelName: state.courseTitle || "",
+            pubDate: "",
+          };
+        }
+      } catch (error) {
+        debugLog(
+          "[dk-bililearn BG] xuetangx cached transcript lookup failed:",
+          error?.message || error,
+        );
+      }
+
+      // 2026-10-27: 官方字幕没拿到 → 把诊断信息落到本地磁盘，
+      // 并给用户一句"到底卡在哪一步"的人话（而不是笼统的"没有字幕"）。
+      const debugFile = await dumpXuetangxDebug(
+        state,
+        subtitleError || "官方字幕解析为空",
+      );
+      const diagnosis = describeXuetangxState(state);
+      // 页面里还跑着旧版钩子的话，得明说 —— 旧钩子会跟新版一起打接口，
+      // 请求量翻倍就被服务端限流（第一发 200、之后全 403）。
+      const staleHint = state?.staleHookSeen
+        ? "\n注意：页面里还活着一个旧版钩子，它在跟新版抢接口。请按 F5 刷新一次课程页面。"
+        : "";
+      let cacheDir = "";
+      try {
+        const s = await getSettings();
+        cacheDir = s.subtitlesDir || "";
+      } catch (_e) {}
+      return {
+        success: false,
+        error: "XUETANGX_SUBTITLE_MISSING",
+        message:
+          `学堂在线官方字幕没读出来。${diagnosis}` +
+          (subtitleError ? `（${subtitleError}）` : "") +
+          (debugFile
+            ? `\n诊断详情已存到下载目录：${debugFile}`
+            : "") +
+          staleHint,
+        transcript: [],
+        transcriptText: "",
+        transcriptTextTimestamped: "",
+        language: null,
+        source: "xuetangx-none",
+        cacheDir,
+        xuetangxState: state,
+        xuetangxDiagnosis: diagnosis,
+        xuetangxDebugFile: debugFile,
+        xuetangxStaleHook: !!state?.staleHookSeen,
+      };
+    }
     if (source === "youtube") {
       // 2026-09-29: try the browser's own DOM first — much cleaner
       // than yt-dlp through a proxy IP. The browser is already on
@@ -4479,34 +6034,79 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     // B站官方字幕 (human or ai-zh) 优先于本地文件。本地字幕（up-master-report
     // 之类）可能跟视频实际内容对不上号（标题错配、bvid 错位），所以 B站自己有
     // 就别看本地。
-    const bilibiliSubtitle = await fetchBilibiliOfficialSubtitle(videoId, page.cid);
+    //
+    // 2026-10-27: 官方字幕**读取失败不能中断整条链路**。
+    // 以前这里直接 await，接口一报错（风控 / 网络抖动 / 字幕文件 403 /
+    // bvid-cid 对不上）整个 handleFetchTranscript 就跳进 catch，
+    // 返回一个看不懂的 error —— 结果是：用户既拿不到字幕，
+    // 连「🎙️ 用 Whisper 转录」那条出路都看不到（死路）。
+    // 现在：失败只记录原因，然后继续往下走本地文件 / Whisper 缓存 /
+    // WHISPER_NEEDED 提示，出路始终留着。
+    let bilibiliSubtitle = null;
+    let subtitleLookupError = "";
+    try {
+      bilibiliSubtitle = await fetchBilibiliOfficialSubtitle(videoId, page.cid);
+    } catch (error) {
+      const rawError = (error && error.message) || String(error);
+      // 人话前缀：侧边栏会把这句原样显示在 Whisper 提示页上，
+      // 用户要能一眼看出"卡在读官方字幕这一步"，而不是看到裸的英文报错。
+      subtitleLookupError = `读取 B 站官方字幕时出错：${rawError}`;
+      debugLog(
+        "[dk-bililearn BG] bilibili official subtitle lookup failed:",
+        rawError,
+      );
+    }
     if (bilibiliSubtitle) {
       return withVideoMeta(bilibiliSubtitle);
     }
 
     // 本地文件 fallback：B站没字幕时才看本地（whisper 旧 cache / up-master-report
     // / bililearn 自己生成的 .md/.txt/.srt）
-    if (settings.whisperUrl && settings.subtitlesDir) {
-      const localFile = await loadLocalSubtitleFile(
-        videoId,
-        videoTitle,
-        channelName,
-        pubDate,
-        settings,
-        page.cid
-      );
-      if (localFile) {
-        return withVideoMeta({
-          success: true,
-          source: "local-file",
-          language: localFile.language || "unknown",
-          chapters: localFile.chapters || [],
-          transcript: Array.isArray(localFile.transcript) ? localFile.transcript : [],
-          transcriptText: localFile.transcriptText || "",
-          transcriptTextTimestamped: localFile.transcriptTextTimestamped || "",
-          cachePath: localFile.cachePath,
-        });
-      }
+    //
+    // 2026-11-05: **两个本地查找并行发起**。
+    //
+    // 用户报"没字幕的视频要等很久才提示"。实测耗时（用户目录 911 个文件）：
+    //   /local-file → 3.1s（要按文件名 + bvid 头匹配扫整个目录）
+    //   /cache      → 0.6s（解析出的确切路径 + 兜底扫描）
+    // 原来是**串行**的 → 3.7s 白等。两个请求彼此独立（一个找
+    // up-master-report 导出的 .md/.txt，一个找 bililearn 自己写的
+    // .json 缓存），没有任何数据依赖 —— 并行后总耗时 = max(3.1, 0.6)。
+    const localFilePromise =
+      settings.whisperUrl && settings.subtitlesDir
+        ? loadLocalSubtitleFile(
+            videoId,
+            videoTitle,
+            channelName,
+            pubDate,
+            settings,
+            page.cid
+          )
+        : Promise.resolve(null);
+    // whisper 分支要用的缓存查找也提前发起（下面用到 await 它的结果）。
+    const whisperCachePromise =
+      settings.asrProvider === "whisper"
+        ? loadCachedTranscript(
+            videoId,
+            page.cid,
+            settings,
+            videoTitle,
+            channelName,
+            pubDate,
+          )
+        : Promise.resolve(null);
+
+    const localFile = await localFilePromise;
+    if (localFile) {
+      return withVideoMeta({
+        success: true,
+        source: "local-file",
+        language: localFile.language || "unknown",
+        chapters: localFile.chapters || [],
+        transcript: Array.isArray(localFile.transcript) ? localFile.transcript : [],
+        transcriptText: localFile.transcriptText || "",
+        transcriptTextTimestamped: localFile.transcriptTextTimestamped || "",
+        cachePath: localFile.cachePath,
+      });
     }
 
     // If local Whisper is enabled, look for a previously-cached transcript
@@ -4656,17 +6256,9 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     }
 
     if (settings.asrProvider === "whisper") {
-      // Pass the same metadata the write path uses, so loadCachedTranscript
-      // can resolve to the {date}_{title}_{UP}.json file instead of the
-      // legacy bvid_cid.json name.
-      const cached = await loadCachedTranscript(
-        videoId,
-        page.cid,
-        settings,
-        videoTitle,
-        channelName,
-        pubDate,
-      );
+      // 这个请求在上面已经**并行发起**了（跟 /local-file 同时跑），
+      // 这里只是等结果 —— 不要再发第二次，否则白等一遍 0.6s。
+      const cached = await whisperCachePromise;
       if (cached) {
         // Normalize at the read boundary too — older caches may have been
         // written with the {from, to, content} shape before this fix.
@@ -4700,8 +6292,10 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
         success: false,
         error: "WHISPER_NEEDED",
         message:
-          "没有找到官方字幕或本地字幕文件。点击下方按钮启动 Whisper 转写，结果会保存到字幕目录供下次直接使用。",
+          "没有找到官方字幕或本地字幕文件。点击下方按钮启动 Whisper 转写，结果会保存到字幕目录供下次直接使用。" +
+          (subtitleLookupError ? `\n（${subtitleLookupError}）` : ""),
         cacheDir: settings.subtitlesDir || "",
+        subtitleLookupError,
       };
     }
 
@@ -4709,13 +6303,42 @@ async function handleFetchTranscript(videoId, videoUrl = "", requestedPage = 1) 
     return {
       success: false,
       error: "NO_TRANSCRIPT",
-      message: "B 站没有字幕，本地也没有缓存文件。",
+      message:
+        "B 站没有字幕，本地也没有缓存文件。" +
+        (subtitleLookupError ? `\n（${subtitleLookupError}）` : ""),
+      subtitleLookupError,
     };
   } catch (error) {
     console.error("Transcript fetch error:", error);
+    const reason = (error && error.message) || "Failed to fetch transcript";
+    // 2026-10-27: B 站这条路上任何一步炸了（风控 / 网络抖动 / bvid-cid
+    // 对不上 / 字幕文件下载失败 / 视频信息读不出来），如果只回一句 error，
+    // 侧边栏就只剩「重新尝试」一个按钮 —— 用户连 Whisper 这条出路都看不到，
+    // 整条路成了死胡同。
+    // 这里统一改成 WHISPER_NEEDED：侧边栏会渲染「🎙️ 用 Whisper 转录」，
+    // 并把出错原因显示在页面里。视频直链是有的，Whisper 这条路一定能走通。
+    if (source === "bilibili") {
+      let cacheDir = "";
+      try {
+        const s = await getSettings();
+        cacheDir = s.subtitlesDir || "";
+      } catch (_e) {}
+      return {
+        success: false,
+        error: "WHISPER_NEEDED",
+        message: `读取 B 站字幕时出错：${reason}`,
+        cacheDir,
+        subtitleLookupError: reason,
+        transcript: [],
+        transcriptText: "",
+        transcriptTextTimestamped: "",
+        language: null,
+        source: "bilibili-error",
+      };
+    }
     return {
       success: false,
-      error: error.message || "Failed to fetch transcript",
+      error: reason,
     };
   }
 }
@@ -5335,6 +6958,12 @@ async function handleSaveNote(
     // Notify side panel to refresh notes list
     chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
 
+    // 2026-10-10: best-effort mirror to notes KB. success even if it fails.
+    try { await mirrorNoteToNotesKb(note); } catch (e) {
+      debugLog("[notes-kb] mirror failed for note", note.id, ":", e && e.message || e);
+    }
+    try { chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => {}); } catch {}
+
     return { success: true, note };
   } catch (error) {
     console.error("[dk-bililearn] Save note error:", error);
@@ -5380,6 +7009,12 @@ async function handleSaveSummaryNote(videoId, videoTitle, channelName, summaryTe
 
     // Notify side panel to refresh notes list
     chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
+
+    // 2026-10-10: best-effort mirror to notes KB so summary becomes Q&A material.
+    try { await mirrorNoteToNotesKb(note); } catch (e) {
+      debugLog("[notes-kb] mirror failed for summary:", e && e.message || e);
+    }
+    try { chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => {}); } catch {}
 
     return { success: true, note };
   } catch (error) {
@@ -5511,8 +7146,236 @@ async function handleDeleteNote(noteId) {
     let notes = result.ytd_notes || [];
     notes = notes.filter((n) => n.id !== noteId);
     await chrome.storage.local.set({ ytd_notes: notes });
+    // 2026-10-10: best-effort mirror removal from "notes" KB videos/.
+    // 失败也不影响 storage 已删的事实 —— 磁盘仅作 KB 索引源, 删除状态以
+    // chrome.storage 为准.
+    try { await removeNoteFromNotesKb(noteId); } catch (e) {
+      debugLog("[notes-kb] delete mirror failed:", e);
+    }
     return { success: true };
   } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * 2026-10-10: bootstrap the system-owned "notes" KB on SW boot so it always
+ * exists once the user has opted into KB management. Best-effort — server
+ * may be offline, KB root may not be set, etc. None of those are errors.
+ */
+async function ensureNotesKbOnInit() {
+  let settings;
+  try { settings = await getSettings(); } catch { return; }
+  if (!settings) return;
+  if (settings.kbEnabled !== true || !settings.kbRootDir) return;
+  if (settings.whisperUrl) KbClient.setBaseUrl(settings.whisperUrl);
+  if (!(await KbClient.health())) return; // server offline, try again on next save
+  try {
+    const r = await KbClient.ensureNotes(settings.kbRootDir);
+    debugLog("[notes-kb] ensure on init:", r);
+  } catch (e) {
+    debugLog("[notes-kb] ensure on init failed:", e && e.message || e);
+  }
+}
+
+/**
+ * 2026-10-10: take a chrome.storage "note" object and mirror it as a
+ * karpathy-style video doc under notes/videos/. Frontmatter is synthesised
+ * to match KbShared.buildKbDocument's shape (bvid = note_<id>, platform =
+ * "note", date = YYYYMMDD compact of createdAt). 也往 queue/pending/ 投一份,
+ * 让 karpathy LLM 在下次 alarm 触发时把这条新笔记并入 index.md / moc/*.md.
+ *
+ * @param {object} note - chrome.storage note entry.
+ * @returns {Promise<void>} best-effort; never throws
+ */
+async function mirrorNoteToNotesKb(note) {
+  if (!note || !note.id) return;
+  let settings;
+  try { settings = await getSettings(); } catch { return; }
+  if (!settings || settings.kbEnabled !== true || !settings.kbRootDir) return;
+  if (settings.whisperUrl) KbClient.setBaseUrl(settings.whisperUrl);
+  if (!(await KbClient.health())) return;
+  // Ensure skeleton exists (idempotent).
+  try { await KbClient.ensureNotes(settings.kbRootDir); } catch {}
+  const root = settings.kbRootDir;
+  const sep = root.includes("/") ? "/" : "\\";
+  const fileName = KbShared.noteFileName(note.id);
+  const meta = {
+    speaker: note.channelName || "bililearn-user",
+    author: note.channelName || "bililearn-user",
+    platform: "note",
+    bvid: `note_${note.id}`,
+    page: 1,
+    date: KbShared.compactDate(new Date(note.createdAt || Date.now()).toISOString()),
+    dateSource: "created",
+    addedAt: new Date().toISOString().slice(0, 19),
+    lang: "zh",
+    topic: (note.videoTitle ? `关于「${String(note.videoTitle).slice(0, 60)}」` : "本地笔记"),
+    url: note.timestampedUrl || "",
+    durationS: 0,
+  };
+  // One segment with start=0,end=0,text=note body — karpathy/nvwa builder
+  // treats any segment uniformly; no special-case code needed.
+  const segments = [
+    {
+      start: 0, end: 0,
+      text: String(note.text || "").trim() || (note.rawText || "").trim(),
+    },
+  ];
+  const doc = KbShared.buildKbDocument(meta, segments);
+  const videosPath = `${root}${sep}notes${sep}videos${sep}${fileName}`;
+  await KbClient.write(root, videosPath, doc);
+  // Enqueue a karpathy build task for this doc. task shape mirrors what
+  // KbQueue.consumeOne expects.
+  const sep2 = sep;
+  const pendingDir = `${root}${sep}notes${sep}queue${sep}pending`;
+  const taskFile = `${note.id}_${Date.now()}.json`;
+  const task = {
+    video_file: fileName,
+    meta,
+    attempts: 0,
+    enqueued_at: new Date().toISOString(),
+    source: "note",
+  };
+  await KbClient.write(root, `${pendingDir}${sep2}${taskFile}`, JSON.stringify(task, null, 2));
+}
+
+/**
+ * 2026-10-10: mirror-delete: drop the file notes/videos/note_<id>.md and any
+ * pending queue tasks that reference it. KB videos/* is rebuilt by the
+ * karpathy daily alarm so this stays best-effort.
+ */
+async function removeNoteFromNotesKb(noteId) {
+  if (!noteId) return;
+  let settings;
+  try { settings = await getSettings(); } catch { return; }
+  if (!settings || settings.kbEnabled !== true || !settings.kbRootDir) return;
+  if (settings.whisperUrl) KbClient.setBaseUrl(settings.whisperUrl);
+  if (!(await KbClient.health())) return;
+  const root = settings.kbRootDir;
+  const sep = root.includes("/") ? "/" : "\\";
+  const fileName = KbShared.noteFileName(noteId);
+  const videosPath = `${root}${sep}notes${sep}videos${sep}${fileName}`;
+  try { await KbClient.deletePath(root, videosPath, false); } catch {}
+  // Drop any queued tasks that reference this note id.
+  try {
+    const pending = await KbClient.queue(root, "notes", "pending");
+    for (const item of pending) {
+      if (item && item.task && item.task.video_file === fileName) {
+        await KbClient.deletePath(root, `${root}${sep}notes${sep}queue${sep}pending${sep}${item.file}`, false).catch(() => {});
+      }
+    }
+  } catch {}
+}
+
+/**
+ * 2026-10-10: saveAskAiNote — called from the Ask AI drawer's "copy-to-notes"
+ * icon. Treats the LLM answer as a full markdown snippet (no transcript
+ * cleanup), saves it to chrome.storage, and mirrors it into the notes KB.
+ * 
+ * Note object reuses the schema of `handleSaveSummaryNote` for consistency:
+ * isFullNote=true, timestamp="全文", no timestampSeconds. The .id is unique
+ * per ask-AI turn (note_<ms>) so deletes won't clash.
+ */
+async function handleSaveAskAiNote(message) {
+  try {
+    const text = String(message?.text || "").trim();
+    if (!text) return { success: false, error: "EMPTY_TEXT" };
+    const videoId = String(message?.videoId || "");
+    const videoTitle = String(message?.videoTitle || "Ask AI 答复").slice(0, 500);
+    const channelName = String(message?.channelName || "bililearn-user").slice(0, 300);
+    const noteId = `note_${Date.now()}_askai`;
+    const note = {
+      id: noteId,
+      videoId,
+      videoTitle,
+      channelName,
+      timestamp: "全文",
+      timestampSeconds: 0,
+      timestampedUrl: videoId ? canonicalWatchUrlForVideoId(videoId) : "",
+      text,
+      rawText: text,
+      isFullNote: true,
+      source: "ask-ai",
+      createdAt: Date.now(),
+    };
+    await saveNoteToStorage(note);
+    chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
+    // best-effort mirror to notes KB
+    try { await mirrorNoteToNotesKb(note); } catch (e) {
+      debugLog("[notes-kb] askai mirror failed:", e);
+    }
+    // kick queue so the new note gets picked up promptly when realtime mode
+    try { chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => {}); } catch {}
+    return { success: true, note };
+  } catch (error) {
+    console.error("[dk-bililearn] saveAskAiNote error:", error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * 2026-10-16: saveSelectionNote — the 📝 pill on the text-selection bar.
+ * The user picked these exact words, so the text is stored as-is: no LLM
+ * cleanup pass (unlike handleSaveNote, which re-writes a whole caption line).
+ *
+ * Shape note: this deliberately does NOT set isFullNote. The 笔记 tab renders
+ * isFullNote notes as a "📄 整篇笔记" block with no timestamp and no ▶ Play,
+ * which would be wrong here — a selection is a snippet anchored to a point in
+ * the video. Keeping the regular-note schema means it renders as a quoted
+ * line with a clickable timestamp, exactly like a player-saved note.
+ *
+ * @param {object} message - { text, videoId, videoTitle, channelName, seconds }
+ *   `seconds` is the transcript row the selection started in, or null when the
+ *   selection came from 概览/总结 (no row to anchor to).
+ */
+async function handleSaveSelectionNote(message) {
+  try {
+    const text = String(message?.text || "").trim();
+    if (!text) return { success: false, error: "EMPTY_TEXT" };
+    const videoId = String(message?.videoId || "");
+    const videoTitle = String(message?.videoTitle || "").slice(0, 500);
+    const channelName = String(message?.channelName || "").slice(0, 300);
+    const rawSeconds = Number(message?.seconds);
+    const seconds =
+      Number.isFinite(rawSeconds) && rawSeconds >= 0 ? rawSeconds : null;
+
+    const canonicalVideoUrl = canonicalWatchUrlForVideoId(videoId);
+    const minutes = seconds === null ? 0 : Math.floor(seconds / 60);
+    const secs = seconds === null ? 0 : Math.floor(seconds % 60);
+
+    const note = {
+      id: `note_${Date.now()}_sel`,
+      videoId: videoId,
+      videoTitle: videoTitle || "Untitled Video",
+      channelName: channelName,
+      timestamp:
+        seconds === null ? "全文" : `${minutes}:${String(secs).padStart(2, "0")}`,
+      timestampSeconds: seconds === null ? 0 : seconds,
+      timestampedUrl:
+        seconds === null
+          ? canonicalVideoUrl
+          : `${canonicalVideoUrl}${canonicalVideoUrl.includes("?") ? "&" : "?"}t=${seconds}s`,
+      text: text,
+      rawText: text,
+      source: "selection",
+      createdAt: Date.now(),
+    };
+
+    await saveNoteToStorage(note);
+
+    // Notify side panel to refresh notes list
+    chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
+
+    // best-effort mirror to notes KB so the snippet becomes Q&A material
+    try { await mirrorNoteToNotesKb(note); } catch (e) {
+      debugLog("[notes-kb] selection mirror failed:", e);
+    }
+    try { chrome.runtime.sendMessage({ action: "kbKickQueue" }).catch(() => {}); } catch {}
+
+    return { success: true, note };
+  } catch (error) {
+    console.error("[dk-bililearn] saveSelectionNote error:", error);
     return { success: false, error: error.message };
   }
 }
@@ -5578,6 +7441,384 @@ async function handleExplainSelection(
     return {
       success: false,
       error: error.message || "Failed to explain selection",
+    };
+  }
+}
+
+// ============================================================
+// ASK AI DRAWER — chat that auto-decides whether the current
+// video's context is needed (two-stage: classifier, then answer)
+// ============================================================
+
+/**
+ * Middle truncation for long context strings. Keeps the head (40%)
+ * and the tail (60%) — the tail matters more while a video plays
+ * (the user usually asks about what they just heard).
+ */
+function truncateMiddle(text, maxLen) {
+  const str = String(text || "");
+  if (str.length <= maxLen) return str;
+  const headLen = Math.floor(maxLen * 0.4);
+  const tailLen = maxLen - headLen;
+  return (
+    str.slice(0, headLen) +
+    "\n…[中间内容省略]…\n" +
+    str.slice(str.length - tailLen)
+  );
+}
+
+/**
+ * Parses the classifier's YES/NO verdict for the Ask AI drawer.
+ * Anything that is not an unambiguous NO is treated as YES: a
+ * wrongly-attached context only costs tokens, while a wrongly
+ * dropped context breaks the answer ("拿不准时回答 YES").
+ */
+function parseContextDecision(raw) {
+  const verdict = String(raw || "").trim().toUpperCase();
+  if (/^NO\b/.test(verdict)) return false;
+  return true;
+}
+
+/**
+ * Flattens the drawer conversation into "user: …\nassistant: …"
+ * lines for the classifier prompt (last maxTurns messages only).
+ */
+function buildConversationTail(messages, maxTurns = 6) {
+  if (!Array.isArray(messages) || messages.length === 0) return "(无)";
+  return messages
+    .slice(-maxTurns)
+    .map((m) => {
+      const who = m && m.role === "assistant" ? "assistant" : "user";
+      return `${who}: ${truncateMiddle(m && m.content, 800)}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Sanitizes the drawer conversation into OpenAI message format for
+ * the answer call. Only user/assistant turns survive; the window is
+ * capped so one giant paste cannot blow the context budget.
+ */
+function sanitizeAskAiHistory(messages, maxMessages = 8) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter(
+      (m) =>
+        m &&
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string" &&
+        m.content.trim().length > 0,
+    )
+    .slice(-maxMessages)
+    .map((m) => ({ role: m.role, content: truncateMiddle(m.content, 2000) }));
+}
+
+/**
+ * 2026-10-10: 把选定 KB 的内容从磁盘拉到拼好的 markdown 片段, 供 ask-AI 当 prompt
+ * 上下文使用。
+ *
+ *   - karpathy: 拼 wiki/index.md + 各 moc/*.md (LLM 已经聚合好的内容)。
+ *               如果 wiki 不存在 (新建 KB 还没首次 build), fallback 到 videos/*.md。
+ *   - nvwa:    拼 nvwa/心智模型.md + 各案例集/*.md; 同上 fallback 到 videos/*.md。
+ *   - raw:     直接拼所有 videos/*.md (无聚合, 内容可能很大, 所以走 truncate middle)。
+ *
+ * 内容可能很大, 因此有 KB_CONTEXT_MAX_CHARS 上限, 超长就中间截断。
+ * KB dir 是 settings.kbRootDir/<kb.name>; 此函数假定 dir 已经被服务端沙箱过,
+ * 直接读路径即可。
+ *
+ * @param {string} kbDir 服务器端的 kb json 路径 (kb.dir)
+ * @param {string} buildMethod "karpathy" | "nvwa" | "raw"
+ * @returns {Promise<string>} 拼好的 markdown 片段 (空字符串表示 nothing loaded)
+ */
+const KB_CONTEXT_MAX_CHARS = 30000; // ~30 KB 文本 -- 大约对应 8k 上下文窗口
+
+async function loadKbContextText(kbDir, buildMethod) {
+  if (!kbDir || typeof kbDir !== "string") return "";
+  const settings = await getSettings();
+  if (!settings || !settings.kbRootDir) return "";
+  if (settings.whisperUrl) KbClient.setBaseUrl(settings.whisperUrl);
+  if (!(await KbClient.health())) return ""; // server offline → context empty
+  const root = settings.kbRootDir;
+  const sep = root.includes("/") ? "/" : "\\";
+  // kbDir 在 client 端是绝对路径; 三种风格交叉比对, 找第一层 KB 名。
+  let kbName = kbDir.split(/[\\/]/).filter(Boolean).pop() || "";
+  if (!kbName) return "";
+  const kbPath = `${root}${sep}${kbName}`;
+
+  const safeRead = async (rel) => {
+    try {
+      const r = await KbClient.read(root, `${kbPath}${sep}${rel}`);
+      return (r && typeof r.content === "string") ? r.content : "";
+    } catch { return ""; }
+  };
+  const safeList = async (rel) => {
+    try {
+      if (rel.endsWith(".md")) {
+        // 个别 .md — 不真实, 我们走 KbClient.read
+        return [];
+      }
+      // video metadata 列表不具备磁盘通配能力; 用 videos 端点拿文件清单
+      if (rel === "videos") {
+        const r = await KbClient.videos(root, kbName);
+        return (Array.isArray(r) ? r : []).map((v) => v && v.file).filter(Boolean);
+      }
+      if (rel === "wiki/moc") {
+        // 退化路径: 没 wiki 列表端点, 直接尝试常见的 moc 文件名
+        // (real-world Karpathy wiki 主题页一般文件名不含扩展字符, 命中文件名由 LLM 决定)
+        return [];
+      }
+      return [];
+    } catch { return []; }
+  };
+
+  // Strategy 1: karpathy → wiki index + moc/*
+  if (buildMethod === "karpathy") {
+    const indexMd = (await safeRead("wiki/index.md")).trim();
+    const videosList = await safeList("videos");
+    const mocFiles = []; // TODO: 如果以后加 /kb/wiki_moc 端点, 这里枚举
+    // 简单办法: 从 indexMd 里抓 [[moc name]] 链接; 解析后逐个读
+    const mocNames = new Set();
+    const linkRe = /\[\[([^\]\n]+?)\]\]/g;
+    let m;
+    while ((m = linkRe.exec(indexMd)) !== null) {
+      const name = (m[1] || "").trim();
+      if (name && !mocNames.has(name)) mocNames.add(name);
+    }
+    const parts = [];
+    if (indexMd) parts.push(`# KB 索引\n${indexMd}`);
+    if (videosList.length) parts.push(`# 包含的视频/笔记文件\n${videosList.map((f) => "- " + f).join("\n")}`);
+    if (mocNames.size) {
+      for (const name of mocNames) {
+        const c = (await safeRead(`wiki${sep}moc${sep}${name}.md`)).trim();
+        if (c) parts.push(`# 主题页: ${name}\n${c}`);
+      }
+    }
+    let joined = parts.join("\n\n");
+    if (joined.length > 100) return joined;
+    // wiki 太空 (新建 KB 没首次 build), fallback 到原始 videos/*.md
+  }
+  if (buildMethod === "nvwa") {
+    const modelMd = (await safeRead(`nvwa${sep}心智模型.md`)).trim();
+    const videosList = await safeList("videos");
+    // 案例集从 modelMd 里的链接或文件名解析 -- 走最简单的方式: 直接尝试常见主题
+    const parts = [];
+    if (modelMd) parts.push(`# 心智模型\n${modelMd}`);
+    if (videosList.length) parts.push(`# 包含的视频/笔记文件\n${videosList.map((f) => "- " + f).join("\n")}`);
+    let joined = parts.join("\n\n");
+    if (joined.length > 100) return joined;
+  }
+
+  // Strategy 2: raw (或 fallback) → 拼所有 videos/*.md 原文
+  const videosList = await safeList("videos");
+  if (!videosList.length) return "";
+  const docs = [];
+  for (const file of videosList.slice(0, 50)) {
+    const c = (await safeRead(`videos${sep}${file}`)).trim();
+    if (c) docs.push(c);
+  }
+  let joined = docs.join("\n\n---\n\n");
+  if (joined.length > KB_CONTEXT_MAX_CHARS) {
+    joined = truncateMiddle(joined, KB_CONTEXT_MAX_CHARS);
+  }
+  return joined;
+}
+
+async function handleAskAiChat(message) {
+  try {
+    const question = String(message?.question || "").trim();
+    if (!question) {
+      return { success: false, error: "EMPTY_QUESTION" };
+    }
+    const history = sanitizeAskAiHistory(message.history);
+    const selection = String(message.selection || "").trim();
+
+    const settings = await getSettings();
+    // The Ask-AI drawer may carry a per-question provider override
+    // (selected from its dropdown) so the user can switch models for one
+    // prompt without mutating the global settings. Build a transient
+    // override object the requestAiCompletion helper recognises.
+    const providerOverrideRaw = message && message.providerOverride;
+    const settingsOverride = providerOverrideRaw
+      ? {
+          provider: providerOverrideRaw.provider,
+          aiBaseUrl: providerOverrideRaw.baseUrl,
+          aiModel: providerOverrideRaw.model,
+          apiKey: providerOverrideRaw.apiKey,
+        }
+      : null;
+    // 2026-10-13: 两层判断, 不依赖 settings.js 的 activeApiKey (那一条
+    // 不区分 override 形态, 一旦 importScripts 缓存或扩展未刷新就会漏判)。
+    // 错误信息也具体化: 告诉用户"抽屉选的是 X 但 storage 里没存 key"
+    // 让他能自助定位哪个字段缺了, 而不是 generic "not configured"。
+    const overrideApiKey =
+      settingsOverride &&
+      typeof settingsOverride.apiKey === "string"
+        ? settingsOverride.apiKey.trim()
+        : "";
+    const settingsApiKey = YTD_SETTINGS.activeApiKey(settings);
+    if (!overrideApiKey && !settingsApiKey) {
+      const providerLabel =
+        (settingsOverride && settingsOverride.provider) ||
+        (settings && settings.provider) ||
+        "(unknown)";
+      return {
+        success: false,
+        error: "NO_AI_KEY",
+        message: settingsOverride
+          ? `Ask AI 抽屉选了 ${providerLabel}，但 chrome.storage.local[ytd_settings].${providerLabel}ApiKey 是空的 —— 请到 options 页 → AI Provider 区域重新填入 ${providerLabel} 的 key。`
+          : `AI provider API key not configured。请到 options 页 → AI Provider 配置 ${providerLabel} 的 key。`,
+      };
+    }
+
+    // Response language follows the UI language, same as Explain.
+    let uiLanguage = "";
+    try {
+      uiLanguage = chrome.i18n.getUILanguage();
+    } catch {
+      uiLanguage = typeof navigator !== "undefined" ? navigator.language : "";
+    }
+
+    // ---- Stage 1: does this question need the video context? ----
+    // A FIRST question typed right after selecting text is always
+    // about that selection — skip the classifier call entirely.
+    // Everything else goes through a tiny YES/NO classifier.
+    const isFirstQuestion = history.length === 0;
+    let needsContext = true;
+    if (!(selection && isFirstQuestion)) {
+      const decisionSystem = await loadPromptSection(
+        "askai.md",
+        "Context decision system",
+      );
+      const decisionUser = await loadPromptSection(
+        "askai.md",
+        "Context decision user",
+        {
+          conversationTail: buildConversationTail(history),
+          question,
+        },
+      );
+      // 2026-10-16: the classifier is an OPTIMISATION — it only decides
+      // whether to attach the video context. It must never be able to fail
+      // the user's question.
+      //
+      // It used to: maxTokens 8, temperature 0, and any error propagated to
+      // the outer catch, so the whole turn died with "AI provider returned
+      // an empty response." On glm-4.6 (a thinking model) that was every
+      // time: the SSE stream spends the budget on `reasoning_content` and
+      // never emits `content`, so the parser returns "" and throws
+      // EMPTY_AI_RESPONSE. The user never even reached the answer stage.
+      //
+      // Two fixes: ask for no reasoning pass (disableThinking), and treat a
+      // failure as "attach the context" — which is exactly what
+      // parseContextDecision("") already returns, so a broken classifier now
+      // degrades to the safe default instead of killing the turn.
+      try {
+        const { text: decisionRaw } = await requestAiCompletion({
+          maxTokens: 32,
+          temperature: 0,
+          disableThinking: true,
+          messages: [
+            { role: "system", content: decisionSystem },
+            { role: "user", content: decisionUser },
+          ],
+          settingsOverride,
+        });
+        needsContext = parseContextDecision(decisionRaw);
+      } catch (classifierError) {
+        console.warn(
+          "[dk-bililearn] Ask AI context classifier failed; attaching video context by default:",
+          classifierError && classifierError.message || classifierError,
+        );
+        needsContext = true;
+      }
+    }
+
+    // ---- Stage 2: answer, with or without the video context block ----
+    const answerSystem = await loadPromptSection("askai.md", "Answer system", {
+      responseLanguage: uiLanguage || "zh-CN",
+    });
+
+    let finalQuestion = question;
+    // KB override from the drawer's KB dropdown supersedes the
+    // selection-first / classifier-driven decision: when a KB is picked,
+    // the question is about THAT kb so context is always wanted. A raw
+    // KB can't be selected from the dropdown, but defensively guard
+    // here in case the caller passes one anyway.
+    const kbContextRaw = message && message.kbContext;
+    const hasKbContext =
+      kbContextRaw &&
+      typeof kbContextRaw === "object" &&
+      kbContextRaw.name &&
+      kbContextRaw.dir &&
+      kbContextRaw.build_method &&
+      kbContextRaw.build_method !== "raw";
+    if (hasKbContext) {
+      needsContext = true;
+      // 2026-10-10: 之前 KB context 只在 prompt 里塞一行 KB 路径, LLM 看不到内容。
+      // 现在把磁盘上的 KB 内容拉出来 (优先用 karpathy 索引/nvwa 模型, 缺则 fallback
+      // 到 videos/*.md 全文), 拼到 prompt 里 —— 这样 Ask AI 才能真正"对着 KB 问答"。
+      const kbContent = await loadKbContextText(kbContextRaw.dir, kbContextRaw.build_method);
+      const kbBlock = await loadPromptSection(
+        "askai.md",
+        "KB context block",
+        {
+          selectionLine: selection
+            ? `用户当前选中的文字："${selection}"`
+            : "",
+          videoTitle: message.videoTitle || "Unknown",
+          channelName: message.channelName || "Unknown",
+          kbName: kbContextRaw.name,
+          kbPath: kbContextRaw.dir,
+          buildMethod: kbContextRaw.build_method,
+          kbContent: kbContent || "（KB 内容暂未加载 — 服务器离线或 KB 为空）",
+        },
+      );
+      finalQuestion = kbBlock.trim() + "\n\n---\n\n" + question;
+    } else if (needsContext) {
+      const contextBlock = await loadPromptSection(
+        "askai.md",
+        "Video context block",
+        {
+          selectionLine: selection
+            ? `用户当前选中的文字："${selection}"`
+            : "",
+          videoTitle: message.videoTitle || "Unknown",
+          channelName: message.channelName || "Unknown",
+          videoDescription: truncateMiddle(message.videoDescription, 2000),
+          summary: truncateMiddle(message.summary, 6000),
+          transcript: truncateMiddle(message.transcript, 20000),
+        },
+      );
+      finalQuestion = contextBlock.trim() + "\n\n---\n\n" + question;
+    }
+
+    debugLog(
+      "[dk-bililearn] Ask AI drawer request (context attached:",
+      needsContext + ")",
+    );
+    const { text: answer } = await requestAiCompletion({
+      maxTokens: 2048,
+      messages: [
+        { role: "system", content: answerSystem },
+        ...history,
+        { role: "user", content: finalQuestion },
+      ],
+      settingsOverride,
+    });
+
+    return {
+      success: true,
+      answer: answer.trim(),
+      usedContext: needsContext,
+    };
+  } catch (error) {
+    // 2026-10-16: 详细 stack 打印 —— 用户反馈 "老是出这种错" 但只看到 message,
+    // 不知道是哪一行 .replace() 抛的。下次同样错能直接定位 (而不是再次猜
+    // requestAiCompletion / chatCompletionsUrl / loadPromptSection 哪条路径).
+    console.error("Ask AI chat error:", error && error.stack || error);
+    return {
+      success: false,
+      error: error.message || "Failed to answer",
     };
   }
 }

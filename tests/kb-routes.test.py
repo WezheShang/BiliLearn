@@ -74,5 +74,53 @@ assert st == 200 and not os.path.isdir(os.path.join(ROOT, "宏观2")), (st, d)
 st, picked = req("POST", "/kb/pick_root?probe=1", {})
 assert st == 200 and picked["path"] is None, (st, picked)
 
+# 9. /kb/ensure_notes: idempotent, returns dir + existed flag.
+st, en1 = req("POST", "/kb/ensure_notes", {"root": ROOT})
+assert st == 200, (st, en1)
+assert en1["existed"] is False, en1
+assert os.path.isdir(os.path.join(ROOT, "notes")), en1
+# 标准骨架都已建好 (videos / queue / wiki/{index.md, moc, _meta})
+for sub in ("videos", "queue/pending", "queue/done", "queue/failed", "wiki/moc", "wiki/_meta"):
+    assert os.path.isdir(os.path.join(ROOT, "notes", sub)), sub
+assert os.path.isfile(os.path.join(ROOT, "notes", "wiki", "index.md"))
+assert os.path.isfile(os.path.join(ROOT, "notes", "kb.json"))
+with open(os.path.join(ROOT, "notes", "kb.json"), encoding="utf-8") as f:
+    cfg = json.load(f)
+assert cfg["build_method"] == "karpathy", cfg
+assert cfg["protected"] is True, cfg
+# kb.list: protected 字段必须为 True
+st, items = req("GET", f"/kb/list?root={Q(ROOT)}")
+notes_entry = next((x for x in items if x["name"] == "notes"), None)
+assert notes_entry is not None and notes_entry["protected"] is True, items
+
+# 10. 再次调用 — existed 必须为 True (幂等)
+st, en2 = req("POST", "/kb/ensure_notes", {"root": ROOT})
+assert st == 200 and en2["existed"] is True, en2
+
+# 11. /kb/create 拒绝 protected name (notes 已被保留给系统)
+st, deny = req("POST", "/kb/create", {"root": ROOT, "name": "notes", "build_method": "raw"})
+assert st == 400, (st, deny)
+assert "protected" in deny.get("error", "").lower(), deny
+
+# 12. /kb/move 拒绝对 protected KB 重命名/挪位 —— dst 第一层组件是 notes 就拒
+st, deny2 = req("POST", "/kb/move",
+                {"root": ROOT, "from": os.path.join(ROOT, "any"), "to": os.path.join(ROOT, "notes")})
+assert st == 400, (st, deny2)
+assert "protected" in deny2.get("error", "").lower(), deny2
+
+# 13. /kb/delete 拒绝删除 protected KB 顶层 (recursive=True), 因为整个 KB 是用户的笔记源
+st, deny3 = req("POST", "/kb/delete",
+                {"root": ROOT, "path": os.path.join(ROOT, "notes"), "recursive": True})
+assert st == 400, (st, deny3)
+assert "protected" in deny3.get("error", "").lower(), deny3
+
+# 14. /kb/delete 允许 protected KB 内部单个文件删除 (recursive=False), 供镜像笔记删除用
+fake_note = os.path.join(ROOT, "notes", "videos", "note_123.md")
+with open(fake_note, "w", encoding="utf-8") as f:
+    f.write("---\ntype: note\n---\n# test")
+st, ok4 = req("POST", "/kb/delete",
+              {"root": ROOT, "path": fake_note, "recursive": False})
+assert st == 200 and not os.path.isfile(fake_note), (st, ok4)
+
 srv.shutdown()
 print("kb-routes.test.py ALL PASS")

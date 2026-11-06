@@ -489,6 +489,12 @@ var YTD_SETTINGS = (() => {
 
   function activeApiKey(settings) {
     if (!settings) return "";
+    // 2026-10-11: Ask AI drawer 的 provider override 把 key 装在通用 `apiKey`
+    // 字段（getAskAiProviderOverride 的契约）, 而持久化 settings 没有这个字段
+    // (持久化的只有 deepseekApiKey / minimaxApiKey / glmApiKey)。先看 override
+    // 形态, 否则会让 handleAskAiChat 的入口 guard 误判 NO_AI_KEY。
+    const overrideKey = typeof settings.apiKey === "string" ? settings.apiKey.trim() : "";
+    if (overrideKey) return overrideKey;
     if (settings.provider === "deepseek") return settings.deepseekApiKey || "";
     if (settings.provider === "minimax") return settings.minimaxApiKey || "";
     if (settings.provider === "glm") return settings.glmApiKey || "";

@@ -630,6 +630,8 @@
               <option value="daily">每日凌晨 1 点自动更新（host 不可用则跳过）</option>
             </select>
             <button id="kbRunNowBtn" class="secondary" type="button" style="display:none">立即更新</button>
+            <!-- 2026-10-10: 对「本地笔记 KB」推荐 daily（每天 build 一次）—— 节流用 -->
+            <p class="help" id="kbUpdateModeHelp" style="margin:6px 0 0">对「本地笔记 KB」建议 daily：saveAskAiNote 与字幕点笔记每次写入后会立即触发一次增量，但整体索引/主题页刷新保持每天一次避免频繁 LLM 调用。</p>
           </div>
 
           <h3>KB 列表</h3>

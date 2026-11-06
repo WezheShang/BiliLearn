@@ -35,6 +35,16 @@ const path = require("path");
 
 const ROOT = path.resolve(__dirname, "..");
 
+// 2026-10-27: 侧边栏启动时会跟后台握手（getExtensionBuild），后台版本对不上
+// 就直接提示"去刷新扩展"。这个假后台模拟的就是"当前版本的后台"，所以必须
+// 回答这个 action —— 版本号直接从 sidepanel.js 里读，改了源码这里自动跟上。
+const CURRENT_BUILD =
+  (
+    fs.readFileSync(path.join(ROOT, "sidepanel.js"), "utf8").match(
+      /const\s+SP_BUILD\s*=\s*"([^"]+)"/,
+    ) || []
+  )[1] || "";
+
 // ---------- Test framework (minimal, no deps) ----------
 const results = [];
 function record(name, ok, detail = "") {
@@ -260,6 +270,9 @@ async function runFourStageFlow() {
   // 1. Sidepanel starts on a video with no cache. Background should
   //    return success: false, error: "WHISPER_NEEDED".
   shim.api.runtime.sendMessage = (msg) => {
+    if (msg && msg.action === "getExtensionBuild") {
+      return Promise.resolve({ success: true, build: CURRENT_BUILD });
+    }
     if (msg && msg.action === "getWhisperJobStatus") {
       return Promise.resolve({ job: shim.state.sessionStore["whisper-job"] || null });
     }
@@ -300,6 +313,9 @@ async function runFourStageFlow() {
   //    progress emissions.
   let resolveTrigger;
   shim.api.runtime.sendMessage = (msg) => {
+    if (msg && msg.action === "getExtensionBuild") {
+      return Promise.resolve({ success: true, build: CURRENT_BUILD });
+    }
     if (msg && msg.action === "triggerWhisperTranscription") {
       // Background also writes the initial job state to session.
       shim.state.sessionStore["whisper-job"] = {
@@ -420,6 +436,9 @@ async function runResumeAfterRestart() {
   // Stub sendMessage so getWhisperJobStatus returns the persisted
   // record and checkConfig passes.
   shim.api.runtime.sendMessage = (msg) => {
+    if (msg && msg.action === "getExtensionBuild") {
+      return Promise.resolve({ success: true, build: CURRENT_BUILD });
+    }
     if (msg && msg.action === "getWhisperJobStatus") {
       return Promise.resolve({ job: shim.state.sessionStore["whisper-job"] || null });
     }
@@ -468,6 +487,9 @@ async function runTerminalSucceeded() {
     },
   });
   shim.api.runtime.sendMessage = (msg) => {
+    if (msg && msg.action === "getExtensionBuild") {
+      return Promise.resolve({ success: true, build: CURRENT_BUILD });
+    }
     if (msg && msg.action === "getWhisperJobStatus") {
       return Promise.resolve({ job: shim.state.sessionStore["whisper-job"] || null });
     }
@@ -527,6 +549,9 @@ async function runTerminalFailed() {
     },
   });
   shim.api.runtime.sendMessage = (msg) => {
+    if (msg && msg.action === "getExtensionBuild") {
+      return Promise.resolve({ success: true, build: CURRENT_BUILD });
+    }
     if (msg && msg.action === "getWhisperJobStatus") {
       return Promise.resolve({ job: shim.state.sessionStore["whisper-job"] || null });
     }
@@ -577,12 +602,68 @@ async function runTerminalFailed() {
   record("4.1 terminal FAILED renders error and clears storage", true);
 }
 
+/**
+ * 2026-10-27 回归：B 站视频没有官方字幕时，Whisper 转录页必须出现。
+ * 这两条覆盖的是「取字幕这一步整个失败」的情况 ——
+ * 以前 sendMessage 抛错 / 后台静默不回话，startBililearn 会直接炸掉，
+ * 页面永远停在「正在获取字幕」转圈，用户连 Whisper 这条出路都看不到。
+ */
+async function runFetchFailureFallback(mode) {
+  console.log(`\n[${mode === "reject" ? "5/6" : "6/6"}] fetchTranscript ${mode} → 不能死转圈，要给 Whisper 出路…`);
+  const shim = makeChromeShim();
+  shim.api.runtime.sendMessage = (msg) => {
+    if (msg && msg.action === "getExtensionBuild") {
+      return Promise.resolve({ success: true, build: CURRENT_BUILD });
+    }
+    if (msg && msg.action === "getWhisperJobStatus") {
+      return Promise.resolve({ job: shim.state.sessionStore["whisper-job"] || null });
+    }
+    if (msg && msg.action === "checkConfig") {
+      return Promise.resolve({ hasSupadataKey: true, hasAiKey: true });
+    }
+    if (msg && msg.action === "fetchTranscript") {
+      // 后台整个联系不上：一条是抛错，一条是静默不回话。
+      if (mode === "reject") {
+        return Promise.reject(new Error("Extension context invalidated."));
+      }
+      return Promise.resolve(undefined);
+    }
+    shim.recordOutgoing(msg);
+    return Promise.resolve({ ok: true });
+  };
+  const { document, window } = await loadSidepanel(shim);
+  await new Promise((r) => setTimeout(r, 50));
+  document.dispatchEvent(new window.Event("DOMContentLoaded"));
+  await new Promise((r) => setTimeout(r, 150));
+
+  const loadingState = document.getElementById("loadingState");
+  assertTrue(
+    loadingState.style.display !== "block",
+    "不能停在「正在获取字幕」转圈上",
+  );
+  const errorState = document.getElementById("errorState");
+  assertTrue(errorState.style.display === "block", "应该落在错误/提示页");
+  const errBtn = document.getElementById("errorBtn");
+  assertEqual(errBtn.textContent, "🎙️ 用 Whisper 转录", "主按钮是 Whisper 转录");
+  const msg = document.getElementById("errorMessage").textContent;
+  assertTrue(
+    msg.includes("后台没有响应") || msg.includes("后台没有返回结果"),
+    "页面上要能看到失败原因",
+  );
+  record(
+    `${mode === "reject" ? "5.1" : "6.1"} fetchTranscript ${mode} → 落到 Whisper 提示页`,
+    true,
+  );
+}
+
 async function main() {
   try {
     await runFourStageFlow();
     await runResumeAfterRestart();
     await runTerminalSucceeded();
     await runTerminalFailed();
+    await runFetchFailureFallback("reject");
+    await runFetchFailureFallback("empty");
   } catch (err) {
     console.error("\n[FAIL] e2e threw:", err && err.stack ? err.stack : err);
     process.exit(1);
@@ -596,6 +677,12 @@ async function main() {
     for (const f of failed) console.error("  -", f.name, f.detail);
     process.exit(1);
   }
+  // 2026-10-17: exit explicitly on success. This harness builds four jsdom
+  // windows with pretendToBeVisual (each starts a requestAnimationFrame loop)
+  // and sidepanel.js leaves a playback setInterval running, so the event loop
+  // does not always drain on its own — the process used to hang after
+  // printing "8/8 passed", intermittently stalling the whole npm chain.
+  process.exit(0);
 }
 
 main();

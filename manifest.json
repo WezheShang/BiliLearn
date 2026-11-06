@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkRjpsaYgq+JJXQXn7TR8lIrMMyufcHZ7VW4r63mVPzvI5XS8dVhGMtdP5euDHLAjsoKwCVhdo9ImcNk6BQOm31iQjIyhPliW8uNSBje/W4R2fZoezNaJEAqmNHOWUSV6dxxSMN3Vh6AxYc/7LDZsk3SKzYCWhkwzvmgp9Qmm/tvYGGoMEXOqrvL5gwHlfRj8WC2YsRLTOekYBrA22Nol7huJik2Viwnao0Ms9p8ELbmHomgbLOdYKRTzLpsKFB1ATjDyv5dISYpoTqFWGDZOIr448F0/qyp2d9gmEwg7zrAt9hWtO2L7wLugU+GLJLMeohs/3dK3FwFAw4LeiHvKLwIDAQAB",
   "minimum_chrome_version": "116",
-  "description": "bililearn（WezeShang 二次开发版，原名 bilidown）：把 B 站和 YouTube 视频变成可阅读、可跳转、可保存的中文学习资料。默认读取官方字幕，Whisper 按需本地转录，大语言模型生成中文概览、章节时间线、关键观点与笔记。",
+  "description": "bililearn（WezeShang 二次开发版，原名 bilidown）：把 B 站、YouTube 和学堂在线（xuetangx.com）视频变成可阅读、可跳转、可保存的中文学习资料。默认读取官方字幕，Whisper 按需本地转录，大语言模型生成中文概览、章节时间线、关键观点与笔记。",
   "permissions": [
     "sidePanel",
     "storage",
@@ -15,7 +15,8 @@
     "cookies",
     "notifications",
     "declarativeNetRequestWithHostAccess",
-    "downloads"
+    "downloads",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://www.bilibili.com/*",
@@ -36,7 +37,10 @@
     "https://api.minimax.io/*",
     "https://api.deepseek.com/*",
     "https://open.bigmodel.cn/*",
-    "http://127.0.0.1:7860/*"
+    "https://*.xuetangx.com/*",
+    "https://*.yuketang.cn/*",
+    "http://127.0.0.1:7860/*",
+    "http://localhost:7860/*"
   ],
   "action": {
     "default_title": "打开 bililearn",
@@ -83,6 +87,35 @@
         "content.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.xuetangx.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.xuetangx.com/*"
+      ],
+      "js": [
+        "xuetangx-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.bilibili.com/video/*"
+      ],
+      "js": [
+        "bilibili-subtitle-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "icons": {

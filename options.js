@@ -270,6 +270,16 @@ const YTD_OPTIONS = (() => {
       whisperOldServerDepsNote:
         "Old server builds do not report Python / dependency versions (visible after restarting the bat)",
       whisperOldServerStatus: "Old server build — restart the bat and check again",
+      // 2026-11-05: server 在线但跑的是旧代码（缺 model_resolution 字段）。
+      // 旧代码不会解析本地模型缓存 → 每次都去 huggingface.co 下载 →
+      // 本机直连不通 → 500 LocalEntryNotFoundError: ConnectTimeout。
+      whisperStaleServerDetail:
+        "Online but running an outdated build — it cannot load the Whisper model offline, so transcription fails with a 500 error. Click below to start an up-to-date instance (no admin rights needed).",
+      whisperStaleServerStatus: "Outdated server build — click below to fix it",
+      whisperRepairServerBtn: "Fix it now (start an updated server)",
+      whisperRepairPendingBtn: "Starting the updated server…",
+      whisperRepairDoneBtn: "Updated server is running",
+      whisperRepairFailPrefix: "Could not start the updated server: ",
       whisperLimitedDetail: "Online but in limited mode (transcription unavailable)",
       whisperMissingRequired: "Missing — required for local transcription",
       whisperZhconvLabel: "zhconv — Traditional→Simplified conversion",
@@ -287,6 +297,21 @@ const YTD_OPTIONS = (() => {
       whisperStartServerOnceBtn: "Start Whisper server (this session)",
       whisperInstallAutostartBtn: "Auto-start at every boot",
       whisperUninstallAutostartBtn: "Remove auto-start",
+      // 2026-10-10 (native-launcher rewrite): the start/autostart buttons
+      // now talk to a registered Native Messaging host. These strings
+      // cover the pending state, the post-launch health wait, and the
+      // one-time registration card shown when the host isn't registered.
+      whisperStartPendingBtn: "Starting…",
+      whisperWaitHealthBtn: "Launched — waiting for the server…",
+      whisperStartTimeoutDetail:
+        "Launch triggered, but /health has not answered yet — press “Check system” again in a moment.",
+      whisperAutostartFailPrefix: "Auto-start setup failed: ",
+      whisperNativeRegTitle: "One-time local launcher registration",
+      whisperNativeRegDetail:
+        "Chrome only lets an extension start local programs through a registered Native Messaging host. Download the registration script (choose “Keep” if Chrome asks), double-click it in your Downloads folder, then come back and press the start button again.",
+      whisperNativeRegBtn: "Download registration script (.bat)",
+      whisperNativeRegDownloadedDetail:
+        "Downloaded — open your Downloads folder and double-click bililearn_register_native_launcher.bat, then press the start button again.",
       whisperAutostartInstalledHint:
         "Auto-start is on — the whisper server runs at every boot under SYSTEM.",
       whisperAutostartNotInstalledHint:
@@ -574,6 +599,16 @@ const YTD_OPTIONS = (() => {
       whisperDepsLabel: "依赖详情",
       whisperOldServerDepsNote: "旧版 server 不上报 Python / 依赖版本（重启 bat 后可见）",
       whisperOldServerStatus: "server 是旧版本——重启 bat 后重新检查",
+      // 2026-11-05: server 在线但跑的是旧代码（缺 model_resolution 字段）。
+      // 旧代码不会解析本地模型缓存 → 每次都去 huggingface.co 下载 →
+      // 本机直连不通 → 500 LocalEntryNotFoundError: ConnectTimeout。
+      whisperStaleServerDetail:
+        "在线，但跑的是旧代码——它没法离线加载 Whisper 模型，转写会报 500。点下面的按钮拉起一个新实例（不需要管理员权限）。",
+      whisperStaleServerStatus: "server 是旧代码——点下面的按钮修好它",
+      whisperRepairServerBtn: "一键修好（启动新版本 server）",
+      whisperRepairPendingBtn: "正在启动新版本 server…",
+      whisperRepairDoneBtn: "新版本 server 已就绪",
+      whisperRepairFailPrefix: "无法启动新版本 server：",
       whisperLimitedDetail: "在线但处于受限模式（转写不可用）",
       whisperMissingRequired: "缺失——本地转写必需",
       whisperZhconvLabel: "zhconv — 繁体字幕转简体",
@@ -589,6 +624,20 @@ const YTD_OPTIONS = (() => {
       whisperStartServerOnceBtn: "启动 Whisper server（本会话）",
       whisperInstallAutostartBtn: "开机自动启动",
       whisperUninstallAutostartBtn: "取消开机自动启动",
+      // 2026-10-10（native 启动器改版）：启动/自启按钮改走已注册的
+      // Native Messaging host。这组文案覆盖等待态、启动后的健康轮询、
+      // 以及 host 未注册时的一次性注册卡片。
+      whisperStartPendingBtn: "启动中…",
+      whisperWaitHealthBtn: "已拉起 — 等待服务就绪…",
+      whisperStartTimeoutDetail:
+        "已触发启动，但 /health 还没响应 — 稍后再点「检查系统」刷新。",
+      whisperAutostartFailPrefix: "自启设置失败：",
+      whisperNativeRegTitle: "需要一次性注册本地启动器",
+      whisperNativeRegDetail:
+        "Chrome 只允许扩展通过已注册的 Native Messaging host 启动本地程序。下载注册脚本（浏览器提示时选「保留」），到下载文件夹双击运行一次，然后回到这里再点启动按钮。",
+      whisperNativeRegBtn: "下载注册脚本（.bat）",
+      whisperNativeRegDownloadedDetail:
+        "已下载 — 打开下载文件夹双击 bililearn_register_native_launcher.bat 运行，然后回来再点启动按钮。",
       whisperAutostartInstalledHint: "已开启开机自启 — 系统启动后自动跑 server（SYSTEM 上下文）。",
       whisperAutostartNotInstalledHint:
         "点「开机自动启动」以后每次重启都自动跑 server，不用手动再启。",
@@ -892,9 +941,48 @@ const YTD_OPTIONS = (() => {
     };
   }
 
+  // 2026-11-06: 语言偏好要有兜底链。
+  //
+  // 现象：用户的扩展存储里明明有顶层 key `language` = "zh-CN"（老版本写的），
+  // 但这版读的是 `ytd_options_language` —— 读不到 → 每次打开 settings 页都
+  // 退回**英文**。中文用户在英文页面里找"启动 Whisper server"按钮特别费劲，
+  // 很容易以为按钮坏了。
+  //
+  // 现在的顺序：① 新 key → ② 老 key（顺手迁移到新 key）→ ③ 跟随浏览器界面语言。
+  const LEGACY_LANGUAGE_STORAGE_KEY = "language";
+
+  function detectBrowserLanguage() {
+    try {
+      const nav =
+        typeof globalThis !== "undefined" && globalThis.navigator
+          ? globalThis.navigator
+          : null;
+      const raw = String(
+        (nav && (nav.language || (nav.languages && nav.languages[0]))) || "",
+      );
+      if (/^zh\b/i.test(raw) || /^zh-/i.test(raw) || /^-?zh/i.test(raw)) {
+        return "zh-CN";
+      }
+    } catch (_error) {
+      /* navigator 不可用就用 en */
+    }
+    return "en";
+  }
+
   async function readPreferredLanguage(storage) {
-    const stored = await storage.get(LANGUAGE_STORAGE_KEY);
-    return normalizeLanguage(stored[LANGUAGE_STORAGE_KEY]);
+    const stored = await storage.get([
+      LANGUAGE_STORAGE_KEY,
+      LEGACY_LANGUAGE_STORAGE_KEY,
+    ]);
+    const preferred = stored[LANGUAGE_STORAGE_KEY];
+    if (SUPPORTED_LANGUAGES.has(preferred)) return preferred;
+    const legacy = stored[LEGACY_LANGUAGE_STORAGE_KEY];
+    if (SUPPORTED_LANGUAGES.has(legacy)) {
+      // 老 key 里存着用户选过的语言 —— 迁移到新 key，别再丢一次
+      await persistPreferredLanguage(storage, legacy);
+      return legacy;
+    }
+    return detectBrowserLanguage();
   }
 
   async function persistPreferredLanguage(storage, language) {
@@ -1651,6 +1739,169 @@ const YTD_OPTIONS = (() => {
     // guard comment inside (2026-09-30).
     let whisperCheckRenderSeq = 0;
 
+    // ------------------------------------------------------------
+    // Native-launcher wiring (2026-10-10). The start / autostart
+    // buttons talk to a registered Native Messaging host via the
+    // background; these helpers own everything that happens AFTER the
+    // response comes back: health polling, the one-time registration
+    // card, and per-row failure copy.
+    // ------------------------------------------------------------
+    function whisperBaseUrl() {
+      return whisperUrlText && whisperUrlText.textContent
+        ? whisperUrlText.textContent.trim()
+        : "http://127.0.0.1:7860";
+    }
+
+    // Poll /health until it answers ok or the deadline passes. A cold
+    // start (python + faster-whisper import) can take tens of seconds,
+    // so the window is generous.
+    async function waitForWhisperHealth(timeoutMs) {
+      const deadline = Date.now() + (timeoutMs || 90000);
+      while (Date.now() < deadline) {
+        try {
+          const r = await pingWhisper(whisperBaseUrl());
+          if (r && r.ok) return true;
+        } catch (_e) {}
+        await new Promise((res) => setTimeout(res, 2000));
+      }
+      return false;
+    }
+
+    // Repo dir derived from the last-seen server script path (cached
+    // from every successful /health check below), so the generated
+    // registration bat embeds the right folder even when the server
+    // is down at registration time. "" when unknown — the bat then
+    // prompts the user interactively.
+    function cachedRepoDirFromStorage() {
+      return new Promise((resolve) => {
+        try {
+          if (
+            chrome.storage &&
+            chrome.storage.local &&
+            typeof chrome.storage.local.get === "function"
+          ) {
+            chrome.storage.local.get(
+              ["bililearn_server_script"],
+              (v) => {
+                const s = v && v.bililearn_server_script;
+                resolve(
+                  s
+                    ? String(s).replace(/[\\/]whisper_server\.py$/i, "")
+                    : "",
+                );
+              },
+            );
+            setTimeout(() => resolve(""), 500);
+            return;
+          }
+        } catch (_e) {}
+        resolve("");
+      });
+    }
+
+    // The one-time registration card, appended under whichever row's
+    // button press discovered the missing host. Respects the render
+    // generation guard and never duplicates itself.
+    async function appendNativeRegisterCard(list) {
+      if (!list) return;
+      const seq = list.dataset.renderSeq;
+      if (list.querySelector('li[data-native-reg="1"]')) return;
+      const repoDir = await cachedRepoDirFromStorage();
+      if (seq && list.dataset.renderSeq !== seq) return; // superseded
+      if (list.querySelector('li[data-native-reg="1"]')) return;
+      const liReg = renderCheckItem(
+        list,
+        translate(currentLanguage, "whisperNativeRegTitle"),
+        false,
+        translate(currentLanguage, "whisperNativeRegDetail"),
+        {
+          action: {
+            label: translate(currentLanguage, "whisperNativeRegBtn"),
+            messageAction: "downloadWhisperNativeRegister",
+            payload: { repoDir },
+            pendingLabel: translate(currentLanguage, "whisperStartPendingBtn"),
+            onResult: async (resp, btn, li) => {
+              if (resp && resp.success) {
+                const small = li.querySelector(".diagnostics-detail");
+                if (small) {
+                  small.textContent =
+                    " — " +
+                    translate(
+                      currentLanguage,
+                      "whisperNativeRegDownloadedDetail",
+                    );
+                }
+                return true; // keep disabled: the next step is in Explorer
+              }
+              return false;
+            },
+          },
+        },
+      );
+      if (liReg) liReg.dataset.nativeReg = "1";
+    }
+
+    // Post-launch handler for the row-5 start button. On success it
+    // takes the button over (waiting label) and polls /health, then
+    // re-runs the whole check so all five rows flip to their real
+    // state. On "not registered" it surfaces the registration card.
+    function makeLaunchOnResult() {
+      return async (resp, btn, li) => {
+        const list = li ? li.parentElement : null;
+        if (resp && resp.success) {
+          btn.textContent = translate(currentLanguage, "whisperWaitHealthBtn");
+          const up = await waitForWhisperHealth(90000);
+          if (up) {
+            runWhisperCheck(); // re-render; this li is replaced anyway
+            return true;
+          }
+          btn.disabled = false;
+          btn.textContent = translate(currentLanguage, "whisperStartServerOnceBtn");
+          const small = li.querySelector(".diagnostics-detail");
+          if (small) {
+            small.textContent =
+              " — " + translate(currentLanguage, "whisperStartTimeoutDetail");
+          }
+          return false;
+        }
+        if (resp && resp.nativeNotRegistered) {
+          await appendNativeRegisterCard(list);
+          return false;
+        }
+        const small = li.querySelector(".diagnostics-detail");
+        if (small) {
+          small.textContent = " — " + String((resp && resp.error) || "launch failed");
+        }
+        return false;
+      };
+    }
+
+    // Post-launch handler for the autostart install/uninstall rows.
+    // Success flips the row via the storage flag the background wrote
+    // (re-render with runWhisperCheck); not-registered surfaces the
+    // same registration card; anything else shows the raw error.
+    function makeAutostartOnResult() {
+      return async (resp, btn, li) => {
+        const list = li ? li.parentElement : null;
+        if (resp && resp.success) {
+          runWhisperCheck();
+          return true;
+        }
+        if (resp && resp.nativeNotRegistered) {
+          await appendNativeRegisterCard(list);
+          return false;
+        }
+        const small = li.querySelector(".diagnostics-detail");
+        if (small) {
+          small.textContent =
+            " — " +
+            translate(currentLanguage, "whisperAutostartFailPrefix") +
+            String((resp && resp.error) || "failed");
+        }
+        return false;
+      };
+    }
+
     async function renderWhisperCheckResults(health) {
       const list = whisperCheckResults;
       if (!list) return;
@@ -1671,6 +1922,24 @@ const YTD_OPTIONS = (() => {
       if (whisperCopyCmdBtn) whisperCopyCmdBtn.hidden = true;
       if (installDepsBtn) installDepsBtn.hidden = true;
       const d = health || {};
+
+      // 2026-10-10: remember the on-disk server script path so the
+      // native-host registration card can embed the repo dir later,
+      // even when the server is down again by then. Best effort only —
+      // storage being unavailable (stub in tests) is fine.
+      if (health && health.server_script) {
+        try {
+          if (
+            chrome.storage &&
+            chrome.storage.local &&
+            typeof chrome.storage.local.set === "function"
+          ) {
+            chrome.storage.local.set({
+              bililearn_server_script: String(health.server_script),
+            });
+          }
+        } catch (_e) {}
+      }
 
       // Full path of the launcher, when the NEW server reports its own
       // script location; otherwise guide the user through the extensions
@@ -1758,6 +2027,12 @@ const YTD_OPTIONS = (() => {
               label: translate(currentLanguage, "whisperStartServerOnceBtn"),
               messageAction: "launchWhisperServerOnce",
               payload: {},
+              // 2026-10-10: the button now awaits the background's
+              // sendNativeMessage result — pending label while the
+              // host spawns, then health polling / registration card /
+              // error copy via makeLaunchOnResult.
+              pendingLabel: translate(currentLanguage, "whisperStartPendingBtn"),
+              onResult: makeLaunchOnResult(),
             },
           },
         );
@@ -1809,6 +2084,11 @@ const YTD_OPTIONS = (() => {
                     ),
                     messageAction: "uninstallWhisperAutostart",
                     payload: {},
+                    pendingLabel: translate(
+                      currentLanguage,
+                      "whisperStartPendingBtn",
+                    ),
+                    onResult: makeAutostartOnResult(),
                   },
                 }
               : {
@@ -1819,6 +2099,11 @@ const YTD_OPTIONS = (() => {
                     ),
                     messageAction: "installWhisperAutostart",
                     payload: {},
+                    pendingLabel: translate(
+                      currentLanguage,
+                      "whisperStartPendingBtn",
+                    ),
+                    onResult: makeAutostartOnResult(),
                   },
                 },
           );
@@ -1837,6 +2122,11 @@ const YTD_OPTIONS = (() => {
                 ),
                 messageAction: "installWhisperAutostart",
                 payload: {},
+                pendingLabel: translate(
+                  currentLanguage,
+                  "whisperStartPendingBtn",
+                ),
+                onResult: makeAutostartOnResult(),
               },
             },
           );
@@ -1874,6 +2164,54 @@ const YTD_OPTIONS = (() => {
           translate(currentLanguage, "whisperOldServerDetail", { batHint }),
         );
         whisperTestStatus.textContent = translate(currentLanguage, "whisperOldServerStatus");
+        return;
+      }
+
+      // 2026-11-05: server 在线，但跑的是**旧代码**（没有 model_resolution
+      // 字段 —— 那是这次给新代码加的诊断字段）。
+      //
+      // 用户报的症状：点 Whisper 转录 → 500
+      //   LocalEntryNotFoundError: Got: ConnectTimeout: [WinError 10060]
+      // 因为旧代码不会解析本地 HF 缓存，每次都去 huggingface.co 下载，
+      // 而本机直连 huggingface.co 不通。
+      //
+      // 那个进程是**开机自启任务拉起来的 SYSTEM 实例**，普通用户权限
+      // 杀不掉（taskkill: Access is denied）。所以这里给一个**不需要
+      // 管理员权限**的修复按钮：在备用端口（7861）用当前用户身份拉起
+      // 一个新实例，然后把 whisperUrl 切过去。旧实例变成无害僵尸。
+      if (!d.model_resolution) {
+        renderCheckItem(
+          list,
+          "Whisper server",
+          false,
+          translate(currentLanguage, "whisperStaleServerDetail"),
+          {
+            action: {
+              label: translate(currentLanguage, "whisperRepairServerBtn"),
+              messageAction: "repairWhisperServer",
+              payload: {},
+              pendingLabel: translate(currentLanguage, "whisperRepairPendingBtn"),
+              onResult: async (resp, btn, li) => {
+                if (resp && resp.success) {
+                  btn.textContent = translate(currentLanguage, "whisperRepairDoneBtn");
+                  await runWhisperCheck();
+                  return false;
+                }
+                const small = li ? li.querySelector("small") : null;
+                if (small) {
+                  small.textContent =
+                    translate(currentLanguage, "whisperRepairFailPrefix") +
+                    String((resp && resp.error) || "failed");
+                }
+                if (resp && resp.nativeNotRegistered) {
+                  showNativeRegistrationCard();
+                }
+                return false;
+              },
+            },
+          },
+        );
+        whisperTestStatus.textContent = translate(currentLanguage, "whisperStaleServerStatus");
         return;
       }
 
@@ -2417,7 +2755,7 @@ const YTD_OPTIONS = (() => {
     // ------------------------------------------------------------
 
     function renderCheckItem(listEl, label, ok, detail, opts) {
-      renderDiagnosticsItemTo(listEl, label, ok, detail, opts);
+      return renderDiagnosticsItemTo(listEl, label, ok, detail, opts);
     }
 
     function renderDiagnosticsItemTo(listEl, label, ok, detail, opts) {
@@ -2480,8 +2818,51 @@ const YTD_OPTIONS = (() => {
         btn.type = "button";
         btn.className = "secondary diagnostics-action-btn";
         btn.textContent = opts.action.label;
-        btn.addEventListener("click", () => {
-          if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        btn.addEventListener("click", async () => {
+          // 2026-10-10 (native-launcher rewrite): actions may declare
+          // onResult(resp, btn, li) to consume the background handler's
+          // sendResponse payload (launch result, not-registered card,
+          // health polling…). While waiting, the button is disabled and
+          // shows pendingLabel. If onResult returns true it has taken
+          // the button over (e.g. long health poll) and the renderer
+          // must not restore it.
+          if (
+            typeof opts.action.onResult === "function" &&
+            typeof chrome !== "undefined" &&
+            chrome.runtime &&
+            chrome.runtime.sendMessage
+          ) {
+            const originalLabel = btn.textContent;
+            btn.disabled = true;
+            btn.textContent =
+              opts.action.pendingLabel || originalLabel + "…";
+            try {
+              let resp = null;
+              try {
+                resp = await chrome.runtime.sendMessage({
+                  action: opts.action.messageAction || opts.action.action,
+                  payload: opts.action.payload || {},
+                });
+              } catch (err) {
+                // Background script unreachable (e.g. extension reload).
+                console.warn("[bililearn] action message failed:", err);
+                resp = { success: false, error: "background unreachable" };
+              }
+              const takeover =
+                (await opts.action.onResult(resp, btn, li)) === true;
+              if (!takeover) {
+                btn.disabled = false;
+                btn.textContent = originalLabel;
+              }
+            } catch (_e) {
+              btn.disabled = false;
+              btn.textContent = originalLabel;
+            }
+          } else if (
+            typeof chrome !== "undefined" &&
+            chrome.runtime &&
+            chrome.runtime.sendMessage
+          ) {
             chrome.runtime.sendMessage({
               action: opts.action.messageAction || opts.action.action,
               payload: opts.action.payload || {},
@@ -2501,6 +2882,7 @@ const YTD_OPTIONS = (() => {
       li.appendChild(mark);
       li.appendChild(text);
       listEl.appendChild(li);
+      return li;
     }
 
     async function pingWhisper(url) {
@@ -2780,6 +3162,10 @@ if (typeof document !== "undefined") {
     let anyFailed = false;
     for (const kb of kbs) {
       const tr = document.createElement("tr");
+      // 2026-10-10: 系统保留 KB（"notes"）整行不可修改 —— 锁住改名、构建方法、删除。
+      // 服务端 PROTECTED_KBS 集合会兜底再拒绝一次；这是 UI 层不暴露删除按钮的视觉锁。
+      const isProtected = !!kb.protected || KbShared.isProtectedKbName(kb.name);
+      if (isProtected) tr.classList.add("kb-row-protected");
       const methodSel = document.createElement("select");
       for (const m of KbShared.KB_BUILD_METHODS) {
         const o = document.createElement("option");
@@ -2790,7 +3176,16 @@ if (typeof document !== "undefined") {
         const o = document.createElement("option");
         o.value = ""; o.textContent = "未配置"; o.selected = true; methodSel.prepend(o);
       }
+      if (isProtected) {
+        // 锁定方法选择 —— 永远 karpathy，不可改。
+        methodSel.disabled = true;
+        methodSel.title = "本地笔记 KB 使用 karpathy LLM 构建，无法修改。";
+      }
       methodSel.addEventListener("change", async () => {
+        if (isProtected) {
+          methodSel.value = kb.build_method || "karpathy";
+          return;
+        }
         const method = methodSel.value || "raw";
         // karpathy/nvwa 需要的子目录在消费端 mkdir 前不可写文件——先补齐骨架
         try {
@@ -2804,62 +3199,84 @@ if (typeof document !== "undefined") {
         await KbClient.write(root, `${kb.dir}\\kb.json`, JSON.stringify(cfg, null, 2));
         renderKbList(root);
       });
-      // 名字单元格：直接点击改名（contenteditable + blur/Enter 触发）
+      // 名字单元格：直接点击改名（contenteditable + blur/Enter 触发）。
+      // protected KB 显示前缀 🔒 + "系统保留" label，并禁用 contenteditable。
       const nameCell = td("");
+      if (isProtected) {
+        const lock = document.createElement("span");
+        lock.className = "kb-lock";
+        lock.textContent = "🔒";
+        lock.title = "系统保留 —— 无法改名或删除";
+        nameCell.appendChild(lock);
+      }
       const nameSpan = document.createElement("span");
-      nameSpan.className = "kb-name-edit";
-      nameSpan.contentEditable = "true";
-      nameSpan.tabIndex = 0;
-      nameSpan.spellcheck = false;
-      nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
-      nameSpan.title = "点击改名";
-      const commitRename = async () => {
-        const newName = KbShared.sanitizeKbName(nameSpan.textContent || "");
-        if (!newName || newName === kb.name) {
-          nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
-          return;
-        }
-        try {
-          await KbClient.move(root, kb.dir, `${root}\\${newName}`);
-          renderKbList(root);
-        } catch (e) {
-          window.alert("改名失败: " + e.message);
-          nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
-        }
-      };
-      nameSpan.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); nameSpan.blur(); }
-        if (e.key === "Escape") { e.preventDefault(); nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : ""); nameSpan.blur(); }
-      });
-      nameSpan.addEventListener("blur", commitRename);
+      if (isProtected) {
+        nameSpan.className = "kb-name-edit kb-name-locked";
+        nameSpan.textContent = `${kb.name}（系统保留）`;
+        nameSpan.title = "本地笔记 KB；由 bililearn 持有，无法改名 / 删除 / 改方法。";
+      } else {
+        nameSpan.className = "kb-name-edit";
+        nameSpan.contentEditable = "true";
+        nameSpan.tabIndex = 0;
+        nameSpan.spellcheck = false;
+        nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
+        nameSpan.title = "点击改名";
+        const commitRename = async () => {
+          const newName = KbShared.sanitizeKbName(nameSpan.textContent || "");
+          if (!newName || newName === kb.name) {
+            nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
+            return;
+          }
+          try {
+            await KbClient.move(root, kb.dir, `${root}\\${newName}`);
+            renderKbList(root);
+          } catch (e) {
+            window.alert("改名失败: " + e.message);
+            nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : "");
+          }
+        };
+        nameSpan.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); nameSpan.blur(); }
+          if (e.key === "Escape") { e.preventDefault(); nameSpan.textContent = kb.name + (kb.archived ? "（已解绑）" : ""); nameSpan.blur(); }
+        });
+        nameSpan.addEventListener("blur", commitRename);
+      }
       nameCell.appendChild(nameSpan);
       tr.appendChild(nameCell);
       tr.appendChild(tdEl(methodSel));
       tr.appendChild(td(String(kb.video_count)));
       const qState = kb.pending_count > 0 ? `pending ${kb.pending_count}` : "空";
       tr.appendChild(td(qState));
-      // 操作列：只放一个红色 ×（delete）
+      // 操作列：只放一个红色 ×（delete）。protected KB 显示一个禁用提示符代替。
       const ops = document.createElement("td");
       ops.className = "kb-ops";
-      const delBtn = document.createElement("button");
-      delBtn.type = "button";
-      delBtn.className = "kb-delete-btn";
-      delBtn.textContent = "×";
-      delBtn.title = "删除 KB";
-      delBtn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        if (!window.confirm(`删除 KB「${kb.name}」？默认只解绑（目录保留）。`)) return;
-        if (window.confirm("连磁盘目录一起删除？此操作不可恢复！（取消 = 只解绑）")) {
-          try { await KbClient.deletePath(root, kb.dir, true); }
-          catch (err) { window.alert("删除失败: " + err.message); return; }
-        } else {
-          const cfgRaw = (await KbClient.read(root, `${kb.dir}\\kb.json`).catch(() => ({ content: "{}" }))).content;
-          const cfg = JSON.parse(cfgRaw || "{}"); cfg.archived = true;
-          await KbClient.write(root, `${kb.dir}\\kb.json`, JSON.stringify(cfg, null, 2));
-        }
-        renderKbList(root);
-      });
-      ops.appendChild(delBtn);
+      if (isProtected) {
+        const lock = document.createElement("span");
+        lock.className = "kb-locked-tag";
+        lock.textContent = "系统";
+        lock.title = "本地笔记 KB 由系统保留，无法删除";
+        ops.appendChild(lock);
+      } else {
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.className = "kb-delete-btn";
+        delBtn.textContent = "×";
+        delBtn.title = "删除 KB";
+        delBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          if (!window.confirm(`删除 KB「${kb.name}」？默认只解绑（目录保留）。`)) return;
+          if (window.confirm("连磁盘目录一起删除？此操作不可恢复！（取消 = 只解绑）")) {
+            try { await KbClient.deletePath(root, kb.dir, true); }
+            catch (err) { window.alert("删除失败: " + err.message); return; }
+          } else {
+            const cfgRaw = (await KbClient.read(root, `${kb.dir}\\kb.json`).catch(() => ({ content: "{}" }))).content;
+            const cfg = JSON.parse(cfgRaw || "{}"); cfg.archived = true;
+            await KbClient.write(root, `${kb.dir}\\kb.json`, JSON.stringify(cfg, null, 2));
+          }
+          renderKbList(root);
+        });
+        ops.appendChild(delBtn);
+      }
       tr.appendChild(ops);
       body.appendChild(tr);
       // failed 队列渲染

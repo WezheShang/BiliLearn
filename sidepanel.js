@@ -10,6 +10,14 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
+// 2026-10-27: 构建指纹 —— 必须和 background.js 里的 BG_BUILD 一致。
+// 启动时跟后台握手比对：对不上就说明后台 Service Worker 还在跑旧代码
+// （改了文件不去 chrome://extensions 点"刷新"就是这样），这时候给用户
+// 一句人话，比让旧后台把请求处理坏、报出 "Invalid Bilibili BV ID." 这种
+// 完全看不懂的错要好得多。tests/xuetangx.test.js 里有一条用例守着这个
+// 一致性 —— 以后改了任一边忘了改另一边，测试会直接挂。
+const SP_BUILD = "2026-11-06.1";
+
 // ============================================================
 // STATE
 // ============================================================
@@ -34,6 +42,12 @@ async function removeVideoCache(videoId) {
 let generation = 0;
 let currentVideoUrl = null;
 let currentAnalysis = null;
+// 2026-10-27: 学堂在线课程自带的"知识导引"。有它就直接当概览用，
+// 不再花钱跑 AI 概览（用户要求）。null = 这节课没有导引 → 照常走 AI。
+let currentXuetangxChapters = null;
+// 2026-10-27: 学堂在线的官方章节**试过一次没有**（用来决定要不要弹
+// "配置AI"的引导 —— 有官方章节就不需要 AI）。
+let xuetangxChaptersChecked = false;
 let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
@@ -257,63 +271,345 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
 // INITIALIZATION
 // ============================================================
 
-document.addEventListener("DOMContentLoaded", async () => {
-  setupEventListeners();
-  initWhisperQueuePanel();
-  await evictOldCacheEntries(20);
+// ============================================================
+// EXTENSION-CONTEXT WATCHDOG (2026-10-16)
+// ============================================================
+//
+// Why the panel kept dying "every time I change code": changing ANY
+// extension file means reloading the extension (chrome://extensions →
+// reload). That kills the service worker and INVALIDATES every
+// already-open extension document — but Chrome does NOT reload the side
+// panel, so it freezes in place: DOMContentLoaded has long since fired,
+// every chrome.* call throws "Extension context invalidated", and there
+// is no way out except manually closing the panel. That is not a code
+// bug; it is what reloading an extension does.
+//
+// So: detect the dead context and reload THIS document. Three
+// independent triggers, because each covers a case the others miss:
+//   1. an idle heartbeat (covers "nothing happened, panel just froze"),
+//   2. window error / unhandledrejection (covers the moment it happens),
+//   3. the boot chain itself (covers "it died before the panel ever
+//      reached a working state").
+//
+// The auto-reload is capped and de-duplicated: a context that stays
+// broken must not spin, it must show a button the user can click.
 
-  // If a whisper job is in flight (or just finished) from before this
-  // panel was last closed, restore the matching loading screen first so
-  // we don't flash the "no cache, click to start" error. We do this
-  // BEFORE the config check because the user has already kicked off a
-  // long job — they shouldn't be bounced to the config error mid-run.
-  const resumed = await maybeResumeWhisperJob();
-  if (resumed) return;
+const CONTEXT_LOST_RE =
+  /Extension context invalidated|Receiving end does not exist|message port closed before a response/i;
+const RELOAD_COUNT_KEY = "bililearnPanelReloadCount";
+const MAX_AUTO_RELOADS = 3;
+const CONTEXT_WATCHDOG_MS = 2000;
 
-  const configStatus = await chrome.runtime.sendMessage({
-    action: "checkConfig",
-  });
+let contextLostHandled = false;
+
+function errorLooksLikeContextLoss(err) {
+  const text = String((err && (err.message || err)) || err || "");
+  return CONTEXT_LOST_RE.test(text);
+}
+
+function bumpReloadCount() {
+  try {
+    const next = (Number(sessionStorage.getItem(RELOAD_COUNT_KEY)) || 0) + 1;
+    sessionStorage.setItem(RELOAD_COUNT_KEY, String(next));
+    return next;
+  } catch {
+    return 1;
+  }
+}
+
+/**
+ * Survived a reload: the new context is healthy, so let the next
+ * incident reload freely again.
+ */
+function clearReloadCount() {
+  try {
+    sessionStorage.removeItem(RELOAD_COUNT_KEY);
+  } catch {}
+}
+
+function showContextLostToast(message) {
+  const id = "contextLostToast";
+  if (!document.body) return;
+  let toast = document.getElementById(id);
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = id;
+    toast.setAttribute("role", "status");
+    Object.assign(toast.style, {
+      position: "fixed",
+      inset: "0 0 auto 0",
+      zIndex: "2147483000",
+      background: "#2f6df6",
+      color: "#ffffff",
+      fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif",
+      fontSize: "12.5px",
+      lineHeight: "1.5",
+      padding: "9px 12px",
+      textAlign: "center",
+    });
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  document.documentElement.setAttribute("data-panel-reloading", "1");
+}
+
+/**
+ * The extension context is gone (extension reloaded / updated /
+ * disabled). Reload this panel document so it can talk to the new
+ * service worker again — capped, so a still-broken context falls back to
+ * a manual button instead of a reload loop.
+ */
+function recoverFromContextLoss(reason) {
+  if (contextLostHandled) return;
+  contextLostHandled = true;
+  const n = bumpReloadCount();
+  console.warn(
+    `[dk-bililearn Panel] extension context lost (${reason}) — panel self-reload #${n}`,
+  );
+  if (n <= MAX_AUTO_RELOADS) {
+    showContextLostToast("扩展已更新，正在自动重载面板…");
+    setTimeout(() => {
+      try {
+        location.reload();
+      } catch (e) {
+        console.error("[dk-bililearn Panel] self-reload failed:", e);
+      }
+    }, 300);
+    return;
+  }
+  showContextLostToast(
+    `面板已自动重载 ${MAX_AUTO_RELOADS} 次仍未恢复，请关闭再打开侧边栏，或点击扩展图标重新打开。`,
+  );
+}
+
+// (1) Idle heartbeat. chrome.runtime.getPlatformInfo is answered by the
+// browser process itself — it never wakes the service worker, and it
+// still throws once the context has been invalidated.
+setInterval(() => {
+  if (contextLostHandled || document.hidden) return;
+  try {
+    const result = chrome.runtime.getPlatformInfo();
+    if (result && typeof result.then === "function") {
+      result.then(clearReloadCount, (err) => {
+        if (errorLooksLikeContextLoss(err)) recoverFromContextLoss(err?.message);
+      });
+    } else {
+      clearReloadCount();
+    }
+  } catch (err) {
+    if (errorLooksLikeContextLoss(err)) recoverFromContextLoss(err?.message);
+  }
+}, CONTEXT_WATCHDOG_MS);
+
+// (2) The moment it happens, even if the heartbeat hasn't ticked yet.
+window.addEventListener("error", (event) => {
+  if (errorLooksLikeContextLoss(event?.error || event?.message)) {
+    recoverFromContextLoss(event?.message);
+  }
+});
+window.addEventListener("unhandledrejection", (event) => {
+  if (errorLooksLikeContextLoss(event?.reason)) {
+    recoverFromContextLoss(event?.reason?.message);
+  }
+});
+
+// Manual escape hatch: always available on the welcome screen.
+document.addEventListener("click", (event) => {
+  if (event.target && event.target.id === "reloadPanelBtn") {
+    try {
+      location.reload();
+    } catch (e) {
+      console.error("[dk-bililearn Panel] manual reload failed:", e);
+    }
+  }
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  void bootSidePanel();
+});
+
+// ============================================================
+// BOOT / SELF-HEAL (2026-10-16)
+// ============================================================
+//
+// User report: on ONE video page the sidebar never left the initial
+// 「开始整理视频」 screen — no hint text, no tabs, no error. Every other
+// page worked. The distinguishing detail was Chrome's 「从上次停下的地方
+// 继续」 restore bar: that panel had been restored from a previous
+// session, so it booted while the service worker was still asleep and
+// `sendMessage({action:"checkConfig"})` rejected with "Could not
+// establish connection".
+//
+// That call used to be the ONE unguarded await in the boot chain, so
+// the rejection aborted everything downstream — `checkCurrentTab()`
+// never ran, `showWelcome()` was never called (which is exactly why the
+// hint was EMPTY: the welcome screen the user saw was the untouched
+// HTML initial state, not any rendered message), and the panel sat
+// there forever. The tab/window listeners further down this file DO
+// recover it — but only once a tab/focus event fires.
+//
+// Three changes make this class of failure impossible to be silent:
+//   1. each boot step is isolated — no single failure can abort the rest;
+//   2. `checkConfig` retries once (letting the SW finish waking) and
+//      then degrades to "no AI key", which is the state the wizard flow
+//      already handles;
+//   3. a panel still sitting on the empty initial welcome re-runs
+//      detection on the next focus/visibility change.
+
+let bootInFlight = false;
+let bootRetryTimer = null;
+let wizardBound = false;
+
+async function bootSidePanel() {
+  bootInFlight = true;
+  try {
+    setupEventListeners();
+    initWhisperQueuePanel();
+    await evictOldCacheEntries(20);
+
+    // If a whisper job is in flight (or just finished) from before this
+    // panel was last closed, restore the matching loading screen first so
+    // we don't flash the "no cache, click to start" error. We do this
+    // BEFORE the config check because the user has already kicked off a
+    // long job — they shouldn't be bounced to the config error mid-run.
+    const resumed = await maybeResumeWhisperJob();
+    if (resumed) return;
+
+    await runPanelDetection();
+  } catch (error) {
+    // A dead extension context (the panel was open when the extension got
+    // reloaded) must self-heal, not sit there showing a cryptic message.
+    if (errorLooksLikeContextLoss(error)) {
+      recoverFromContextLoss(error?.message);
+      return;
+    }
+    console.error("[dk-bililearn Panel] boot failed:", error);
+    showWelcome("面板启动失败：" + ((error && error.message) || error));
+  } finally {
+    bootInFlight = false;
+  }
+}
+
+/**
+ * `checkConfig` with one retry. A panel restored by Chrome's session
+ * restore can boot before the service worker finishes waking; the first
+ * sendMessage then rejects and used to kill the boot chain. Retrying
+ * once covers the wake race, and returning null degrades to
+ * aiKeyMissing=true — the transcript tab needs no key at all.
+ */
+async function fetchConfigStatusWithRetry() {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await chrome.runtime.sendMessage({ action: "checkConfig" });
+    } catch (error) {
+      console.warn(
+        `[dk-bililearn Panel] checkConfig attempt ${attempt} failed:`,
+        error,
+      );
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+  }
+  return null;
+}
+
+function activeTabPanelName() {
+  return (
+    (document.querySelector(".tab-panel.active") || { dataset: {} }).dataset
+      .panel || "transcript"
+  );
+}
+
+/** Repeatable part of boot: AI-key state + "what am I looking at". */
+async function runPanelDetection() {
+  const configStatus = await fetchConfigStatusWithRetry();
 
   // Contextual-wizard flow (2026-08-28): a missing AI key no longer
   // blocks the whole panel. The transcript tab needs no key at all;
   // the Overview/Summary tabs show the AI-key wizard instead of firing
   // a doomed LLM request (see updateAiKeyWizard / switchTab).
   aiKeyMissing = !(configStatus && configStatus.hasAiKey);
-  setupWizardButtons();
-  setupLongTranscribeConfirm();
+
+  // One-shot: these bind DOM listeners, so a retry must not double-bind.
+  if (!wizardBound) {
+    setupWizardButtons();
+    setupLongTranscribeConfirm();
+    wizardBound = true;
+  }
   // Key state may have flipped (user saved / cleared a key in options):
   // refresh the wizard + LLM section visibility for the active tab now,
   // instead of waiting for the next switchTab.
-  updateAiKeyWizard(
-    (document.querySelector(".tab-panel.active") || { dataset: {} }).dataset
-      .panel || "transcript",
-  );
-
-  // 2026-08-29 user report: after saving a key in options and switching
-  // back, the wizard page never refreshed (even on tab switches) — the
-  // config check above ran exactly once at panel open. Re-check whenever
-  // this panel becomes visible or focused again.
-  async function refreshAiKeyState() {
-    let configStatus = null;
-    try {
-      configStatus = await chrome.runtime.sendMessage({ action: "checkConfig" });
-    } catch {
-      return; // service worker unreachable — keep the current state
-    }
-    const missing = !(configStatus && configStatus.hasAiKey);
-    if (missing === aiKeyMissing) return; // nothing changed, no re-render
-    aiKeyMissing = missing;
-    updateAiKeyWizard(
-      (document.querySelector(".tab-panel.active") || { dataset: {} }).dataset
-        .panel || "transcript",
-    );
-  }
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) void refreshAiKeyState();
-  });
-  window.addEventListener("focus", () => void refreshAiKeyState());
+  updateAiKeyWizard(activeTabPanelName());
 
   await checkCurrentTab();
+}
+
+// 2026-08-29 user report: after saving a key in options and switching
+// back, the wizard page never refreshed (even on tab switches) — the
+// config check ran exactly once at panel open. Re-check whenever this
+// panel becomes visible or focused again.
+async function refreshAiKeyState() {
+  let configStatus = null;
+  try {
+    configStatus = await chrome.runtime.sendMessage({ action: "checkConfig" });
+  } catch {
+    return; // service worker unreachable — keep the current state
+  }
+  const missing = !(configStatus && configStatus.hasAiKey);
+  if (missing === aiKeyMissing) return; // nothing changed, no re-render
+  aiKeyMissing = missing;
+  updateAiKeyWizard(activeTabPanelName());
+}
+
+/**
+ * The untouched initial welcome screen: welcome block visible AND no
+ * hint text. Every state the app renders deliberately calls
+ * showWelcome(<message>), so an empty hint can only mean the boot chain
+ * never reached its first showState() call.
+ */
+function panelBootIncomplete() {
+  const welcome = document.getElementById("welcomeState");
+  if (!welcome || welcome.style.display === "none") return false;
+  const hint = document.getElementById("welcomeHint");
+  return !hint || !hint.textContent.trim();
+}
+
+/**
+ * Self-heal: a panel frozen on the empty initial welcome re-runs
+ * detection on the next focus / visibility change instead of waiting
+ * for a tab switch that may never come.
+ */
+function scheduleBootRetry() {
+  if (bootRetryTimer || bootInFlight || !panelBootIncomplete()) return;
+  bootRetryTimer = setTimeout(() => {
+    bootRetryTimer = null;
+    if (bootInFlight || !panelBootIncomplete()) return;
+    console.warn(
+      "[dk-bililearn Panel] boot never completed — retrying detection",
+    );
+    bootInFlight = true;
+    void (async () => {
+      try {
+        await runPanelDetection();
+      } catch (error) {
+        console.error("[dk-bililearn Panel] detection retry failed:", error);
+        showWelcome("面板启动失败：" + ((error && error.message) || error));
+      } finally {
+        bootInFlight = false;
+      }
+    })();
+  }, 400);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  void refreshAiKeyState();
+  scheduleBootRetry();
+});
+window.addEventListener("focus", () => {
+  void refreshAiKeyState();
+  scheduleBootRetry();
 });
 
 /**
@@ -357,6 +653,29 @@ async function maybeResumeWhisperJob() {
     job.title || "Whisper 转录中",
     job.subtitle || "转录在后台进行，可随意切换页面；回到本页会显示进度",
   );
+
+  // 2026-10-11 hardening: the background watchdog caps non-terminal jobs
+  // at 30 min. If a job is older than 35 min and STILL non-terminal, the
+  // watchdog never fired (SW restart race, throttled alarm, extension
+  // reload) — a zombie record must not hold this panel hostage with a
+  // spinner and no tabs. Treat it as failed so the user gets an error +
+  // retry instead of an eternal loading screen.
+  const jobStartedAt = Number(job.startedAt) || 0;
+  if (
+    jobStartedAt &&
+    Date.now() - jobStartedAt > 35 * 60 * 1000 &&
+    job.stage !== "succeeded" &&
+    job.stage !== "failed"
+  ) {
+    try {
+      await chrome.runtime.sendMessage({ action: "ackWhisperJobDone" });
+    } catch {}
+    showError(
+      "Whisper 转录已中断",
+      "后台任务超过 35 分钟无进展，已按失败处理（原因可能是浏览器重启或扩展刷新打断了转写）。重新点击转录即可重试，已完成的转写不受影响。",
+    );
+    return true;
+  }
 
   if (job.stage === "succeeded") {
     // Re-enter the normal flow so the new transcript renders. Drop the
@@ -419,6 +738,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === "bilibiliNavigation") {
     handleFrontTabUrl(message.url);
+    sendResponse({ success: true });
+  }
+  if (message.action === "xuetangxVideoChanged") {
+    // 2026-10-26: 学堂在线换小节时地址栏不变，所以靠 background 转来的
+    // 页面状态通知刷新（重新拉一次字幕 / 概览）。
+    scheduleBililearnRefresh();
     sendResponse({ success: true });
   }
   if (message.action === "transcriptProgress") {
@@ -738,11 +1063,207 @@ function setNotesFilter(showAll) {
 }
 
 // ============================================================
+// XUETANGX OFFICIAL CHAPTERS (学堂在线官方章节)
+// ============================================================
+
+/**
+ * 2026-10-27: 学堂在线每个小节都自带一份**官方章节摘要**
+ * （leaf_knowledge：标题 + 概要 + 时间区间）。
+ *
+ * 它跟 AI 生成的"概览"是一回事 —— 用户明确要求：有官方章节就别再跑 AI。
+ *
+ * 2026-10-27 调整：这里原来还渲染"知识导引"（知识图谱那棵 300KB+ 的知识点
+ * 树，"Section 1 …"那种 content 清单）。用户看过之后说概览里不需要这个
+ * content 列表 —— 现在只留官方章节，而且**用跟 AI 概览一模一样的格式**
+ * 渲染（时间戳 + 标题 + 概要，点击跳转）。
+ */
+
+/** 学堂在线的 videoId 形如 xt-{cid}-{leafId}。 */
+function isXuetangxVideoId(videoId) {
+  return /^xt-\d+-\d+$/i.test(String(videoId || "").split("@p")[0]);
+}
+
+/** 秒 → "M:SS"（概览里的时间戳样式）。 */
+function formatGuideSeconds(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+/**
+ * 渲染官方章节到「章节时间线」。
+ *
+ * DOM 结构跟 renderAnalysisResults（AI 生成的章节）**完全一样** ——
+ * 同样的 chapter-item / chapter-timestamp / chapter-content / chapter-title /
+ * chapter-summary，同样的点击跳转。用户看到的样式和 AI 生成的一模一样。
+ */
+function renderOfficialChapters(chapters) {
+  const chapterList = document.getElementById("chapterList");
+  if (!chapterList) return 0;
+  chapterList.innerHTML = "";
+  const list = Array.isArray(chapters) ? chapters : [];
+  let count = 0;
+  for (const chapter of list) {
+    const seconds = Number(chapter?.timestampSeconds ?? chapter?.start);
+    const title = String(chapter?.title || "").trim();
+    if (!Number.isFinite(seconds) || seconds < 0 || !title) continue;
+    const li = document.createElement("li");
+    li.className = "chapter-item";
+    li.dataset.seconds = seconds;
+    li.innerHTML = `
+      <span class="chapter-timestamp">${escapeHtml(formatGuideSeconds(seconds))}</span>
+      <div class="chapter-content">
+        <span class="chapter-title">${escapeHtml(title)}</span>
+        <span class="chapter-summary">${escapeHtml(chapter?.summary || chapter?.body || "")}</span>
+      </div>
+    `;
+    li.addEventListener("click", () => {
+      debugLog("[dk-bililearn Panel] Official chapter clicked:", seconds);
+      seekTo(seconds);
+    });
+    chapterList.appendChild(li);
+    count++;
+  }
+  return count;
+}
+
+/**
+ * 概览页「章节时间线 / 关键观点」两节的可见性。
+ *
+ * 有官方章节 → 章节时间线显示、关键观点隐藏（没跑 AI，没有观点）。
+ * 没有官方章节 → 照常走 AI 概览，两节都留着。
+ */
+function applyOverviewSections(options = {}) {
+  const hasChapters = !!options.hasChapters;
+  const chapterSection = document
+    .getElementById("chapterList")
+    ?.closest(".section");
+  const quotesSection = document
+    .getElementById("quotesList")
+    ?.closest(".section");
+  if (chapterSection) chapterSection.hidden = false;
+  if (quotesSection) {
+    // 官方章节模式下没有 AI 观点；但如果之前跑过 AI（观点还在）就别藏。
+    const quotes = document.getElementById("quotesList");
+    const hasQuotes = !!quotes?.querySelector(".quote-item");
+    quotesSection.hidden = hasChapters && !hasQuotes;
+  }
+}
+
+/**
+ * 把官方章节应用进概览页。返回 true = 概览已经有内容了，不用跑 AI。
+ */
+function applyXuetangxChapters(chapters) {
+  const count = renderOfficialChapters(chapters);
+  if (!count) return false;
+  applyOverviewSections({ hasChapters: true });
+  return true;
+}
+
+/**
+ * 去后台要当前小节的官方章节。拿不到就返回 null —— 调用方照常走 AI 概览。
+ */
+async function loadXuetangxChapters(videoId) {
+  if (!isXuetangxVideoId(videoId)) return null;
+  try {
+    const res = await chrome.runtime.sendMessage({
+      action: "getXuetangxKnowledgeGuide",
+    });
+    if (!res || !res.success) return null;
+    const chapters = Array.isArray(res.chapters) ? res.chapters : [];
+    if (!chapters.length) return null;
+    return chapters;
+  } catch (_e) {
+    return null;
+  }
+}
+
+// ============================================================
 // VIDEO DETECTION
 // ============================================================
 
+/**
+ * 2026-10-27: 后台版本握手。
+ *
+ * 改了 background.js 之后，浏览器里的 Service Worker 常常还在跑内存里的旧
+ * 脚本 —— 必须去 chrome://extensions 点一次"刷新"才会换成新的；而侧边栏是
+ * 每次打开都重新从磁盘读盘的。结果就是"面板是新的、后台是旧的"这种半新半旧
+ * 的状态：侧边栏认得学堂在线的 id，旧后台却还不认识，于是把请求当 B 站处理，
+ * 报出 "Invalid Bilibili BV ID." 这种天书。
+ *
+ * 所以这里在跑正事之前先跟后台对一下版本号，对不上就直接告诉用户去刷新扩展
+ * —— 宁可给一句人话，也不要让旧后台把请求处理坏。
+ *
+ * @returns {Promise<boolean>} true = 后台版本正常，可以继续
+ */
+async function checkBackgroundBuild() {
+  let res = null;
+  try {
+    res = await chrome.runtime.sendMessage({ action: "getExtensionBuild" });
+  } catch (_e) {
+    res = null;
+  }
+
+  // 情况 1：后台明确报了版本号 —— 能直接比对。
+  if (res && typeof res === "object" && typeof res.build === "string" && res.build) {
+    if (res.build === SP_BUILD) return true;
+    showBackgroundStaleNotice(res.build);
+    return false;
+  }
+
+  // 情况 2：后台没报版本号 —— 可能是老版本（不认识 getExtensionBuild）。
+  // 用老版本也认识的 checkConfig 探一下：
+  //   · checkConfig 能回 → 后台活着但不认新 action = 老版本 → 拦住
+  //   · checkConfig 也不回 → 后台整个联系不上，那不是"版本旧"的问题，
+  //     让正常流程去报错，别在这里抢走整个面板。
+  let alive = false;
+  try {
+    const probe = await chrome.runtime.sendMessage({ action: "checkConfig" });
+    alive = !!(probe && typeof probe === "object");
+  } catch (_e) {
+    alive = false;
+  }
+  if (alive) {
+    showBackgroundStaleNotice("(旧版本)");
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 后台版本过旧时的全屏提示。给"重新检测"按钮一个动作，用户点一下就重新
+ * 握手（点完扩展页的刷新按钮回来点它就行）。
+ */
+function showBackgroundStaleNotice(bgBuild) {
+  showState("error");
+  document.getElementById("errorTitle").textContent = "扩展需要重新加载";
+  document.getElementById("errorMessage").textContent =
+    "后台还是旧版本（" + (bgBuild || "未响应") + "），侧边栏已经是新版（" +
+    SP_BUILD + "）。请打开 chrome://extensions → 找到 bililearn → 点刷新按钮" +
+    "（圆形箭头）→ 再刷新课程页面。";
+  const btn = document.getElementById("errorBtn");
+  btn.textContent = "重新检测";
+  btn.disabled = false;
+  errorAction = () => {
+    btn.disabled = true;
+    btn.textContent = "检测中…";
+    checkBackgroundBuild().then((ok) => {
+      btn.disabled = false;
+      btn.textContent = "重新检测";
+      // 后台换新了 → 重新走一遍正常流程
+      if (ok) scheduleBililearnRefresh();
+    });
+  };
+}
+
 async function checkCurrentTab() {
   try {
+    // 2026-10-27: 先跟后台对版本号。后台是旧版本的话，后面所有请求都会
+    // 被旧代码处理（学堂在线那次直接报 "Invalid Bilibili BV ID."），
+    // 所以这里要先拦住，给用户一句"去刷新扩展"的人话。
+    if (!(await checkBackgroundBuild())) return;
+
     // Only consider the user's actual current tab. We used to fall back
     // to "any Bilibili tab" when the active tab was non-B站, which made
     // the sidebar display the wrong video's subtitles after the user
@@ -767,23 +1288,34 @@ async function checkCurrentTab() {
     // extractVideoId now understands both platforms and returns null for
     // anything else (including chrome:// pages).
     const isListPlaybackPage =
-      /^https:\/\/www\.bilibili\.com\/list\//.test(url) &&
+      /^https:\/\/(?:www\.)?bilibili\.com\/list\//.test(url) &&
       /[?&]bvid=BV[A-Za-z0-9]{10}(&|$)/.test(url);
+    // 2026-10-26: 学堂在线 (xuetangx.com)
+    //   课程播放页形如 https://www.xuetangx.com/course/{products_sign}/{classroom_id}
+    //   （还有 /lesson/... /training/... 等售卖形态；小节切换时地址栏不变）
+    // 这里放宽到整个站点：真正是不是"课程页"由内容脚本说了算 —— 它只
+    // 在页面钩子抓到了当前小节时才给出 videoId，拿不到就显示"未匹配到
+    // 视频地址"，不会误把首页当成视频页。
+    const isXuetangxPage =
+      /^(?:https?:\/\/)?(?:[^/]+\.)?xuetangx\.com\//i.test(url);
     const isSupported =
-      /^https:\/\/www\.bilibili\.com\/video\//.test(url) ||
+      /^https:\/\/(?:www\.)?bilibili\.com\/video\//.test(url) ||
       isListPlaybackPage ||
       /^https?:\/\/(?:[^/]+\.)?youtube\.com\//.test(url) ||
-      /^https?:\/\/youtu\.be\//.test(url);
+      /^https?:\/\/youtu\.be\//.test(url) ||
+      isXuetangxPage;
     if (!isSupported) {
       showWelcome(
-        "当前页面不是 B 站或 YouTube 视频。\n当前页面: " + url +
-        "\n提示：bililearn 支持 B 站视频页（https://www.bilibili.com/video/BV…）和 YouTube（https://www.youtube.com/watch?v=…）。"
+        "当前页面不是 B 站、YouTube 或学堂在线视频。\n当前页面: " + url +
+        "\n提示：bililearn 支持 B 站视频页（https://www.bilibili.com/video/BV…）和 YouTube（https://www.youtube.com/watch?v=…）和学堂在线课程页（https://www.xuetangx.com/course/…）。"
       );
       return;
     }
 
-    const videoId = extractVideoId(url);
-    if (!videoId) {
+    // 2026-10-26: 学堂在线的小节 id 不在 URL 里（换小节时 URL 不变），
+    // 所以 videoId 先留空，等内容脚本把页面捕获到的小节 id 补上来。
+    let videoId = extractVideoId(url);
+    if (!videoId && !isXuetangxPage) {
       showWelcome(
         "未匹配到 B 站视频地址。\n当前页面: " + url +
         "\n提示：需要 https://www.bilibili.com/video/BV… 格式（暂不支持番剧/直播页）。"
@@ -824,6 +1356,11 @@ async function checkCurrentTab() {
         currentVideoDescription = result.response.description || "";
         currentVideoDuration = result.response.duration || 0;
         currentPubDate = result.response.pubdate || "";
+        // 2026-10-26: 学堂在线 —— 内容脚本带着页面捕获到的小节 id
+        //（xt-{cid}-{leafId}），URL 里没有，用它当 videoId。
+        if (!videoId && result.response.videoId) {
+          videoId = result.response.videoId;
+        }
       }
     } catch (e) {
       console.error("[dk-bililearn Panel] getVideoInfo error:", e);
@@ -832,6 +1369,14 @@ async function checkCurrentTab() {
       currentVideoDescription = "";
       currentVideoDuration = 0;
       currentPubDate = "";
+    }
+
+    if (!videoId) {
+      showWelcome(
+        "未匹配到视频地址。当前页面: " + url +
+          "提示：需要 B 站视频页 / YouTube 播放页 / 学堂在线课程页。"
+      );
+      return;
     }
 
     startBililearn(videoId, url);
@@ -867,6 +1412,45 @@ function extractVideoId(url) {
         id = urlObj.pathname.split("/")[2] || null;
       }
       if (id && /^[A-Za-z0-9_-]{11}$/.test(id)) return `${id}@p1`;
+    }
+
+    // 2026-10-26: 学堂在线 (xuetangx.com)
+    //   学习页（真正的播放器页）：
+    //     /learn/space/{products_sign}/{course_sign}/{classroom_id}/video/{leaf_id}
+    //   课程页（带试看播放器）：
+    //     /course/{products_sign}/{classroom_id}
+    //   其它售卖形态：/lesson/… /training/…
+    //
+    // 小节 id（leaf_id）不一定在 URL 里（切小节时地址栏不变），那种
+    // 情况返回 null，由内容脚本（页面接口捕获 / 主动解析）补上。
+    if (urlObj.hostname === "xuetangx.com" || urlObj.hostname.endsWith(".xuetangx.com")) {
+      // 学习页 —— URL 里直接带 classroom_id 和 leaf_id
+      const learnSpace = urlObj.pathname.match(
+        /\/learn\/space\/[^/]+\/[^/]+\/(\d+)\/video\/(\d+)/i,
+      );
+      if (learnSpace) {
+        return `xt-${learnSpace[1]}-${learnSpace[2]}@p1`;
+      }
+      const learn = urlObj.pathname.match(
+        /\/learn\/[^/]+\/[^/]+\/(\d+)(?:\/video\/(\d+))?/i,
+      );
+      if (learn) {
+        if (learn[2]) return `xt-${learn[1]}-${learn[2]}@p1`;
+        return null;
+      }
+      // 课程页
+      const course = urlObj.pathname.match(
+        /^\/(?:course|lesson|training|program)\/([^/]+)(?:\/(\d+))?/i,
+      );
+      if (course) {
+        const cid = course[2] || "";
+        const leaf =
+          urlObj.searchParams.get("leaf_id") ||
+          urlObj.searchParams.get("leafId") ||
+          "";
+        if (cid && leaf) return `xt-${cid}-${leaf}@p1`;
+      }
+      return null;
     }
 
     const match = urlObj.pathname.match(/\/video\/(BV[A-Za-z0-9]{10})/i);
@@ -909,6 +1493,12 @@ function clearTabDomForNewVideo() {
     const el = document.getElementById(id);
     if (el) el.innerHTML = "";
   }
+  // 2026-10-27: 新视频 → 上一节的官方章节作废（概览会重新要一份）
+  currentXuetangxChapters = null;
+  xuetangxChaptersChecked = false;
+  // 新视频 → 概览的两节恢复可见（上一节可能把「关键观点」藏了）。
+  // 官方章节模式下要重新藏起来 —— 那由 applyXuetangxChapters 负责。
+  applyOverviewSections({ hasChapters: false });
 }
 
 /**
@@ -931,7 +1521,7 @@ function renderVideoInfoHeader() {
   refreshKbButton();
 }
 
-async function startBililearn(videoId, videoUrl) {
+async function startBililearn(videoId, videoUrl, options = {}) {
   const gen = ++generation;
   // Check if we already have this video loaded in memory. Focus-change
   // re-checks (chrome.windows.onFocusChanged → scheduleBililearnRefresh →
@@ -1050,6 +1640,20 @@ async function startBililearn(videoId, videoUrl) {
     // Setup explain feature
     setupExplainFeature();
     if (currentTranscriptMode !== "original") translateTranscript();
+
+    // 2026-10-27: 缓存命中也要把学堂在线的官方章节取回来（概览用）
+    currentXuetangxChapters = null;
+    xuetangxChaptersChecked = false;
+    if (isXuetangxVideoId(videoId)) {
+      const videoIdAtGuide = videoId;
+      loadXuetangxChapters(videoIdAtGuide).then((chapters) => {
+        if (videoIdAtGuide !== currentVideoId) return;
+        xuetangxChaptersChecked = true;
+        if (!chapters) return;
+        currentXuetangxChapters = chapters;
+        applyXuetangxChapters(chapters);
+      });
+    }
     return;
   }
 
@@ -1080,16 +1684,77 @@ async function startBililearn(videoId, videoUrl) {
   showState("loading");
   updateLoading("正在获取字幕", "");
 
-  const transcriptResult = await chrome.runtime.sendMessage({
-    action: "fetchTranscript",
-    videoId: videoId.split("@p")[0],
-    pageNumber: Math.max(
-      1,
-      Number(String(videoId.split("@p")[1] || "1").replace(/^p/i, "")) || 1,
-    ),
-    videoUrl: videoUrl,
-  });
+  let transcriptResult = null;
+  // 2026-10-27: 后台有可能一直不回来（B 站接口被墙 / 风控黑洞 /
+  // 消息通道半开），没有超时的话页面会永远停在"正在获取字幕"转圈。
+  // 45 秒还没回话就按失败处理，走下面的 Whisper 出路。
+  const FETCH_TIMEOUT_MS = 45000;
+  let fetchTimer = null;
+  try {
+    transcriptResult = await Promise.race([
+      chrome.runtime.sendMessage({
+        action: "fetchTranscript",
+        videoId: videoId.split("@p")[0],
+        pageNumber: Math.max(
+          1,
+          Number(String(videoId.split("@p")[1] || "1").replace(/^p/i, "")) || 1,
+        ),
+        videoUrl: videoUrl,
+        // 2026-10-27: 用户点了"重试" → 让学堂在线那边把字幕探针矩阵重跑一遍
+        // （正常情况下探针对同一个 ccid 只跑一遍，免得把人家接口打爆）。
+        force: !!options.force,
+      }),
+      new Promise((_, reject) => {
+        fetchTimer = setTimeout(
+          () => reject(new Error(`读取字幕超时（${FETCH_TIMEOUT_MS / 1000} 秒没有响应）`)),
+          FETCH_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } catch (sendError) {
+    // 2026-10-27: sendMessage 抛错（后台刚被刷新 / 扩展上下文失效 /
+    // 消息通道断了 / 超时）→ 以前这里会直接把整个 startBililearn 炸掉，
+    // 页面永远停在"正在获取字幕"转圈，用户连 Whisper 这条出路都看不到。
+    // 现在：照样给出路，并把原因写在页面上。
+    const reason = (sendError && sendError.message) || String(sendError);
+    if (gen !== generation || videoId !== currentVideoId) return;
+    if (isXuetangxVideoId(videoId)) {
+      showError(
+        "学堂在线：没能拿到字幕",
+        `后台没有响应：${reason}\n请刷新一下课程页面，然后重新打开侧边栏。`,
+      );
+      return;
+    }
+    showWhisperPrompt(
+      videoId,
+      videoUrl,
+      await readConfiguredCacheDir(),
+      `后台没有响应：${reason}`,
+    );
+    return;
+  } finally {
+    if (fetchTimer) clearTimeout(fetchTimer);
+  }
   if (gen !== generation || videoId !== currentVideoId) return;
+
+  // 后台静默没回话（消息通道断了）也当失败处理，同样给 Whisper 出路，
+  // 不能让页面卡在转圈上。
+  if (!transcriptResult || typeof transcriptResult !== "object") {
+    if (isXuetangxVideoId(videoId)) {
+      showError(
+        "学堂在线：没能拿到字幕",
+        "后台没有返回结果。请刷新一下课程页面，然后重新打开侧边栏。",
+      );
+      return;
+    }
+    showWhisperPrompt(
+      videoId,
+      videoUrl,
+      await readConfiguredCacheDir(),
+      "后台没有返回结果（扩展刚刚更新过的话，请到 chrome://extensions 刷新一次扩展）。",
+    );
+    return;
+  }
 
   if (!transcriptResult.success) {
     const detail = transcriptResult.message || transcriptResult.error;
@@ -1104,7 +1769,12 @@ async function startBililearn(videoId, videoUrl) {
         showWhisperSetupWizardState();
         return;
       }
-      showWhisperPrompt(videoId, videoUrl, transcriptResult.cacheDir);
+      showWhisperPrompt(
+        videoId,
+        videoUrl,
+        transcriptResult.cacheDir,
+        transcriptResult.subtitleLookupError || "",
+      );
       return;
     }
     if (transcriptResult.error === "MINIMAX_ASR_KEY_MISSING") {
@@ -1128,6 +1798,114 @@ async function startBililearn(videoId, videoUrl) {
       // user to pick an ASR source instead of a dead-end error (2026-08-28).
       if (gen !== generation) return;
       showAsrWizardState();
+      return;
+    }
+    if (transcriptResult.error === "XUETANGX_STATE_MISSING") {
+      // 2026-10-26: 学堂在线 —— 没拿到当前小节的信息。通常是扩展刚装/刚更新，
+      // 页面早就加载完了，主世界钩子错过了第一次请求；刷新页面即可。
+      if (gen !== generation) return;
+      showError(
+        "学堂在线：还没抓到当前小节",
+        transcriptResult.message ||
+          "请刷新一下学堂在线课程页面，然后重新打开侧边栏。",
+      );
+      return;
+    }
+    if (transcriptResult.error === "XUETANGX_SUBTITLE_MISSING") {
+      // 2026-10-27: 官方字幕没读出来 —— 别只给一个"重试"把人堵死。
+      // 主按钮改成「用 Whisper 转录」（这条路一定能走通：视频直链是有的），
+      // 次要按钮保留"再试一次官方字幕"（force：让钩子把探针矩阵重跑一遍）。
+      if (gen !== generation) return;
+      const serverUp = await pingWhisperServer();
+      if (gen !== generation) return;
+      if (!serverUp) {
+        // 本地 server 没起来 —— 先引导配置（面板会自己 ping，通了再回来）
+        showWhisperSetupWizardState();
+        return;
+      }
+      showError(
+        "学堂在线：官方字幕没读出来",
+        (transcriptResult.message ||
+          "学堂在线官方字幕没读出来。") +
+          "\n\n可以改用本地 Whisper 转录这一节（需要 whisper_server 在运行）。",
+      );
+      const btn = document.getElementById("errorBtn");
+      btn.textContent = "🎙️ 用 Whisper 转录";
+      btn.disabled = false;
+      errorAction = () =>
+        gateLongVideoTranscribe(async () => {
+          btn.disabled = true;
+          btn.textContent = "正在启动…";
+          updateLoading("启动 Whisper 转录", "下载视频音轨并发送至本地 server");
+          showState("loading");
+          try {
+            const result = await chrome.runtime.sendMessage({
+              action: "triggerWhisperTranscription",
+              videoId: videoId.split("@p")[0],
+              pageNumber: Math.max(
+                1,
+                Number(
+                  String(videoId.split("@p")[1] || "1").replace(/^p/i, ""),
+                ) || 1,
+              ),
+              videoUrl,
+              videoTitle: currentVideoTitle || "",
+            });
+            if (result && result.success) {
+              if (result.queued || result.alreadyQueued) {
+                updateLoading(
+                  "已加入转录队列",
+                  result.alreadyQueued
+                    ? `该视频已在队列中（第 ${result.position} 位）`
+                    : `当前排在第 ${result.position} 位`,
+                );
+                refreshWhisperQueue();
+                return;
+              }
+              if (result.alreadyRunning || result.started) {
+                const resumed = await maybeResumeWhisperJob();
+                if (resumed) return;
+              }
+              await removeVideoCache(videoId);
+              currentVideoId = null;
+              await startBililearn(videoId, videoUrl);
+            } else {
+              showWhisperError(result);
+              btn.disabled = false;
+              btn.textContent = "🎙️ 用 Whisper 转录";
+            }
+          } catch (err) {
+            showWhisperError(err);
+            btn.disabled = false;
+            btn.textContent = "🎙️ 用 Whisper 转录";
+          }
+        });
+
+      // 次要按钮：再试一次官方字幕（探针矩阵重跑一遍）
+      const secondary = document.getElementById("errorBtnSecondary");
+      if (secondary) {
+        secondary.style.display = "";
+        secondary.textContent = "再试一次官方字幕";
+        secondary.onclick = async () => {
+          secondary.disabled = true;
+          secondary.textContent = "正在重试…";
+          await removeVideoCache(videoId);
+          currentVideoId = null;
+          startBililearn(videoId, videoUrl, { force: true });
+        };
+      }
+      return;
+    }
+    // 2026-10-27: "Invalid Bilibili BV ID." 是"后台还在跑旧代码"的信号 ——
+    // 旧后台不认识学堂在线的 videoId，把它当 B 站处理了。翻译成人话，别让用户
+    // 对着一句天书发呆（正常情况下握手会先拦住，这里是第二道保险）。
+    if (/Invalid Bilibili BV ID/i.test(String(detail || ""))) {
+      if (gen !== generation) return;
+      showError(
+        "扩展后台需要重新加载",
+        "当前后台还是旧版本，不认识学堂在线的视频号。请打开 chrome://extensions → " +
+          "找到 bililearn → 点刷新按钮（圆形箭头）→ 再刷新课程页面。",
+      );
       return;
     }
     showError(
@@ -1183,6 +1961,19 @@ async function startBililearn(videoId, videoUrl) {
 
   // Save transcript to cache (without analysis)
   await saveToCache(videoId);
+
+  // 2026-10-27: 学堂在线 —— 顺手把课程自带的官方章节取回来（页面侧抓的，
+  // 很快，不花 token）。用户点「概览」时直接用它，不跑 AI 概览。
+  if (isXuetangxVideoId(videoId)) {
+    const videoIdAtGuide = videoId;
+    loadXuetangxChapters(videoIdAtGuide).then((chapters) => {
+      if (videoIdAtGuide !== currentVideoId) return;
+      xuetangxChaptersChecked = true;
+      if (!chapters) return;
+      currentXuetangxChapters = chapters;
+      applyXuetangxChapters(chapters);
+    });
+  }
 
   // DON'T run LLM analysis automatically - wait for user to click Overview tab
   // This saves tokens when user just wants to see the transcript
@@ -1383,6 +2174,10 @@ function renderTranscript() {
     ? "本地 Whisper 转写"
     : currentTranscriptSource === "local-whisper-corrected"
     ? "本地 Whisper（AI 修正）"
+    : currentTranscriptSource === "xuetangx-lecture-note"
+    ? "学堂在线官方讲稿"
+    : currentTranscriptSource === "xuetangx-subtitle"
+    ? "学堂在线官方字幕"
     : "B站视频字幕";
 
   let badgeContent = `<span class="source-dot source-dot--subs"></span> ${sourceLabel} · ${escapeHtml(getOriginalTranscriptLabel())}`;
@@ -1483,6 +2278,17 @@ function currentCanonicalVideoUrl() {
   // and BV-prefixed. Platform-aware so exports/notes link correctly.
   if (/^[A-Za-z0-9_-]{11}$/.test(vid)) {
     return `https://www.youtube.com/watch?v=${vid}`;
+  }
+  // 2026-10-26: 学堂在线 —— id 形如 xt-{classroomId}-{leafId}
+  if (/^xt-\d+-\d+$/i.test(vid)) {
+    // 页面地址本身就带小节 id，直接用它（最准）
+    if (currentVideoUrl && /xuetangx\.com/i.test(currentVideoUrl)) {
+      return currentVideoUrl;
+    }
+    const m = /^xt-(\d+)-(\d+)$/i.exec(vid);
+    return m
+      ? `https://www.xuetangx.com/course/${m[1]}?leaf_id=${m[2]}`
+      : "https://www.xuetangx.com/";
   }
   return `https://www.bilibili.com/video/${vid}${Number(partToken) > 1 ? `?p=${Number(partToken)}` : ""}`;
 }
@@ -1713,6 +2519,12 @@ function showError(title, message) {
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
   document.getElementById("errorBtn").textContent = "重新尝试";
+  // 2026-10-27: 次要按钮默认隐藏（只有学堂在线那条路需要第二条出路）
+  const secondary = document.getElementById("errorBtnSecondary");
+  if (secondary) {
+    secondary.style.display = "none";
+    secondary.onclick = null;
+  }
 }
 
 /**
@@ -1750,6 +2562,53 @@ function classifyWhisperError(input) {
 function showWhisperError(input) {
   const { title, message } = classifyWhisperError(input);
   showError(title, message);
+  // 2026-11-05: 500 LocalEntryNotFoundError / ConnectTimeout 有一个非常
+  // 具体的根因 —— 跑着的 whisper server 是**旧代码**（开机自启任务拉起
+  // 的 SYSTEM 实例，普通用户权限杀不掉）。旧代码不会解析本地模型缓存，
+  // 每次都去 huggingface.co 下载，本机直连不通 → ConnectTimeout。
+  //
+  // 光把天书般的英文报错甩给用户没用。这里直接检测 + 给一键修复。
+  maybeRepairStaleWhisperServer(message);
+}
+
+/**
+ * 如果报错像是"旧 server"的症状，就自动检测并在需要时修复。
+ *
+ * 修复方式不需要管理员权限：在备用端口（7861）用当前用户身份拉起一个
+ * 新实例，然后让扩展改连它。旧实例变成无害僵尸。
+ */
+async function maybeRepairStaleWhisperServer(message) {
+  const text = String(message || "");
+  const looksStale =
+    /LocalEntryNotFoundError/i.test(text) ||
+    /ConnectTimeout/i.test(text) ||
+    /WinError 10060/i.test(text) ||
+    /Whisper server returned 5\d\d/i.test(text);
+  if (!looksStale) return;
+
+  try {
+    const diag = await chrome.runtime.sendMessage({ action: "diagnoseWhisperServer" });
+    if (!diag || !diag.success || !diag.stale) return;
+    // 确实是旧代码 → 修
+    const fix = await chrome.runtime.sendMessage({ action: "repairWhisperServer" });
+    if (fix && fix.success) {
+      const btn = document.getElementById("errorBtn");
+      if (btn) {
+        btn.textContent = "🔄 重新转录";
+        btn.disabled = false;
+      }
+      const msg = document.getElementById("errorMessage");
+      if (msg) {
+        msg.textContent =
+          "检测到 whisper server 跑的是旧版本（无法离线加载模型，转写会报 500）。" +
+          "已自动启动新版本并切换过去 —— 现在再点一次「重新转录」即可。";
+      }
+      const title = document.getElementById("errorTitle");
+      if (title) title.textContent = "whisper server 已修复";
+    }
+  } catch (_e) {
+    /* 检测/修复失败 —— 保留原始报错，不制造噪音 */
+  }
 }
 
 // ============================================================
@@ -1850,7 +2709,31 @@ function initWhisperQueuePanel() {
   refreshWhisperQueue();
 }
 
-function showWhisperPrompt(videoId, videoUrl, cacheDir) {
+/**
+ * 读真实的字幕缓存目录。
+ *
+ * 2026-11-05：超时的两条路径（sendMessage reject / 后台没回包）以前把
+ * cacheDir 硬编码成 ""，于是提示语永远是"请先在设置里配置字幕缓存目录"
+ * —— 哪怕用户明明配了 C:\Users\shangweizhe\bilibilisubs。这是在说谎，
+ * 用户会跑去设置页反复检查一个根本没问题的配置。
+ *
+ * 现在去问后台要真实值（后台有 getSettings 的默认值兜底逻辑：没配时
+ * 自动落到 <下载目录>/BiliSubs）。读不到就返回空串，退回旧文案。
+ */
+async function readConfiguredCacheDir() {
+  try {
+    const res = await chrome.runtime.sendMessage({ action: "getSubtitleCacheDir" });
+    if (res && typeof res === "object" && res.success) {
+      const dir = res.subtitlesDir || "";
+      if (typeof dir === "string" && dir.trim()) return dir.trim();
+    }
+  } catch (_e) {
+    /* 后台不可达 —— 退回空串 */
+  }
+  return "";
+}
+
+function showWhisperPrompt(videoId, videoUrl, cacheDir, reason = "") {
   // A whisper job may already be running for THIS video (user switched
   // to another page mid-transcription, then came back — the panel stayed
   // open through Bilibili's SPA navigation, so only checkCurrentTab→
@@ -1859,21 +2742,33 @@ function showWhisperPrompt(videoId, videoUrl, cacheDir) {
   // "no cache" prompt again, which would invite a duplicate trigger.
   maybeResumeWhisperJob().then((resumed) => {
     if (resumed) return;
-    actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir);
+    actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir, reason);
   });
 }
 
-function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir) {
+function actuallyShowWhisperPrompt(videoId, videoUrl, cacheDir, reason = "") {
   showState("error");
   document.getElementById("errorTitle").textContent =
     "本地没有缓存这个视频的字幕";
   const note = cacheDir
     ? `转录结果会保存到 ${cacheDir}，下次打开这个视频直接读缓存。`
     : "请先在设置里配置字幕缓存目录。";
-  document.getElementById("errorMessage").textContent = note;
+  document.getElementById("errorMessage").textContent = reason
+    ? `${note}\n（${reason}）`
+    : note;
   const btn = document.getElementById("errorBtn");
   btn.textContent = "🎙️ 用 Whisper 转录";
   btn.disabled = false;
+  // 2026-10-27: 次要按钮是学堂在线那条路专用的 —— 这里必须清掉，
+  // 否则上一个学堂在线视频留下的「再试一次官方字幕」会跟着跑到
+  // B 站页面上（按钮文案对不上，还带着学堂在线的重试动作）。
+  const secondary = document.getElementById("errorBtnSecondary");
+  if (secondary) {
+    secondary.style.display = "none";
+    secondary.onclick = null;
+    secondary.textContent = "再试一次官方字幕";
+    secondary.disabled = false;
+  }
   errorAction = () => gateLongVideoTranscribe(async () => {
     btn.disabled = true;
     btn.textContent = "正在启动…";
@@ -2030,6 +2925,11 @@ function restoreLlmSections() {
       section.hidden = false;
     }
   }
+  // 2026-10-27: 有官方章节时，概览里的「关键观点」节要继续藏着 ——
+  // 官方章节模式下我们根本没跑 AI，没有观点。
+  if (currentXuetangxChapters?.length) {
+    applyOverviewSections({ hasChapters: true });
+  }
 }
 
 function hideTranscriptWizards() {
@@ -2042,6 +2942,26 @@ function hideTranscriptWizards() {
 }
 
 /**
+ * 概览这一步**是不是因为缺 AI key 而做不了**？
+ *
+ * 2026-10-27: 学堂在线有官方章节摘要 —— 章节是课程方给的，不花钱、
+ * 也不需要 AI key。所以：
+ *   - 有官方章节 → 不受影响（概览已经有内容了）
+ *   - 学堂在线但还没查 → 不受影响（先拉官方章节，拉得到就不用 AI）
+ *   - 其它站点 → 缺 key 就做不了
+ */
+function overviewRequiresAiKey(options = {}) {
+  const {
+    hasOfficialChapters = false,
+    isXuetangx = false,
+    aiKeyMissing = false,
+  } = options;
+  if (hasOfficialChapters) return false;
+  if (isXuetangx) return false;
+  return !!aiKeyMissing;
+}
+
+/**
  * Moves the single #aiKeyWizard node into the active Overview/Summary
  * panel and toggles visibility. One element, two panels: the wizard
  * always renders at the top of whichever LLM tab the user opened.
@@ -2049,7 +2969,24 @@ function hideTranscriptWizards() {
 function updateAiKeyWizard(tabName) {
   const wiz = document.getElementById("aiKeyWizard");
   if (!wiz) return;
-  if (!aiKeyMissing || (tabName !== "overview" && tabName !== "summary")) {
+  // 2026-10-27: 学堂在线有**官方章节**时，概览根本不需要 AI —— 不该弹
+  // "配置AI模型和密钥"的引导。（总结页还是需要 AI，那一节照旧。）
+  //
+  // 学堂在线先按"可能有官方章节"处理（isXuetangx = 还没查过章节）：
+  // 等章节拉回来、确认没有，才轮得到弹配置引导。
+  const overviewSkipsAi =
+    tabName === "overview" &&
+    !overviewRequiresAiKey({
+      hasOfficialChapters: !!currentXuetangxChapters?.length,
+      isXuetangx:
+        isXuetangxVideoId(currentVideoId) && !xuetangxChaptersChecked,
+      aiKeyMissing,
+    });
+  if (
+    !aiKeyMissing ||
+    (tabName !== "overview" && tabName !== "summary") ||
+    overviewSkipsAi
+  ) {
     wiz.hidden = true;
     restoreLlmSections();
     return;
@@ -2236,8 +3173,37 @@ function switchTab(tabName) {
   updateAiKeyWizard(tabName);
 
   // Lazy-load LLM analysis when user switches to Overview tab
-  if (tabName === "overview" && !currentAnalysis && !analysisInFlight.has(currentVideoId) && !aiKeyMissing) {
-    triggerAnalysis();
+  //
+  // 2026-10-27: 学堂在线课程自带"官方章节摘要"的话，直接用它当概览 ——
+  // 不要再跑 AI（用户要求，也省 token）。章节是页面侧抓的，很快，
+  // 所以先要章节再决定要不要跑 AI。
+  //
+  // 注意：官方章节这条路**不需要 AI key** —— 所以这里不能拿 aiKeyMissing
+  // 把整个分支掐掉，否则没配 key 的用户连官方章节都看不到。
+  if (tabName === "overview" && !currentAnalysis && !analysisInFlight.has(currentVideoId)) {
+    if (currentXuetangxChapters?.length) {
+      // 官方章节已经在手 → 渲染它（AI 同款格式），不跑 AI
+      applyXuetangxChapters(currentXuetangxChapters);
+    } else if (isXuetangxVideoId(currentVideoId)) {
+      const videoIdAtGuide = currentVideoId;
+      loadXuetangxChapters(videoIdAtGuide).then((chapters) => {
+        if (videoIdAtGuide !== currentVideoId) return;
+        xuetangxChaptersChecked = true;
+        if (chapters) {
+          currentXuetangxChapters = chapters;
+          applyXuetangxChapters(chapters);
+          return;
+        }
+        // 没有官方章节 → 才轮到 AI（没 key 就显示配置引导）
+        if (aiKeyMissing) {
+          updateAiKeyWizard("overview");
+          return;
+        }
+        triggerAnalysis();
+      });
+    } else if (!aiKeyMissing) {
+      triggerAnalysis();
+    }
   }
 
   // Lazy-load LLM summary when user switches to Summary tab
@@ -2342,6 +3308,11 @@ function showPanelError(panelName, message, retryFn) {
 async function triggerAnalysis() {
   if (!currentTranscriptTimestamped || analysisInFlight.has(currentVideoId) || currentAnalysis)
     return;
+  // 2026-10-27: 已有学堂在线官方章节 → 概览用它，不再跑 AI。
+  if (currentXuetangxChapters?.length) {
+    applyXuetangxChapters(currentXuetangxChapters);
+    return;
+  }
 
   // 2026-09-12 cross-video race fix: this LLM call can outlive the user's
   // stay on this video. Capture WHO the result belongs to; on completion
@@ -3059,28 +4030,71 @@ function formatYmdForFilename(input) {
 // ============================================================
 
 /**
- * Sets up text selection handling in the transcript.
- * When user selects text, shows an "Explain" button.
+ * Sets up text selection handling for the content tabs.
+ * When user selects text in 字幕/概览/总结, shows a pill with two
+ * actions: 💡 Explain and 💬 Ask AI.
  */
+
+// Tabs where the selection pill may appear. Notes are the user's own
+// writing (not video content), so they are deliberately excluded.
+const PILL_TAB_PANELS = new Set(["transcript", "overview", "summary"]);
+
+// The pill's buttons, kept as a template string so flashPillStatus can
+// restore them verbatim after it borrows the container to show a save result.
+const PILL_BUTTONS_HTML = `
+  <button class="explain-btn" data-pill-action="explain">💡 Explain</button>
+  <button class="explain-btn" data-pill-action="ask">💬 Ask AI</button>
+  <button class="explain-btn explain-btn--icon" data-pill-action="note"
+    title="添加到笔记" aria-label="添加到笔记">📝</button>
+`;
+
+// Pending flashPillStatus restore. Null when the pill shows its real buttons.
+let pillFlashTimer = null;
+
+/**
+ * Returns the data-panel tab name when the selection lives inside a
+ * pill-eligible panel (transcript/overview/summary), else null.
+ * anchorNode can be a text node or an element — normalize to the
+ * element first, then look for the enclosing .tab-panel.
+ */
+function selectionPillTab(selection) {
+  const node = selection && selection.anchorNode;
+  if (!node) return null;
+  // 3 = Node.TEXT_NODE (literal keeps this testable without a DOM)
+  const el = node.nodeType === 3 ? node.parentElement : node;
+  const panel = el && el.closest ? el.closest(".tab-panel") : null;
+  if (!panel) return null;
+  const tab =
+    (panel.dataset && panel.dataset.panel) ||
+    (panel.getAttribute && panel.getAttribute("data-panel"));
+  return PILL_TAB_PANELS.has(tab) ? tab : null;
+}
+
 function setupExplainFeature() {
-  const transcriptList = document.getElementById("transcriptList");
-  if (!transcriptList) return;
+  // The container is about to be replaced, so drop any pending flash restore —
+  // it would otherwise fire against this new element and hide the fresh pill.
+  cancelPillFlash();
 
   // Remove existing tooltip if any
   const existingTooltip = document.getElementById("explainTooltip");
   if (existingTooltip) existingTooltip.remove();
 
-  // Create the explain tooltip/button
+  // Create the selection pill: Explain opens the explanation modal,
+  // Ask AI opens the bottom chat drawer, 📝 saves the selection as a note.
   const tooltip = document.createElement("div");
   tooltip.id = "explainTooltip";
   tooltip.className = "explain-tooltip";
-  tooltip.innerHTML = `<button class="explain-btn">💡 Explain</button>`;
+  tooltip.innerHTML = PILL_BUTTONS_HTML;
   tooltip.style.display = "none";
   document.body.appendChild(tooltip);
 
   let selectedText = "";
+  // Timestamp of the transcript row the selection starts in (null when the
+  // selection came from 概览/总结). Captured alongside selectedText because the
+  // live Selection is gone by the time the click handler runs.
+  let selectedSeconds = null;
 
-  // Interacting with Explain must NOT interfere with the browser's
+  // Interacting with the pill must NOT interfere with the browser's
   // built-in selection handling — the previous mousedown preventDefault
   // and mouseup stopPropagation blocked the user from being able to
   // right-click → Copy the selected text (the system context-menu would
@@ -3089,27 +4103,41 @@ function setupExplainFeature() {
   // text the user might want to copy. selectedText is captured into the
   // closure on mouseup, so the click handler can use it even if the
   // click itself ends up clearing the live Selection.
-  tooltip
-    .querySelector(".explain-btn")
-    .addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (!selectedText) return;
-      const captured = selectedText;
-      tooltip.style.display = "none";
+  tooltip.addEventListener("click", (event) => {
+    const btn = event.target.closest
+      ? event.target.closest("button[data-pill-action]")
+      : null;
+    if (!btn) return;
+    event.stopPropagation();
+    if (!selectedText) return;
+    const captured = selectedText;
+    const capturedSeconds = selectedSeconds;
+    const action = btn.dataset.pillAction;
+    // Remember where the pill sat: it hides itself on click, and the note
+    // pill needs somewhere to flash its ✓/failure back to.
+    const anchor = { top: tooltip.style.top, left: tooltip.style.left };
+    tooltip.style.display = "none";
+    if (action === "ask") {
+      openAskAiDrawer(captured);
+    } else if (action === "note") {
+      saveSelectionAsNote(captured, capturedSeconds, anchor);
+    } else {
       showExplanation(captured);
-    });
+    }
+  });
 
   // Listen for text selection
   document.addEventListener("mouseup", (e) => {
     const selection = window.getSelection();
     const text = selection.toString().trim();
 
-    // Only show if selecting within transcript
-    const isInTranscript = transcriptList.contains(selection.anchorNode);
+    // Show the pill for selections inside 字幕/概览/总结 (not notes,
+    // not the rest of the panel chrome).
+    const pillTab = text.length > 0 ? selectionPillTab(selection) : null;
 
-    // Allow any selection length (removed 10+ char requirement)
-    if (text.length > 0 && isInTranscript) {
+    if (pillTab) {
       selectedText = text;
+      selectedSeconds = selectionStartSeconds(selection);
 
       // Position the tooltip ABOVE the selection by default so it never
       // covers the selected text — this keeps right-click → Copy working
@@ -3125,7 +4153,11 @@ function setupExplainFeature() {
         ? rect.top + window.scrollY - tipHeight - 8
         : rect.bottom + window.scrollY + 8;
 
-      tooltip.style.display = "block";
+      // A save-status flash may still be holding the container; end it first
+      // so the pill comes back with its buttons, not the ✓/error message.
+      cancelPillFlash();
+
+      tooltip.style.display = "flex";
       tooltip.style.top = `${top}px`;
       tooltip.style.left = `${rect.left + rect.width / 2}px`;
     } else {
@@ -3139,6 +4171,126 @@ function setupExplainFeature() {
       tooltip.style.display = "none";
     }
   });
+}
+
+// ============================================================
+// SELECTION → NOTE
+// ============================================================
+
+/**
+ * Resolves the transcript timestamp a selection starts at.
+ *
+ * Transcript rows carry `data-seconds` (see renderTranscriptModeRows), so a
+ * selection inside 字幕 anchors to its own row. A selection made in 概览/总结
+ * has no row of its own — fall back to the row the player is currently
+ * speaking (the active-playback highlight), which is the closest honest
+ * answer. Returns null when neither exists (e.g. no transcript at all), which
+ * makes the background save the note without a timestamp.
+ */
+function selectionStartSeconds(selection) {
+  const range =
+    selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+  const node = range ? range.startContainer : null;
+  const el = node ? (node.nodeType === 3 ? node.parentElement : node) : null;
+  const row = el && el.closest
+    ? el.closest(".transcript-entry[data-seconds]")
+    : null;
+  if (row) {
+    const seconds = Number(row.dataset.seconds);
+    if (Number.isFinite(seconds)) return seconds;
+  }
+  const active = document.querySelector(
+    ".transcript-entry.active-playback[data-seconds]",
+  );
+  if (active) {
+    const seconds = Number(active.dataset.seconds);
+    if (Number.isFinite(seconds)) return seconds;
+  }
+  return null;
+}
+
+/**
+ * Saves the selected text as a note. The pill hides itself on click, so both
+ * the pending state and the outcome are flashed back in its place — otherwise
+ * the save would be silent and the user would have to open the 笔记 tab to
+ * learn whether it worked.
+ */
+async function saveSelectionAsNote(selectedText, seconds, anchor) {
+  // Acknowledge the click immediately. The background round-trip includes
+  // getSettings() — which probes the browser's download directory — plus a
+  // best-effort mirror to the notes KB; against a stopped whisper server
+  // that measured >1s, which reads as "the pill just vanished". holdMs is a
+  // safety net only: the real result replaces it well before then.
+  flashPillStatus("保存中…", anchor, 8000);
+
+  let ok = false;
+  if (!currentVideoId) {
+    flashPillStatus("缺少视频信息", anchor);
+    return;
+  }
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "saveSelectionNote",
+      videoId: currentVideoId,
+      videoTitle: currentVideoTitle || "",
+      channelName: currentChannelName || "",
+      text: selectedText,
+      seconds: seconds,
+    });
+    ok = !!(result && result.success);
+    if (!ok) {
+      console.error(
+        "[dk-bililearn] Save selection as note failed:",
+        result && result.error,
+      );
+    }
+  } catch (error) {
+    console.error("[dk-bililearn] Save selection as note error:", error);
+  }
+  flashPillStatus(ok ? "✓ 已保存至笔记" : "保存失败", anchor);
+  if (ok) loadNotes(currentVideoId);
+}
+
+/**
+ * Shows a status message in place of the pill's buttons, then restores them —
+ * the next selection must find the real buttons back, not an empty bar.
+ *
+ * @param {string} message
+ * @param {{top: string, left: string}|null} anchor - the pill's last position
+ * @param {number} holdMs - how long the message stays before reverting.
+ */
+function flashPillStatus(message, anchor, holdMs = 1400) {
+  const tooltip = document.getElementById("explainTooltip");
+  if (!tooltip) return;
+  cancelPillFlash();
+  tooltip.innerHTML = `<span class="explain-pill-status">${escapeHtml(message)}</span>`;
+  if (anchor && anchor.top) tooltip.style.top = anchor.top;
+  if (anchor && anchor.left) tooltip.style.left = anchor.left;
+  tooltip.style.display = "flex";
+  pillFlashTimer = setTimeout(() => {
+    pillFlashTimer = null;
+    const current = document.getElementById("explainTooltip");
+    if (!current) return;
+    current.innerHTML = PILL_BUTTONS_HTML;
+    current.style.display = "none";
+  }, holdMs);
+}
+
+/**
+ * Ends a save-status flash early. Called before the pill is re-shown for a new
+ * selection: without this, a selection made during the flash would find the
+ * status span instead of buttons, and the pending restore would then hide the
+ * pill the user had just opened.
+ */
+function cancelPillFlash() {
+  if (pillFlashTimer) {
+    clearTimeout(pillFlashTimer);
+    pillFlashTimer = null;
+  }
+  const tooltip = document.getElementById("explainTooltip");
+  if (tooltip && tooltip.querySelector(".explain-pill-status")) {
+    tooltip.innerHTML = PILL_BUTTONS_HTML;
+  }
 }
 
 /**
@@ -3213,6 +4365,541 @@ function getTranscriptContext(selectedText) {
   const end = Math.min(fullText.length, index + selectedText.length + 200);
 
   return fullText.substring(start, end);
+}
+
+// ============================================================
+// ASK AI DRAWER
+// ============================================================
+// Bottom drawer (~1/3 of the panel height) opened from the
+// selection pill's "Ask AI" action. Multi-turn chat; each question
+// is routed through the background's two-stage handler which
+// decides whether the current video's context gets attached. The
+// per-video conversation state guards itself by videoId, so the
+// video-switch reset path needs no explicit hook.
+
+let askAiState = null; // { videoId, messages: [{role, content}], selection }
+let askAiBusy = false;
+// 缓存当前 KB 选项 (open 填一次) 与缓存结果: askAiKbs = [{ name, dir, build_method, archived }]
+let askAiKbs = [];
+// Ask-AI 用临时覆盖 (不写 storage)。键名 = select 的 value "providerId|modelName"
+let askAiSelectedModelKey = "";
+
+// 列出所有「有对应 key」的 provider+model 选项。key 优先级:
+//   minimax > deepseek > glm > other (settings.aiBaseUrl 兜底)
+function listAskAiModelOptions(settings) {
+  const opts = [];
+  const presets = YTD_SETTINGS.PROVIDER_PRESETS || {};
+  if (settings && typeof settings.minimaxApiKey === "string" && settings.minimaxApiKey.trim()) {
+    opts.push({ key: "minimax|" + presets.minimax.model, label: "minimax · " + presets.minimax.model });
+  }
+  if (settings && typeof settings.deepseekApiKey === "string" && settings.deepseekApiKey.trim()) {
+    opts.push({ key: "deepseek|" + presets.deepseek.model, label: "DeepSeek · " + presets.deepseek.model });
+  }
+  if (settings && typeof settings.glmApiKey === "string" && settings.glmApiKey.trim()) {
+    const glmModel = settings.aiModel && presets.glm && settings.aiModel === presets.glm.model
+      ? settings.aiModel
+      : (presets.glm && presets.glm.model);
+    opts.push({ key: "glm|" + glmModel, label: "GLM · " + glmModel });
+  }
+  // 其他任何已设的 aiBaseUrl+aiModel (other/custom) — 只在主 provider 都没 key 时显示, 避免歧义
+  if (opts.length === 0 && settings && settings.aiBaseUrl && settings.aiModel) {
+    opts.push({ key: "other|" + settings.aiModel, label: "Custom · " + settings.aiModel });
+  }
+  return opts;
+}
+
+function getActiveAskAiModelKey(settings) {
+  // 默认选择: 用户 settings.provider 那个 (若它有 key)
+  const opts = listAskAiModelOptions(settings);
+  if (!opts.length) return "";
+  // 用户手动切换过的优先
+  if (askAiSelectedModelKey && opts.some((o) => o.key === askAiSelectedModelKey)) {
+    return askAiSelectedModelKey;
+  }
+  // 退回 settings.provider
+  const provider = settings && settings.provider;
+  const presets = YTD_SETTINGS.PROVIDER_PRESETS || {};
+  if (provider && presets[provider] && opts.some((o) => o.key.startsWith(provider + "|"))) {
+    return opts.find((o) => o.key.startsWith(provider + "|")).key;
+  }
+  return opts[0].key;
+}
+
+async function populateAskAiModels(drawer) {
+  const sel = drawer.querySelector("#askAiModelSelect");
+  if (!sel) return;
+  const settings = await kbGetSettings();
+  // askAiGetSettings 路径已 ensure whisperUrl 等副作用, 这里直接复用同源 helper
+  const raw = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
+  const fullSettings = YTD_SETTINGS.normalize(raw[YTD_SETTINGS.STORAGE_KEY] || {});
+  const opts = listAskAiModelOptions(fullSettings);
+  sel.innerHTML = "";
+  if (!opts.length) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "未配置任何模型 key";
+    sel.appendChild(o);
+    sel.disabled = true;
+    askAiSelectedModelKey = "";
+    return;
+  }
+  sel.disabled = false;
+  for (const o of opts) {
+    const opt = document.createElement("option");
+    opt.value = o.key; opt.textContent = o.label;
+    sel.appendChild(opt);
+  }
+  const active = getActiveAskAiModelKey(fullSettings);
+  sel.value = active;
+  askAiSelectedModelKey = active;
+  sel.onchange = () => { askAiSelectedModelKey = sel.value; };
+}
+
+async function populateAskAiKbSelect(drawer) {
+  const sel = drawer.querySelector("#askAiKbSelect");
+  if (!sel) return;
+  const raw = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
+  const fullSettings = YTD_SETTINGS.normalize(raw[YTD_SETTINGS.STORAGE_KEY] || {});
+  const kbRoot = (fullSettings.kbRootDir || "").trim().replace(/[\\/]+$/, "");
+  // KB 启用的开关未开时不填 (避免用户在 KB 关闭状态下选 KB 上下文)
+  const kbEnabled = fullSettings.kbEnabled !== false;
+
+  sel.innerHTML = "";
+  askAiKbs = [];
+  if (!kbEnabled || !kbRoot) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = kbEnabled ? "无关联 KB" : "KB 管理未启用";
+    sel.appendChild(o);
+    sel.disabled = true;
+    return;
+  }
+  let kbs = [];
+  try { kbs = await KbClient.list(kbRoot); }
+  catch (e) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "whisper server 不在线";
+    sel.appendChild(o);
+    sel.disabled = true;
+    return;
+  }
+  askAiKbs = kbs.filter((k) => !k.archived);
+  // 可选的 KB: 非 raw (raw 上下文太大, 跳过)
+  const selectable = askAiKbs.filter((k) => k.build_method && k.build_method !== "raw");
+  // 默认 = 当前视频所属的 KB:
+  //   1) channel 匹配 KB 名 → 选中
+  //   2) 否则 = 当前 videoId 已经在的 KB (kb.videos 列表里有当前 bvid+page)
+  const channel = (currentChannelName || "").trim();
+  let autoKbName = "";
+  if (channel && selectable.some((k) => k.name === channel)) {
+    autoKbName = channel;
+  } else {
+    try {
+      const videos = await KbClient.videos(kbRoot, "__probe__").catch(() => []);
+      const curVid = String(currentVideoId || "").split("@p")[0];
+      const curPage = Number((String(currentVideoId || "").match(/@p(\d+)/) || [])[1]) || 1;
+      // 探测完一个 KB 再换下一个
+      for (const kb of selectable) {
+        try {
+          const vs = await KbClient.videos(kbRoot, kb.name);
+          if (vs.some((v) => v.bvid === curVid && Number(v.page || 1) === curPage)) {
+            autoKbName = kb.name; break;
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  // 渲染选项: 默认加一个"无关联 KB"
+  const placeholder = document.createElement("option");
+  placeholder.value = ""; placeholder.textContent = "无关联 KB";
+  sel.appendChild(placeholder);
+  for (const kb of selectable) {
+    const opt = document.createElement("option");
+    opt.value = kb.name;
+    opt.textContent = `${kb.name} · ${kb.build_method}${kb.name === autoKbName ? "  ·  自动选择" : ""}`;
+    sel.appendChild(opt);
+  }
+  sel.disabled = false;
+  sel.value = autoKbName || "";
+}
+
+function getAskAiProviderOverride(settings) {
+  // 从 askAiSelectedModelKey 解析 provider/model, 临时返回一段 settings 兼容字段
+  const key = askAiSelectedModelKey || getActiveAskAiModelKey(settings);
+  if (!key) return null;
+  const pipe = key.indexOf("|");
+  if (pipe < 0) return null;
+  const provider = key.slice(0, pipe);
+  const model = key.slice(pipe + 1);
+  const presets = YTD_SETTINGS.PROVIDER_PRESETS || {};
+  let baseUrl = "";
+  let apiKey = "";
+  if (provider === "minimax") {
+    baseUrl = (presets.minimax && presets.minimax.baseUrl) || settings.aiBaseUrl || "";
+    apiKey = settings.minimaxApiKey || "";
+  } else if (provider === "deepseek") {
+    baseUrl = (presets.deepseek && presets.deepseek.baseUrl) || settings.aiBaseUrl || "";
+    apiKey = settings.deepseekApiKey || "";
+  } else if (provider === "glm") {
+    // GLM endpoint 取决于 glmApiType (settings 已 normalize), 用预设 + 验证 baseUrl
+    baseUrl = YTD_SETTINGS.resolveGlmBaseUrl
+      ? YTD_SETTINGS.resolveGlmBaseUrl(settings.glmApiType)
+      : ((presets.glm && presets.glm.baseUrl) || settings.aiBaseUrl || "");
+    apiKey = settings.glmApiKey || "";
+  } else if (provider === "other") {
+    baseUrl = settings.aiBaseUrl || "";
+    apiKey = YTD_SETTINGS.activeApiKey(settings) || "";
+  } else {
+    return null;
+  }
+  if (!baseUrl || !apiKey || !model) return null;
+  return { provider, baseUrl, model, apiKey };
+}
+
+function ensureAskAiDrawer() {
+  let drawer = document.getElementById("askAiDrawer");
+  if (drawer) return drawer;
+
+  drawer = document.createElement("div");
+  drawer.id = "askAiDrawer";
+  drawer.className = "ask-ai-drawer";
+  drawer.innerHTML = `
+    <div class="ask-ai-resize-grip" title="拖动以调节高度" aria-label="拖动调节 Ask AI 抽屉高度"></div>
+    <div class="ask-ai-header">
+      <div class="ask-ai-title">💬 Ask AI</div>
+      <select id="askAiModelSelect" class="ask-ai-model-select" title="选择模型"></select>
+      <button class="ask-ai-close" id="askAiClose" title="关闭 (Esc)">✕</button>
+    </div>
+    <div class="ask-ai-selection" id="askAiSelection"></div>
+    <div class="ask-ai-messages" id="askAiMessages"></div>
+    <div class="ask-ai-input-row">
+      <div class="ask-ai-kb-row">
+        <select id="askAiKbSelect" class="ask-ai-kb-select" title="选择 KB 上下文"></select>
+      </div>
+      <div class="ask-ai-prompt-row">
+        <textarea id="askAiInput" class="ask-ai-input" rows="1"
+          placeholder="Ask anything… (Enter 发送 · Shift+Enter 换行)"></textarea>
+        <button id="askAiSend" class="ask-ai-send">➤</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(drawer);
+
+  drawer.querySelector("#askAiClose").addEventListener("click", closeAskAiDrawer);
+  drawer.querySelector("#askAiSend").addEventListener("click", sendAskAiMessage);
+  const input = drawer.querySelector("#askAiInput");
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendAskAiMessage();
+    }
+  });
+
+  // 2026-10-11: 顶部 grip 拖拽改高度。NS-cursor 视觉提示,
+  // pointer 事件 + setPointerCapture 让鼠标就算拖出 grip 也持续生效。
+  wireAskAiResizeGrip(drawer);
+
+  // Esc closes the drawer no matter where the focus currently sits.
+  document.addEventListener("keydown", (e) => {
+    const openDrawer = document.getElementById("askAiDrawer");
+    if (e.key === "Escape" && openDrawer && openDrawer.classList.contains("open")) {
+      closeAskAiDrawer();
+    }
+  });
+
+  return drawer;
+}
+
+// 2026-10-11: 顶部 grip → 拖动改 drawer 高度. 边界由 CSS 的 min/max-height
+// 兜底; 这里用 CSS 变量喂值 (而不是直接 style.height) 以免覆盖 CSS 限制。
+// 高度持久化在 chrome.storage.local[ytd_askai_drawer_height] 里, 下次开抽屉恢复。
+function wireAskAiResizeGrip(drawer) {
+  const grip = drawer.querySelector(".ask-ai-resize-grip");
+  if (!grip || grip.dataset.bound === "1") return;
+  grip.dataset.bound = "1";
+  // 恢复上次保存的高度 (异步, 不阻塞首屏)
+  try {
+    chrome.storage.local.get("ytd_askai_drawer_height", (r) => {
+      const h = r && r.ytd_askai_drawer_height;
+      if (typeof h === "string" && /^\d+(\.\d+)?px$/.test(h)) {
+        drawer.style.setProperty("--ask-ai-h", h);
+      }
+    });
+  } catch {}
+
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+  const minPx = 180; // 与 .ask-ai-drawer { min-height } 同步
+  const maxVH = 0.8; // 与 .ask-ai-drawer { max-height } 同步
+
+  const clamp = (h) => Math.max(minPx, Math.min(window.innerHeight * maxVH, h));
+
+  grip.addEventListener("pointerdown", (e) => {
+    if (!drawer.classList.contains("open")) return; // 关闭状态下不响应
+    dragging = true;
+    startY = e.clientY;
+    startH = drawer.getBoundingClientRect().height;
+    try { grip.setPointerCapture(e.pointerId); } catch {}
+    grip.classList.add("is-dragging");
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "ns-resize";
+    e.preventDefault();
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    // drawer 在屏幕底部, 拖手柄向上 = 高度增大 → startY - clientY
+    const dy = startY - e.clientY;
+    const next = clamp(startH + dy);
+    drawer.style.setProperty("--ask-ai-h", next + "px");
+  });
+  const finish = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    grip.classList.remove("is-dragging");
+    try { if (e && e.pointerId != null) grip.releasePointerCapture(e.pointerId); } catch {}
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    // 持久化 (只在变化后保存一次, 不抖动)
+    try {
+      const h = drawer.style.getPropertyValue("--ask-ai-h").trim();
+      if (h) chrome.storage.local.set({ ytd_askai_drawer_height: h });
+    } catch {}
+  };
+  grip.addEventListener("pointerup", finish);
+  grip.addEventListener("pointercancel", finish);
+
+  // 窗口缩放 / DPI 变化时, 已保存的高度若超过新 viewport 的 max, 自动夹住
+  window.addEventListener("resize", () => {
+    const cur = drawer.style.getPropertyValue("--ask-ai-h").trim();
+    if (!cur) return;
+    const px = parseFloat(cur);
+    if (!Number.isFinite(px)) return;
+    const clamped = clamp(px);
+    if (clamped !== px) {
+      drawer.style.setProperty("--ask-ai-h", clamped + "px");
+      try { chrome.storage.local.set({ ytd_askai_drawer_height: clamped + "px" }); } catch {}
+    }
+  });
+}
+
+function openAskAiDrawer(selection) {
+  const drawer = ensureAskAiDrawer();
+
+  // New video → fresh conversation (guarded by videoId so no hook is
+  // needed in the video-reset path).
+  if (!askAiState || askAiState.videoId !== currentVideoId) {
+    askAiState = { videoId: currentVideoId, messages: [], selection: "" };
+  }
+  if (selection) askAiState.selection = String(selection).trim();
+
+  const selBar = drawer.querySelector("#askAiSelection");
+  if (askAiState.selection) {
+    selBar.textContent = `“${askAiState.selection.substring(0, 200)}${
+      askAiState.selection.length > 200 ? "…" : ""
+    }”`;
+    selBar.style.display = "block";
+  } else {
+    selBar.style.display = "none";
+  }
+
+  populateAskAiModels(drawer);
+  populateAskAiKbSelect(drawer);
+
+  renderAskAiMessages(drawer);
+  drawer.classList.add("open");
+  drawer.querySelector("#askAiInput").focus();
+}
+
+function closeAskAiDrawer() {
+  const drawer = document.getElementById("askAiDrawer");
+  if (drawer) drawer.classList.remove("open");
+}
+
+async function sendAskAiMessage() {
+  const drawer = document.getElementById("askAiDrawer");
+  if (!drawer || askAiBusy || !askAiState) return;
+  const input = drawer.querySelector("#askAiInput");
+  const question = input.value.trim();
+  if (!question) return;
+
+  askAiBusy = true;
+  input.value = "";
+  askAiState.messages.push({ role: "user", content: question });
+  renderAskAiMessages(drawer, true); // true → append the pending bubble
+
+  // 拉取 settings 用于 provider override (同时决定是否传 KB 上下文)
+  const raw = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
+  const settings = YTD_SETTINGS.normalize(raw[YTD_SETTINGS.STORAGE_KEY] || {});
+  const providerOverride = getAskAiProviderOverride(settings);
+  const kbSelect = drawer.querySelector("#askAiKbSelect");
+  const kbName = kbSelect ? kbSelect.value : "";
+  const selectedKb = kbName ? askAiKbs.find((k) => k.name === kbName) : null;
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "askAiChat",
+      question,
+      history: askAiState.messages.slice(0, -1), // turns before this question
+      selection: askAiState.selection || "",
+      videoTitle: currentVideoTitle,
+      channelName: currentChannelName,
+      videoDescription: currentVideoDescription,
+      summary: currentSummary || "",
+      transcript: currentTranscriptText || "",
+      providerOverride, // null 表示用 settings.provider 默认
+      kbContext: selectedKb ? { name: selectedKb.name, dir: selectedKb.dir, build_method: selectedKb.build_method } : null,
+    });
+
+    if (result && result.success) {
+      askAiState.messages.push({ role: "assistant", content: result.answer });
+    } else {
+      const errMsg =
+        (result && (result.message || result.error)) || "unknown error";
+      askAiState.messages.push({
+        role: "assistant",
+        content: `⚠️ 请求失败：${errMsg}`,
+      });
+    }
+  } catch (error) {
+    askAiState.messages.push({
+      role: "assistant",
+      content: `⚠️ 请求失败：${error.message}`,
+    });
+  } finally {
+    askAiBusy = false;
+    renderAskAiMessages(drawer);
+  }
+}
+
+// 2026-10-10: assistant 回复下方两个 icon —— 拷贝、添加到笔记。
+// 用 SVG 而非 emoji, 与侧栏其它自绘控件 (note-cleanup / kb 一类) 风格一致;
+// 颜色继承 currentColor 让暗色主题下也能自适应。
+function askAiCopyIconSvg() {
+  return (
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none"' +
+    ' stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"' +
+    ' aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/>' +
+    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+  );
+}
+function askAiNoteIconSvg() {
+  return (
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none"' +
+    ' stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"' +
+    ' aria-hidden="true"><path d="M4 4h10l4 4v12a2 2 0 0 1-2 2H4z"/>' +
+    '<path d="M14 4v4h4"/><line x1="8" y1="13" x2="14" y2="13"/>' +
+    '<line x1="8" y1="17" x2="14" y2="17"/></svg>'
+  );
+}
+function askAiBubbleActionBar() {
+  return (
+    '<div class="ask-ai-bubble-actions">' +
+      '<button type="button" class="ask-ai-act ask-ai-copy" title="拷贝回复" aria-label="拷贝回复">' +
+        askAiCopyIconSvg() +
+      '</button>' +
+      '<button type="button" class="ask-ai-act ask-ai-save-note" title="添加到笔记" aria-label="添加到笔记">' +
+        askAiNoteIconSvg() +
+      '</button>' +
+    '</div>'
+  );
+}
+
+// 点击 ack：在按钮里临时显示 ✓/✗，1.2s 后恢复 SVG。disabled 防双击。
+function ackAskAiAct(btn, ok) {
+  if (!btn) return;
+  const original = btn.innerHTML;
+  btn.innerHTML = ok ? "✓" : "✗";
+  btn.disabled = true;
+  setTimeout(() => {
+    btn.innerHTML = original;
+    btn.disabled = false;
+  }, 1200);
+}
+
+async function handleAskAiCopy(btn, text) {
+  try {
+    if (!text) {
+      ackAskAiAct(btn, false);
+      return;
+    }
+    await navigator.clipboard.writeText(text);
+    ackAskAiAct(btn, true);
+  } catch (e) {
+    console.error("[ask-ai] clipboard copy failed:", e);
+    ackAskAiAct(btn, false);
+  }
+}
+
+async function handleAskAiSaveNote(btn, text) {
+  try {
+    if (!text) {
+      ackAskAiAct(btn, false);
+      return;
+    }
+    const r = await chrome.runtime.sendMessage({
+      action: "saveAskAiNote",
+      text,
+      videoId: typeof currentVideoId === "string" ? currentVideoId : "",
+      videoTitle: (typeof currentVideoTitle === "string" && currentVideoTitle) || "Ask AI 答复",
+      channelName: (typeof currentChannelName === "string" && currentChannelName) || "bililearn-user",
+    });
+    ackAskAiAct(btn, !!(r && r.success));
+  } catch (e) {
+    console.error("[ask-ai] save to notes failed:", e);
+    ackAskAiAct(btn, false);
+  }
+}
+
+// 把 assistant bubble 下面的两个 icon 绑定到对应 message (data-msg-idx 索引)
+// 与 click handler; user bubble / pending bubble 不挂 icon。
+function wireAskAiBubbleActions(list, messages) {
+  if (!list || !Array.isArray(messages)) return;
+  const bubbles = list.querySelectorAll(
+    ".ask-ai-bubble.assistant:not(.ask-ai-pending)",
+  );
+  bubbles.forEach((bubble) => {
+    const idx = Number(bubble.dataset.msgIdx);
+    const msg = Number.isInteger(idx) ? messages[idx] : null;
+    if (!msg || msg.role !== "assistant") return;
+    const copyBtn = bubble.querySelector(".ask-ai-copy");
+    const saveBtn = bubble.querySelector(".ask-ai-save-note");
+    if (copyBtn && !copyBtn.dataset.bound) {
+      copyBtn.dataset.bound = "1";
+      copyBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleAskAiCopy(copyBtn, msg.content);
+      });
+    }
+    if (saveBtn && !saveBtn.dataset.bound) {
+      saveBtn.dataset.bound = "1";
+      saveBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleAskAiSaveNote(saveBtn, msg.content);
+      });
+    }
+  });
+}
+
+function renderAskAiMessages(drawer, pending = false) {
+  const list = drawer.querySelector("#askAiMessages");
+  if (!list) return;
+  const messages = (askAiState && askAiState.messages) || [];
+  if (messages.length === 0 && !pending) {
+    list.innerHTML = `<div class="ask-ai-empty">关于这个视频随便问 —— 会自动判断是否需要带上视频上下文。</div>`;
+    return;
+  }
+  let html = messages
+    .map((m, i) =>
+      m.role === "assistant"
+        ? `<div class="ask-ai-bubble assistant" data-msg-idx="${i}">${renderMarkdown(m.content)}${askAiBubbleActionBar()}</div>`
+        : `<div class="ask-ai-bubble user" data-msg-idx="${i}">${escapeHtml(m.content)}</div>`,
+    )
+    .join("");
+  if (pending) {
+    html += `<div class="ask-ai-bubble assistant ask-ai-pending"><span class="loading-bar"></span></div>`;
+  }
+  list.innerHTML = html;
+  wireAskAiBubbleActions(list, messages);
+  list.scrollTop = list.scrollHeight;
 }
 
 // ============================================================
@@ -4172,7 +5859,7 @@ async function toggleKbDropdown() {
 function openKbNewDialog() {
   document.getElementById("kbNewName").value = currentChannelName || "新KB";
   document.getElementById("kbNewSpeaker").value = currentChannelName || "";
-  document.getElementById("kbNewMethod").value = "karpathy";
+  document.getElementById("kbNewMethod").value = "raw";
   document.getElementById("kbNewDialog").style.display = "";
 }
 

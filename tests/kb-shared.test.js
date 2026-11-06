@@ -87,4 +87,24 @@ assert.strictEqual((c2.match(/### 段/g) || []).length, 2);
 assert.deepStrictEqual(S.KB_BUILD_METHODS, ["karpathy", "nvwa", "raw"]);
 assert.deepStrictEqual(S.KB_UPDATE_MODES, ["realtime", "manual", "daily"]);
 
+// 2026-10-10: PROTECTED_KB_NAMES + isProtectedKbName + noteFileName (本地笔记 KB)
+assert.deepStrictEqual(S.PROTECTED_KB_NAMES, ["notes"]);
+assert.strictEqual(S.NOTES_KB_NAME, "notes");
+assert.strictEqual(S.isProtectedKbName("notes"), true);
+assert.strictEqual(S.isProtectedKbName("NOTES"), false); // 大小写敏感
+assert.strictEqual(S.isProtectedKbName(""), false);
+assert.strictEqual(S.isProtectedKbName("custom-kb"), false);
+assert.strictEqual(S.isProtectedKbName(undefined), false);
+assert.strictEqual(S.isProtectedKbName(null), false);
+// noteFileName: noteId 通常 "note_<ms>" 形态, 加 .md 后缀; 非法字符清洗
+assert.strictEqual(S.noteFileName("note_1696470000000"), "note_1696470000000.md");
+assert.strictEqual(S.noteFileName("note_1696470000000_askai"), "note_1696470000000_askai.md");
+// 已经是 .md 结尾 → 不重复加
+assert.strictEqual(S.noteFileName("note_123.md"), "note_123.md");
+// 非法字符全部清洗为下划线
+assert.strictEqual(S.noteFileName("bad/name?with|special"), "bad_name_with_special.md");
+// 缺省 → fallback
+assert.strictEqual(S.noteFileName(""), "note_unknown.md");
+assert.strictEqual(S.noteFileName(null), "note_unknown.md");
+
 console.log("kb-shared.test.js ALL PASS");

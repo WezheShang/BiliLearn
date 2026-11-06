@@ -9,12 +9,19 @@ REM matter where the repo was cloned (matches the .vbs launcher behavior).
 set "SCRIPT_DIR=%~dp0"
 set "SERVER_SCRIPT=%SCRIPT_DIR%whisper_server.py"
 
+REM Which port to bind. whisper_server.py reads BILILEARN_WHISPER_PORT
+REM (default 7860). The extension's native launcher sets it when it has
+REM to start an instance on a spare port (7861) because the default one
+REM is occupied by a stale SYSTEM instance.
+set "WHISPER_PORT=%BILILEARN_WHISPER_PORT%"
+if "%WHISPER_PORT%"=="" set "WHISPER_PORT=7860"
+
 REM Find a Python interpreter. Order:
 REM   1) %BILILEARN_PYTHON% (user override, optional;
 REM      legacy %BILIDOWN_PYTHON% from before the rename still honored)
 REM   2) `where python` (whatever is on PATH)
 REM   3) common install locations (miniconda / anaconda / official Python.org)
-REM If none found, prompt the user to install one — don't hard-fail.
+REM If none found, prompt the user to install one - don't hard-fail.
 set "PYTHON_EXE="
 
 if defined BILILEARN_PYTHON (
@@ -109,7 +116,7 @@ if "%MISSING_FW%"=="1" (
 echo Starting bililearn Whisper server...
 echo   python : %PYTHON_EXE%
 echo   script : %SERVER_SCRIPT%
-echo   url    : http://127.0.0.1:7860
+echo   url    : http://127.0.0.1:%WHISPER_PORT%
 echo.
 echo Keep this window open. Close it to stop the server.
 echo.
@@ -118,12 +125,63 @@ REM -B disables .pyc generation so the server never creates a
 REM __pycache__/ next to whisper_server.py (Chrome would refuse
 REM to load the extension if that directory appeared in the
 REM extension tree). -I is isolated mode (no .pyc, no user-site,
-REM no PYTHONPATH) — same goal, slightly stronger.
+REM no PYTHONPATH) - same goal, slightly stronger.
+REM
+REM 2026-11-04: --log mode redirects stdout+stderr into
+REM logs\whisper_server.log. The silent .vbs launcher (used by the
+REM native-messaging launcher and the AtStartup task) hides the console
+REM window entirely, so a server-side exception used to vanish with the
+REM window - the extension only saw the client-side symptom
+REM ("TypeError: Failed to fetch" with no server traceback anywhere).
+REM The log file is the only place that traceback can live now.
+REM
+REM 2026-11-06: per-port log files.
+REM   All instances used to append to ONE file (logs\whisper_server.log).
+REM   The first instance keeps that handle open for its whole life, so a
+REM   SECOND instance failed at the ">>" redirect with
+REM   "The process cannot access the file because it is being used by
+REM   another process" - python never started, no server, and the silent
+REM   .vbs swallowed the error completely. That is why the "start server"
+REM   button looked like it did nothing.
+REM   Now every non-default port gets its own file
+REM   (logs\whisper_server_<port>.log) so instances never fight over it.
+REM   Port 7860 keeps the historical logs\whisper_server.log name.
+set "LOG_DIR=%SCRIPT_DIR%logs"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
+if "%WHISPER_PORT%"=="7860" (
+  set "LOG_FILE=%LOG_DIR%\whisper_server.log"
+) else (
+  set "LOG_FILE=%LOG_DIR%\whisper_server_%WHISPER_PORT%.log"
+)
+
+if /i "%~1"=="--log" (
+  echo Log file: %LOG_FILE%
+  "%PYTHON_EXE%" -B -I "%SERVER_SCRIPT%" >> "%LOG_FILE%" 2>&1
+  goto :after_run
+)
+
 "%PYTHON_EXE%" -B -I "%SERVER_SCRIPT%"
 
-if errorlevel 1 (
-  echo.
-  echo [ERROR] Server exited with code %errorlevel%
-  echo Hint: "%PYTHON_EXE%" -m pip install faster-whisper zhconv
-  pause
-)
+:after_run
+if errorlevel 1 goto :failed
+goto :done
+
+REM 2026-11-06: this used to be an "if errorlevel 1 ( ... )" block.
+REM The python one-liner inside it contained parentheses
+REM ("(no log file)"), and cmd.exe counts parentheses even inside
+REM quotes when it parses a block - so the block was terminated early
+REM and cmd died with ": was unexpected at this time.". The real
+REM error (e.g. the log file being locked by another instance) was
+REM swallowed. Flat labels + goto sidestep cmd's block parsing.
+:failed
+echo.
+echo [ERROR] Server exited with code %errorlevel%
+echo Hint: "%PYTHON_EXE%" -m pip install faster-whisper zhconv
+echo.
+echo Server log (last 30 lines):
+powershell -NoProfile -Command "Get-Content -LiteralPath '%LOG_FILE%' -Tail 30 -ErrorAction SilentlyContinue"
+pause
+exit /b 1
+
+:done
+exit /b 0

@@ -10,6 +10,11 @@
   const KB_DAILY_ALARM = "bililearn-kb-daily"; // daily: 01:00 本机时区
   const PLATFORM_BILIBILI = "bilibili";
   const PLATFORM_YOUTUBE = "youtube";
+  // 2026-10-10: 系统保留的 KB 名 = 用户「本地笔记」。不可改名/删除/归档/换方法/挪位置，
+  // 唯一允许的写入入口是把用户笔记（Ask AI 回复 / 字幕点笔记）mirror 到它的 videos/。
+  // 端口契约见 whisper_server.py 的 PROTECTED_KBS 集合；这里保持两端同步。
+  const PROTECTED_KB_NAMES = ["notes"];
+  const NOTES_KB_NAME = "notes";
 
   // YouTube ids are exactly 11 chars of [A-Za-z0-9_-] (same shape as
   // background.js YT_ID_RE); B站 BV ids are 12+ chars.
@@ -68,6 +73,24 @@
     return String(value == null ? "" : value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
 
+  // 2026-10-10: KB 名是否受系统保护（不可删/改/移）。
+  // SPEC: whistle-only — 与 whisper_server.py 的 PROTECTED_KBS 集合对齐即可。
+  function isProtectedKbName(name) {
+    return PROTECTED_KB_NAMES.includes(String(name || ""));
+  }
+
+  // 2026-10-10: 把 chrome.storage.local 里 note 的 id (通常 "note_<ms>") 转成
+  // 服务器端合法文件片段。noteId 已经以 "note_" 开头，全部小写字母数字下划线，
+  // 直接返回即可，不需要再做清洗；保留下划线只是为了在文件名里有辨识度。
+  function noteFileName(noteId) {
+    // 先摘掉已有的 .md 再清洗：清洗会把 "." 换成 "_"，先清洗的话
+    // endsWith(".md") 永远为假，幂等守卫就成了死代码（note_123.md
+    // 会变成 note_123_md.md）。
+    const stem = String(noteId == null ? "" : noteId).trim().replace(/\.md$/i, "");
+    const safe = (stem || "note_unknown").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
+    return `${safe}.md`;
+  }
+
   // 组装 videos/*.md：YAML frontmatter + 分段正文。
   // segments 兼容 {from,to}（B站官方字幕）与 {start,end}（whisper）两种字段名。
   function buildKbDocument(meta, segments) {
@@ -112,7 +135,9 @@
   global.KbShared = {
     KB_BUILD_METHODS, KB_UPDATE_MODES, KB_QUEUE_ALARM, KB_DAILY_ALARM,
     PLATFORM_BILIBILI, PLATFORM_YOUTUBE,
+    PROTECTED_KB_NAMES, NOTES_KB_NAME,
     isYoutubeId, sanitizeKbName, sanitizeTitleForFile, parseVideoId, dedupKey,
     compactDate, videoFileName, buildKbDocument, compressSegmentsForLlm,
+    isProtectedKbName, noteFileName,
   };
 })(typeof self !== "undefined" ? self : globalThis);

@@ -889,3 +889,38 @@ details > summary::before {
 }
 .kb-delete-btn:hover { background: rgba(217,47,58,.1); }
 .kb-delete-btn:focus { outline: 2px solid rgba(217,47,58,.35); outline-offset: 1px; }
+
+/* 2026-10-10: 系统保留的 KB（"notes"）—— 锁住删除/改名/方法变更，
+   视觉上用浅灰背景 + 锁图标给出"不可修改"的直观提示。 */
+.kb-row-protected { background: rgba(0,0,0,.025); }
+.kb-name-edit.kb-name-locked {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0,0,0,.04);
+  border: 1px solid transparent;
+  color: var(--text-secondary, #555);
+  cursor: not-allowed;
+  font-weight: 500;
+}
+.kb-lock {
+  display: inline-block;
+  margin-right: 4px;
+  filter: grayscale(0.4);
+  font-size: 0.95em;
+}
+.kb-locked-tag {
+  display: inline-block;
+  padding: 2px 6px;
+  background: rgba(0,0,0,.05);
+  border: 1px solid #e5e7eb;
+  color: var(--text-secondary, #666);
+  border-radius: 10px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.kb-table select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: rgba(0,0,0,.03);
+}

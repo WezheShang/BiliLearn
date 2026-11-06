@@ -1,5 +1,5 @@
 @echo off
-REM bililearn whisper server — manager menu
+REM bililearn whisper server - manager menu
 REM Four actions: status / log / stop / start.
 REM Double-click this file to open the menu. Pick 1-4 or press 0 to exit.
 REM
@@ -17,7 +17,15 @@ set "SCRIPT_DIR=%~dp0"
 set "VBS_PATH=%SCRIPT_DIR%start_whisper_server_silent.vbs"
 set "HEALTH_URL=http://127.0.0.1:7860/health"
 set "TASK_NAME_SYSTEM=bililearn-whisper-server-autostart-system"
-set "LOG_GUESS=%SCRIPT_DIR%whisper_server.log"
+REM 2026-11-06: the log lives in logs\, one file per port
+REM (whisper_server.log for the default 7860, whisper_server_<port>.log
+REM for spare ports). Pick the newest one so the menu shows whatever
+REM the live instance is actually writing to.
+set "LOG_DIR=%SCRIPT_DIR%logs"
+set "LOG_GUESS="
+for /f "delims=" %%f in ('dir /b /o-d "%LOG_DIR%\whisper_server*.log" 2^>nul') do if not defined LOG_GUESS set "LOG_GUEST=%LOG_DIR%\%%f"
+if defined LOG_GUEST set "LOG_GUESS=%LOG_GUEST%"
+set "LOG_GUEST="
 
 :menu
 cls
@@ -54,7 +62,7 @@ powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%HEALTH_URL%'
 echo.
 echo --- Scheduled task '%TASK_NAME_SYSTEM%' ---
 schtasks /Query /TN "%TASK_NAME_SYSTEM%" /V /FO LIST 2>nul | findstr /R "^[ ]*Status: ^[ ]*Next Run Time: ^[ ]*Last Run Time: ^[ ]*Run As User:"
-if errorlevel 1 echo (task not registered. Run setup_whisper_autostart_system.ps1 -Action install)
+if errorlevel 1 echo [INFO] task not registered. Run setup_whisper_autostart_system.ps1 -Action install
 echo.
 pause
 goto :menu

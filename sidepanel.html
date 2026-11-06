@@ -93,6 +93,9 @@
           打开一条带字幕的 B 站视频，点击页面右上角“AI 总结”。
         </div>
         <div class="welcome-hint" id="welcomeHint" style="display: none"></div>
+        <button id="reloadPanelBtn" class="welcome-reload-btn" type="button">
+          重新加载面板
+        </button>
       </div>
 
       <!-- LOADING STATE -->
@@ -115,6 +118,15 @@
             暂时无法处理这个视频。
           </div>
           <button class="error-btn" id="errorBtn">重新尝试</button>
+          <!-- 2026-10-27: 学堂在线官方字幕读不出时，这里给第二条路
+               （本地 Whisper 转录）。默认隐藏，只有需要时才显示。 -->
+          <button
+            class="error-btn error-btn--secondary"
+            id="errorBtnSecondary"
+            style="display: none"
+          >
+            再试一次官方字幕
+          </button>
         </div>
       </div>
 
@@ -424,9 +436,9 @@
         </label>
         <label class="kb-field">构建方法
           <select id="kbNewMethod">
+            <option value="raw" selected>raw · 只记录原始数据，不构建知识库</option>
             <option value="karpathy">karpathy · LLM wiki（索引 + 主题地图）</option>
             <option value="nvwa">nvwa · 心智模型（思维框架 + 案例集）</option>
-            <option value="raw">raw · 只记录原始数据，不构建知识库</option>
           </select>
         </label>
         <label class="kb-field">默认讲者名（写入字幕 frontmatter 的 speaker）

@@ -23,12 +23,27 @@
 // proceeds normally. If this file is somehow evaluated twice in the SAME
 // world, the throw aborts the duplicate before it can register a second
 // set of listeners/buttons/timers.
-if (globalThis.__BILILEARN_CONTENT_LOADED__) {
+//
+// 2026-10-27: 改成**按版本**判断。同一个版本重复注入 → 照旧抛错跳过；
+// 但版本变了（扩展更新后后台重新注入）→ 允许装新的，并且先把上一版
+// 注册的消息监听器摘掉，避免两个监听器同时回话（Chrome 会报
+// "sendResponse 被调用多次"）。
+const BILILEARN_CONTENT_VERSION = 4;
+if (globalThis.__BILILEARN_CONTENT_VERSION__ === BILILEARN_CONTENT_VERSION) {
   throw new Error(
     "[bililearn] content.js already loaded in this world — skipping duplicate injection",
   );
 }
-globalThis.__BILILEARN_CONTENT_LOADED__ = true;
+globalThis.__BILILEARN_CONTENT_VERSION__ = BILILEARN_CONTENT_VERSION;
+if (globalThis.__BILILEARN_CONTENT_LISTENER__) {
+  try {
+    chrome.runtime.onMessage.removeListener(
+      globalThis.__BILILEARN_CONTENT_LISTENER__,
+    );
+  } catch (_e) {
+    /* 摘不掉就算了（旧监听器在新上下文里通常已经失效） */
+  }
+}
 
 const DEBUG = false;
 const debugLog = (...args) => {
@@ -50,6 +65,493 @@ let bililearnButtonObserver = null;
 let bililearnButtonReconcileTimer = null;
 let bililearnButtonResizeListenerAdded = false;
 const BILILEARN_BUTTON_POSITION_KEY = "bililearnButtonPosition";
+
+// 2026-10-16 anti-hang budget for the body observer. See setupButtonObserver.
+// A watch page legitimately mutates constantly; the point is to catch the
+// runaway case, not to throttle normal Bilibili rendering.
+const OBSERVER_MAX_CALLS_PER_SEC = 60;
+const OBSERVER_COOLDOWN_MS = 2000;
+const observerStats = { calls: 0, trips: 0, window: [], pausedUntil: 0 };
+// Exposed for DevTools inspection: __bililearnStats in the page console.
+if (typeof window !== "undefined") {
+  window.__bililearnStats = observerStats;
+}
+let legacyButtonPositionCleaned = false;
+
+// ============================================================
+// XUETANGX (学堂在线) STATE BRIDGE
+// ============================================================
+//
+// 学堂在线的学习接口全部要求登录态，从扩展的 service worker 直接调会被拒
+// （"user is not login" / "身份认证信息未提供。"）。所以我们不在扩展里复刻
+// 这套鉴权，而是搭页面自己的便车：
+//
+//   主世界钩子 xuetangx-hook.js（document_start 注入，world=MAIN）
+//     → 拦截页面自己的 fetch / XHR，记下 leaf_info / s_t_c / s_t_g_p /
+//       playurl / menu 的响应
+//     → 通过 window.postMessage 把状态推给隔离世界
+//
+//   本文件（隔离世界）
+//     → 收到状态后缓存起来，并转告 background（换小节要通知侧边栏刷新）
+//
+// 隔离世界读不到主世界的 JS 对象，postMessage 的数据是结构化克隆的，
+// 所以两个世界都能读。
+
+const XUETANGX_HOST_RE = /(^|\.)xuetangx\.com$/i;
+const XUETANGX_CHANNEL = "bililearn-xuetangx";
+// 2026-10-27: 我们期望的主世界钩子版本。扩展刷新不会更新已打开页面里的
+// 钩子 JS —— 页面里的旧钩子会一直活着并发状态。后台发现版本对不上会重新
+// 注入；这里负责把"更旧版本钩子发来的状态"丢掉，避免新旧混在一起。
+const XUETANGX_HOOK_VERSION = 7;
+let xtState = null;
+let xtStateReceivedAt = 0;
+let xtNotifiedVideoId = "";
+// 2026-10-27: 页面里同时活着新旧两个钩子的标记。旧钩子会跟新版一起打接口
+// （请求量翻倍 → 被服务端按"刷接口"限流，2026-10-27 实测第一发 200、之后全 403）。
+// 发现了就要明确告诉用户刷新页面，而不是让用户自己撞墙。
+let xtStaleHookSeen = false;
+
+function isXuetangxPage() {
+  return XUETANGX_HOST_RE.test(window.location.hostname);
+}
+
+/**
+ * 2026-11-05: 当前是不是 B 站视频页。
+ * 官方字幕必须走页面主世界取（带登录态），只在 B 站页面上有意义。
+ */
+const BILIBILI_VIDEO_HOST_RE = /(^|\.)bilibili\.com$/i;
+function isBilibiliVideoPage() {
+  if (!BILIBILI_VIDEO_HOST_RE.test(window.location.hostname)) return false;
+  return /\/video\//i.test(window.location.pathname);
+}
+
+/** 学堂在线的小节标识：优先 leaf_id，没有就用 ccid（视频本体标识）。 */
+function xuetangxVideoId(state) {
+  const s = state || xtState || {};
+  const cid = String(s.cid || "").trim();
+  const leaf = String(s.leafId || s.ccid || "").trim();
+  if (!cid && !leaf) return "";
+  return `xt-${cid || "0"}-${leaf || "0"}`;
+}
+
+function handleXuetangxStateMessage(event) {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.source !== XUETANGX_CHANNEL || data.type !== "state") return;
+  const next = data.payload || null;
+  if (!next) return;
+  // 旧钩子发来的状态一律忽略（页面里可能同时活着新旧两个钩子）
+  const incoming = Number(next.hookVersion || 0);
+  const current = Number(xtState?.hookVersion || 0);
+  if (incoming < XUETANGX_HOOK_VERSION) {
+    // 页面里还跑着旧版钩子 —— 记下来，后面提示用户刷新页面。
+    xtStaleHookSeen = true;
+  }
+  if (incoming < current) return;
+  if (incoming < XUETANGX_HOOK_VERSION && current >= XUETANGX_HOOK_VERSION) return;
+  xtState = next;
+  xtStateReceivedAt = Date.now();
+
+  // 只在"换小节"时通知 background，避免接口每次返回都刷一次侧边栏。
+  const videoId = xuetangxVideoId(xtState);
+  if (videoId && videoId !== xtNotifiedVideoId) {
+    xtNotifiedVideoId = videoId;
+    try {
+      const p = chrome.runtime.sendMessage({
+        action: "xuetangxStateChanged",
+        state: xtState,
+      });
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch (_e) {}
+  }
+}
+
+/**
+ * 向主世界钩子索要一次当前状态（钩子可能晚于页面加载才被注入）。
+ * force = 用户点了"重试" → 让钩子把探针矩阵重新跑一遍。
+ */
+function requestXuetangxState(force) {
+  try {
+    window.postMessage(
+      { source: XUETANGX_CHANNEL, type: "request", force: !!force },
+      "*",
+    );
+  } catch (_e) {}
+}
+
+/**
+ * 2026-10-27: 从页面 DOM 里找字幕文件地址。
+ *
+ * 播放器拿到 s_t_g_p 返回的字幕列表后，会把它挂进 <track>（或者以
+ * 带字幕特征的文件名出现）。那是"页面此刻真在用的字幕"，比接口可靠 ——
+ * 任何接口时序问题都不会影响它。
+ */
+function findXuetangxSubtitleUrl() {
+  try {
+    const tracks = document.querySelectorAll("track");
+    for (const track of tracks) {
+      const src = track.getAttribute("src") || track.src || "";
+      if (src) return src;
+    }
+    // 有些播放器把字幕放在别的元素上（<source>、带 src 的 script/link）
+    const nodes = document.querySelectorAll(
+      'source[src], a[href], link[href], [data-src], [data-url]',
+    );
+    for (const node of nodes) {
+      const src =
+        node.getAttribute("src") ||
+        node.getAttribute("href") ||
+        node.getAttribute("data-src") ||
+        node.getAttribute("data-url") ||
+        "";
+      if (/subtitle|caption|\.srt(\?|$)|\.vtt(\?|$)|\.json(\?|$)/i.test(src)) {
+        return src;
+      }
+    }
+  } catch (_e) {}
+  return "";
+}
+
+/** 读 csrftoken cookie（隔离世界读得到普通 cookie）。 */
+function readCsrftoken() {
+  try {
+    const hit = document.cookie
+      .split(";")
+      .map((s) => s.trim())
+      .find((s) => s.startsWith("csrftoken="));
+    return hit ? decodeURIComponent(hit.slice("csrftoken=".length)) : "";
+  } catch (_e) {
+    return "";
+  }
+}
+
+/**
+ * 2026-10-27: **完全独立**的字幕地址获取路径。
+ *
+ * 隔离世界和页面同源（origin 就是 www.xuetangx.com），所以 fetch 学堂在线的
+ * 接口会带上这个页面的登录 cookie —— 跟主世界钩子能拿到的是同一份权限。
+ * 区别是：这条路径**不依赖钩子**。钩子因为任何原因没跑起来（页面在扩展
+ * 装好之前就打开了 / 钩子版本旧了 / MAIN world 注入被拒），这条路径照样
+ * 能把字幕地址拿到。
+ *
+ * 前提是要有 ccid（视频本体标识），它同样可以自己拉 leaf_info 拿。
+ */
+async function fetchXuetangxSubtitleDirectly(state) {
+  try {
+    let ccid = String(state?.ccid || "").trim();
+    const headers = {
+      "Content-Type": "application/json",
+      xtbz: "xt",
+      "app-name": "xtzx",
+      "terminal-type": "web",
+      "x-client": "web",
+    };
+    const csrf = readCsrftoken();
+    if (csrf) headers["X-CSRFToken"] = csrf;
+
+    // 没有 ccid → 先用 leaf_info 换
+    if (!ccid && state?.cid && state?.leafId) {
+      const signs = [state.sign || "", ...(state.signCandidates || [])].filter(
+        (v, i, arr) => arr.indexOf(v) === i,
+      );
+      for (const sign of signs) {
+        const suffix = sign ? `?sign=${encodeURIComponent(sign)}` : "";
+        const res = await fetch(
+          `/api/v1/lms/learn/leaf_info/${state.cid}/${state.leafId}/${suffix}`,
+          { method: "GET", credentials: "include", headers, cache: "no-store" },
+        );
+        if (!res.ok) continue;
+        const json = await res.json();
+        const media = json?.data?.content_info?.media;
+        if (media?.ccid) {
+          ccid = String(media.ccid);
+          break;
+        }
+      }
+    }
+    if (!ccid) return "";
+
+    // 拿字幕文件地址。线上 s_t_g_p({c_d: ccid}) 会回 data:{}（空对象），
+    // 说明主键/参数没对上 —— 这里把几种常见姿势都试一遍，跟主世界钩子
+    // 里的"探针矩阵"是同一套思路，只是少一些变体（这条是兜底路径，
+    // 正常情况下钩子已经拿到了）。
+    const ids = [ccid, String(state?.leafId || "").trim()].filter(Boolean);
+    const bodies = [];
+    for (const id of ids) bodies.push({ c_d: id });
+    bodies.push({ c_d: ccid, d_l: 0 });
+    bodies.push({ c_d: ccid, d_l: 1 });
+    bodies.push({ ccid });
+
+    for (const body of bodies) {
+      const res = await fetch("/api/v1/lms/service/s_t_g_p/", {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const list = Array.isArray(json?.data) ? json.data : [];
+      if (!list.length) continue;
+      const pick =
+        list.find((it) => Number(it?.lang) === 0) ||
+        list.find((it) => Number(it?.lang) === 1) ||
+        list[0];
+      const url = pick?.data || pick?.url || pick?.src;
+      if (typeof url === "string" && /^https?:\/\//i.test(url)) return url;
+    }
+
+    // 另一个字幕端点（前端留着但没用的那个）
+    for (const id of ids) {
+      const res = await fetch(`/api/v1/lms/learn/video/subtitle/${id}/`, {
+        method: "GET",
+        credentials: "include",
+        headers,
+        cache: "no-store",
+      });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const list = Array.isArray(json?.data) ? json.data : [];
+      if (!list.length) continue;
+      const pick =
+        list.find((it) => Number(it?.lang) === 0) ||
+        list.find((it) => Number(it?.lang) === 1) ||
+        list[0];
+      const url = pick?.data || pick?.url || pick?.src;
+      if (typeof url === "string" && /^https?:\/\//i.test(url)) return url;
+    }
+  } catch (_e) {
+    /* 拿不到就当没有 */
+  }
+  return "";
+}
+
+/**
+ * 2026-10-27: **同源直取讲稿**。
+ *
+ * 钩子那边的主路径已经能拿到讲稿了（leaf_lecture_note），这条是它整个
+ * 挂掉时的独立兜底 —— 隔离世界和页面同源，fetch 会带上这个页面的登录
+ * cookie，权限跟主世界一样。
+ *
+ * 跟字幕文件那条路（fetchXuetangxSubtitleDirectly）相比，这条更靠谱：
+ * 纯 GET、不需要 CSRF、一个请求就返回整篇带时间戳的文字稿。
+ */
+async function fetchXuetangxLectureNoteDirectly(state) {
+  const leafId = String(state?.leafId || "").trim();
+  if (!leafId) return null;
+  try {
+    const res = await fetch(
+      `/c27/online_courseware/leaf_lecture_note/${encodeURIComponent(leafId)}/`,
+      {
+        method: "GET",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          xtbz: "xt",
+          "app-name": "xtzx",
+          "terminal-type": "web",
+          "x-client": "web",
+        },
+        cache: "no-store",
+      },
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    const list = Array.isArray(json?.data) ? json.data : [];
+    const rows = [];
+    for (const item of list) {
+      const content = String(
+        item?.formalParagraphText ?? item?.paragraphText ?? item?.text ?? "",
+      ).trim();
+      if (!content) continue;
+      // 接口给的是毫秒
+      const start = Math.max(0, Number(item?.startTime ?? 0) / 1000);
+      let end = Math.max(0, Number(item?.endTime ?? 0) / 1000);
+      if (!end || end < start) end = start + 3;
+      rows.push({ start, end, content });
+    }
+    if (!rows.length) return null;
+    return { rows };
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * 交出状态前的最后一道：钩子没给字幕地址时，隔离世界自己同源拉一次。
+ */
+async function respondXuetangxState(sendResponse, state) {
+  let finalState = state;
+  // 讲稿正文已经在状态里（subtitleBody）→ 字幕已经有了，别再去找字幕文件。
+  if (finalState && !finalState.subtitleUrl && !finalState.subtitleBody) {
+    const fromDom = findXuetangxSubtitleUrl();
+    if (fromDom) {
+      finalState = { ...finalState, subtitleUrl: fromDom };
+    } else {
+      // 先试讲稿（GET，最容易成功），再退回字幕文件地址那条老路。
+      const note = await fetchXuetangxLectureNoteDirectly(finalState);
+      if (note) {
+        finalState = {
+          ...finalState,
+          hasSubtitle: true,
+          hasLectureNote: true,
+          lectureNoteSource: "leaf_lecture_note",
+          subtitleSource: "lecture-note",
+          subtitleLang: finalState.subtitleLang || "zh",
+          subtitleBody: JSON.stringify({ subtitle_list: note.rows }),
+        };
+      } else {
+        const direct = await fetchXuetangxSubtitleDirectly(finalState);
+        if (direct) finalState = { ...finalState, subtitleUrl: direct };
+      }
+    }
+  }
+  if (!finalState) {
+    sendResponse({ success: false, state: null, videoId: "" });
+    return;
+  }
+  sendResponse({
+    success: true,
+    state: finalState,
+    videoId: finalState.videoId || "",
+  });
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("message", handleXuetangxStateMessage);
+}
+
+/**
+ * 学堂在线播放器的容器。笔记按钮按容器矩形定位，所以要找一个能代表
+ * "播放器画面区域"的元素：<video class="xt_video_player"> 往上一层的
+ * 有尺寸的包装元素。
+ */
+function findXuetangxPlayerContainer() {
+  const video = document.querySelector("video.xt_video_player, video");
+  if (!video) return null;
+  let node = video.parentElement;
+  for (let i = 0; i < 4 && node; i++) {
+    const rect = node.getBoundingClientRect();
+    if (rect.width > 240 && rect.height > 120) return node;
+    node = node.parentElement;
+  }
+  return video.parentElement || video;
+}
+
+/** 学堂在线的"课程 / 授课教师" —— DOM 只是兜底，接口捕获才是权威。 */
+function pickXuetangxDomMeta() {
+  const pick = (selectors) => {
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      const text = (el?.textContent || "").trim();
+      if (text) return text;
+    }
+    return "";
+  };
+  return {
+    courseTitle: pick([
+      "[class*='course-name']",
+      "[class*='course_title']",
+      "[class*='courseInfo'] h1",
+      "[class*='courseInfo'] h2",
+      "h1",
+      "h2",
+    ]),
+    teacher: pick([
+      "[class*='teacher_name']",
+      "[class*='teacher-name']",
+      "[class*='lecturer']",
+      "[class*='teacher']",
+    ]),
+  };
+}
+
+/**
+ * 学堂在线的视频信息。标题优先用接口捕获的小节名（leaf_info 的 name），
+ * DOM 兜底 —— 因为学堂在线是 Vue SPA，标题节点在移动/桌面布局下类名不同，
+ * 纯 DOM 抓取很脆。
+ */
+function extractXuetangxVideoInfo() {
+  const state = xtState || {};
+  const meta = pickXuetangxDomMeta();
+  const video = document.querySelector("video");
+  const docTitle = (document.title || "").split(" - ")[0].trim();
+
+  const title =
+    state.leafTitle || meta.courseTitle || docTitle || "学堂在线课程";
+  const channelName = state.courseTitle || meta.teacher || "";
+  const description = state.leafTitle
+    ? `${state.courseTitle || meta.courseTitle || ""}｜${state.leafTitle}`.replace(
+        /^｜/,
+        "",
+      )
+    : meta.courseTitle || "";
+
+  return {
+    title,
+    channelName,
+    description,
+    duration: Number(video?.duration) || Number(state.duration) || 0,
+    pubdate: "",
+    // 学堂在线没有 BV 号，用 cid + 小节 id 拼一个稳定 id
+    videoId: xuetangxVideoId(state),
+    source: "xuetangx",
+    leafId: state.leafId || "",
+    ccid: state.ccid || "",
+    hasSubtitle: !!state.hasSubtitle,
+    subtitleUrl: state.subtitleUrl || "",
+    subtitleLang: state.subtitleLang || "",
+  };
+}
+
+/**
+ * 在学堂在线页面注入 "AI 总结" 按钮。
+ * 优先放在 "加入学习" 按钮旁边 —— 那是课程信息区，位置稳定、语义正确；
+ * 找不到就退回到播放器容器。
+ */
+function injectXuetangxButton() {
+  const existing = document.getElementById("ytd-bililearn-button");
+  const joinBtn = document.querySelector(".join-btn");
+  const player = findXuetangxPlayerContainer();
+
+  let host = null;
+  let anchor = null;
+  if (joinBtn && joinBtn.parentElement) {
+    host = joinBtn.parentElement;
+    anchor = joinBtn;
+  } else if (player && player.parentElement) {
+    host = player.parentElement;
+    anchor = player;
+  }
+  if (!host) {
+    debugLog("[dk-bililearn Content] xuetangx: no anchor for button yet");
+    return false;
+  }
+
+  let button = existing;
+  if (!button) {
+    button = createBililearnButton();
+    button.id = "ytd-bililearn-button";
+    // 复用 B 站那套按钮工厂，但这里是"插进页面流"而不是"绝对定位浮层"
+    button.style.position = "static";
+    button.style.marginLeft = "10px";
+    button.style.height = "34px";
+    button.style.padding = "0 16px";
+    button.style.boxShadow = "none";
+  }
+
+  if (button.parentElement !== host) {
+    if (anchor && anchor.parentElement === host) {
+      anchor.insertAdjacentElement("afterend", button);
+    } else {
+      host.appendChild(button);
+    }
+  }
+
+  ytdBililearnButton = button;
+  debugLog("[dk-bililearn Content] xuetangx button injected");
+  return true;
+}
 
 // ============================================================
 // INITIALIZATION
@@ -76,6 +578,12 @@ function init() {
   injectBililearnButton();
   tryInjectNoteButton();
 
+  // 学堂在线：向主世界钩子要一次当前小节状态（钩子是 document_start 注入的，
+  // 但页面可能比扩展先加载好，这时再问一次能补上状态）。
+  if (isXuetangxPage()) {
+    requestXuetangxState();
+  }
+
   // Also set up an observer to handle Bilibili's dynamic content loading
   // (Bilibili is an SPA, so elements appear/disappear as you navigate)
   setupButtonObserver();
@@ -88,7 +596,8 @@ function init() {
  * after navigation, so a single immediate attempt can miss it.
  */
 function tryInjectNoteButton() {
-  if (!window.location.pathname.includes("/video/")) return;
+  const isXuetangx = isXuetangxPage();
+  if (!isXuetangx && !window.location.pathname.includes("/video/")) return;
 
   // Clear any existing retry so we don't stack timers
   if (ytdNoteButtonRetryTimer) {
@@ -101,9 +610,11 @@ function tryInjectNoteButton() {
 
   function attempt() {
     attempts++;
-    const playerContainer = document.querySelector(
-      ".bpx-player-container, .bilibili-player, #bilibili-player",
-    );
+    const playerContainer = isXuetangx
+      ? findXuetangxPlayerContainer()
+      : document.querySelector(
+          ".bpx-player-container, .bilibili-player, #bilibili-player",
+        );
 
     if (playerContainer) {
       injectNoteButton();
@@ -143,11 +654,160 @@ if (document.readyState === "loading") {
 // ============================================================
 
 /**
+ * 2026-11-05: B站官方字幕 —— 在**页面主世界**里取（main world hook）。
+ *
+ * 为什么必须在这里取：B站只对**登录用户**下发字幕列表。未登录时
+ * /x/player/wbi/v2 返回 `need_login_subtitle: true` + 空列表（实测：
+ * 无签名 / 旧版 / 正确 wbi 签名三种调用结果完全一样）。
+ *
+ * 而 service worker 里 `credentials: "include"` 的跨站请求属于第三方
+ * 上下文 —— 现在浏览器默认挡第三方 cookie，登录 cookie 送不出去 →
+ * 扩展拿不到字幕轨 → 面板误判成"这个视频没有字幕"，直接叫用户上
+ * Whisper。用户看到的现象就是"明明有字幕，却让我用 whisper；过一会儿
+ * 切来切去它自己出现了"（后来出现的是 whisper 转录后落盘的本地文件
+ * 命中了本地文件路径）。
+ *
+ * 为什么是"主世界"而不是"隔离世界里的 content.js 直接 fetch"：
+ * 隔离世界的 fetch 属于扩展上下文，B 站的 api.bilibili.com 对
+ * `Origin: chrome-extension://<id>` 根本不会回 CORS 允许头
+ * （实测只回 `Access-Control-Allow-Origin: https://www.bilibili.com`）。
+ * 主世界里 fetch 就是页面自己的 fetch：Origin 是 www.bilibili.com、
+ * Referer 是页面地址、cookie 是这一份登录态 —— B 站自己就是这么读的。
+ *
+ * 通道：主世界 hook（bilibili-subtitle-hook.js，manifest 里 world=MAIN）
+ * 监听 window.postMessage，用 fetch 取数后 postMessage 回来；隔离世界
+ * 这里只做中转。学堂在线的 xuetangx-hook.js 早就在用同一套模式。
+ *
+ * 返回形状与 background 的 fetchBilibiliOfficialSubtitle 一致。
+ */
+const BILIBILI_SUBTITLE_CHANNEL = "bililearn-bili-subtitle";
+const BILIBILI_SUBTITLE_TIMEOUT_MS = 6000;
+// 2026-11-05: 第一次请求用短超时做"钩子在不在"的探测。
+// 扩展刚更新/重载时，页面里已有的 MAIN world 钩子不会被重新注入
+// （manifest 的 content_scripts 只在页面加载时跑一次），第一发必然
+// 超时。background 收到 "hook_missing" 后会主动注入钩子再重试一次
+// （那时用长超时）。这样不用逼用户 F5 刷新页面。
+//
+// 探测周期不能太长：用户抱怨"判断一个视频有没有字幕要等 45 秒"。
+// 钩子在的话是**秒回**（实测 40ms 内），钩子不在才是超时 —— 所以
+// 1.5s 的探测足够区分两者，再长只是白白让用户等。
+const BILIBILI_SUBTITLE_PROBE_TIMEOUT_MS = 1500;
+let biliSubtitleSeq = 0;
+const biliSubtitlePending = new Map();
+
+// 主世界 hook 的回话（两条通道共用一个 listener）
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.source !== BILIBILI_SUBTITLE_CHANNEL || data.type !== "reply") return;
+  const pending = biliSubtitlePending.get(data.id);
+  if (!pending) return;
+  biliSubtitlePending.delete(data.id);
+  clearTimeout(pending.timer);
+  pending.resolve(data.payload || { ok: false, reason: "empty_reply", error: "页面没有回话。" });
+});
+
+/**
+ * 向页面主世界发一条请求，等它的回话。
+ * 超时按失败返回，绝不把调用方挂死。
+ */
+function requestBilibiliInPage(payload, timeoutMs = BILIBILI_SUBTITLE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    if (!payload || typeof payload !== "object") {
+      resolve({ ok: false, reason: "bad_request", error: "请求内容不合法。" });
+      return;
+    }
+    const id = `bili-${Date.now()}-${++biliSubtitleSeq}`;
+    const timer = setTimeout(() => {
+      biliSubtitlePending.delete(id);
+      resolve({ ok: false, reason: "timeout", error: "页面上下文取字幕超时。" });
+    }, timeoutMs);
+    biliSubtitlePending.set(id, { resolve, timer });
+    try {
+      window.postMessage({ source: BILIBILI_SUBTITLE_CHANNEL, type: "request", id, ...payload }, "*");
+    } catch (error) {
+      biliSubtitlePending.delete(id);
+      clearTimeout(timer);
+      resolve({ ok: false, reason: "post_failed", error: (error && error.message) || String(error) });
+    }
+  });
+}
+
+/**
+ * 取 B 站官方字幕轨列表（在页面主世界里发请求，带上登录态）。
+ * 返回 { success, tracks, needLogin } —— tracks 是字幕轨的元信息，
+ * 字幕文件本体由 background 下载（那边有 host 权限和 DNR Referer 规则）。
+ *
+ * timeoutMs 由调用方给：第一次用短超时探测钩子在不在（超时 → 报
+ * hook_missing，让 background 注入钩子后重试），第二次用长超时。
+ */
+async function fetchBilibiliSubtitleTracksInPage(bvid, cid, timeoutMs) {
+  if (!bvid || !cid) {
+    return { success: false, reason: "missing_ids", error: "缺少 bvid 或 cid", tracks: [] };
+  }
+  const reply = await requestBilibiliInPage(
+    { bvid, cid },
+    timeoutMs || BILIBILI_SUBTITLE_PROBE_TIMEOUT_MS,
+  );
+  if (!reply || !reply.ok) {
+    const reason = (reply && reply.reason) || "page_failed";
+    return {
+      success: false,
+      reason: reason === "timeout" ? "hook_missing" : reason,
+      error:
+        reason === "timeout"
+          ? "页面主世界钩子没有回话（扩展刚更新过，钩子需要重新注入）。"
+          : (reply && reply.error) || "页面上下文没有返回字幕列表。",
+      tracks: [],
+    };
+  }
+  const tracks = Array.isArray(reply.tracks) ? reply.tracks : [];
+  if (!tracks.length) {
+    return {
+      success: false,
+      reason: "no_tracks",
+      error: reply.needLogin
+        ? "B 站要求登录后才能下发字幕列表（need_login_subtitle=true）。"
+        : "B 站未返回任何字幕轨。",
+      needLogin: !!reply.needLogin,
+      tracks: [],
+    };
+  }
+  return { success: true, tracks, needLogin: !!reply.needLogin };
+}
+
+/**
+ * 在页面主世界里下载字幕文件本体（备用路径）。
+ * background 那边有 host 权限 + DNR Referer 规则，正常它自己就能下；
+ * 万一它失败（403 / 跨域被拦），走这里用页面的身份再试一次。
+ */
+async function fetchBilibiliSubtitleFileInPage(url) {
+  if (!url) {
+    return { success: false, reason: "missing_url", error: "缺少字幕文件地址。" };
+  }
+  const reply = await requestBilibiliInPage({ url });
+  if (!reply || !reply.ok) {
+    return {
+      success: false,
+      reason: (reply && reply.reason) || "page_failed",
+      error: (reply && reply.error) || "页面上下文没有返回字幕文件。",
+    };
+  }
+  if (!reply.body) {
+    return { success: false, reason: "empty_file", error: "字幕文件里没有正文。" };
+  }
+  return { success: true, body: reply.body };
+}
+
+/**
  * Listen for messages from the side panel or background script.
  * When they ask for video info, we read it from the page.
  * When they send key moments, we highlight them on the progress bar.
+ *
+ * 2026-10-27: 监听器挂到 globalThis 上 —— 后台重新注入新版 content.js 时
+ * 要能把上一版摘掉，否则两个监听器同时回话。
  */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+const bililearnContentListener = (message, sender, sendResponse) => {
   debugLog("[dk-bililearn Content] Received message:", message.action, message);
 
   if (message.action === "getVideoInfo") {
@@ -156,6 +816,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     debugLog("[dk-bililearn Content] Returning video info:", info);
     sendResponse(info);
     return false; // Synchronous response
+  }
+
+  if (message.action === "getXuetangxState") {
+    // 2026-10-26: 学堂在线 —— background 需要当前小节的 ccid / 字幕地址 /
+    // 视频直链。这些信息在主世界钩子里，这里做一次中转。
+    if (!isXuetangxPage()) {
+      sendResponse({ success: false, state: null });
+      return false;
+    }
+    const buildState = () => {
+      if (!xtState) return null;
+      return {
+        ...xtState,
+        // 视频直链优先用 DOM 里 <video src> 的当前值：页面上那个带
+        // auth_key 的地址才是"此刻能播"的那一个。
+        videoUrl:
+          document.querySelector("video")?.currentSrc ||
+          document.querySelector("video")?.src ||
+          xtState.videoUrl ||
+          "",
+        // 2026-10-27: 字幕地址的兜底 —— 播放器自己会把字幕做成 <track>
+        // （或带字幕特征的元素）挂在 DOM 上，那是页面"此刻真在用的"字幕，
+        // 比任何接口都可靠。钩子没抓到时用这个。
+        subtitleUrl: xtState.subtitleUrl || findXuetangxSubtitleUrl(),
+        videoId: xuetangxVideoId(xtState),
+        receivedAt: xtStateReceivedAt,
+        // 页面里还有旧版钩子在跑（会跟新版抢接口）
+        staleHookSeen: xtStaleHookSeen,
+      };
+    };
+    const existing = buildState();
+    // force = 用户点了"重试" → 让钩子把字幕探针矩阵重新跑一遍。
+    // 本地这份也先标成"未就绪"，否则 poll 会立刻把旧状态交出去，
+    // 白白错过钩子重跑的结果。
+    const force = !!message.force;
+    if (force && xtState) {
+      xtState = { ...xtState, resolved: false };
+    }
+    // 已经有就绪状态 → 立刻交出去。
+    //
+    // 2026-10-27: 这里**不判断版本**。内容脚本只管"把手上最新的状态交出来"，
+    // 至于这份状态是不是旧钩子留下的，交给 background 判断（它发现版本旧
+    // 会重新注入钩子并轮询）。内容脚本要是自己在这里等 12 秒，background
+    // 的轮询就被拖死了 —— 2026-10-27 踩过：旧钩子的状态"已 resolved"，
+    // 内容脚本立刻返回旧状态，background 拿到后直接用，新钩子虽然注入了
+    // 却没人等。
+    if (existing && existing.resolved && !force) {
+      respondXuetangxState(sendResponse, existing);
+      return true; // 异步响应（respond 里可能还要补一次同源请求）
+    }
+    // 还没有（补齐中的）状态：先向主世界钩子要一次，等它把当前小节补齐。
+    // 扩展刚装/刚更新时页面早就加载完了，钩子错过了第一次请求 —— 这时
+    // 钩子会主动调学堂在线的接口把数据补上（跑在页面上下文里，带页面
+    // 自己的登录 cookie），所以要等它跑完而不是立刻回空。
+    requestXuetangxState(force);
+    const started = Date.now();
+    // 2026-10-27: 探针矩阵现在带限速（每发之间隔 700ms + 403 重试 2.5s），
+    // 跑完要十几秒 —— 8 秒的等待上限会把还在跑的结果判成"超时"。
+    const deadline = started + 25000;
+    const poll = () => {
+      const state = buildState();
+      if (state && state.resolved) {
+        respondXuetangxState(sendResponse, state);
+        return;
+      }
+      // 一点状态都没有 → 多半是主世界钩子压根没跑（扩展刚更新/页面先开）。
+      // 早点回空，background 就能立刻补注入钩子再问一次。
+      if (!state && Date.now() - started > 1200) {
+        sendResponse({ success: false, state: null, videoId: "" });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        // 超时也把手上有的交出去 —— 至少 leafId/ccid 可用时还能走 Whisper
+        respondXuetangxState(sendResponse, state);
+        return;
+      }
+      setTimeout(poll, 150);
+    };
+    setTimeout(poll, 150);
+    return true; // 异步响应
   }
 
   if (message.action === "highlightMoments") {
@@ -225,11 +965,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Async response.
   }
 
+  if (message.action === "getBilibiliOfficialSubtitles") {
+    // 2026-11-05: B站官方字幕 —— 必须在**页面主世界**取（带登录态）。
+    // 隔离世界/SW 的跨站请求送不出登录 cookie，B 站会回
+    // need_login_subtitle=true + 空列表 → 面板误判成"没字幕"。
+    // 详见 fetchBilibiliSubtitleTracksInPage 上方的说明。
+    if (!isBilibiliVideoPage()) {
+      sendResponse({
+        success: false,
+        reason: "not_bilibili_page",
+        error: "当前页面不是 B 站视频页。",
+        tracks: [],
+      });
+      return false;
+    }
+    fetchBilibiliSubtitleTracksInPage(
+      message.bvid,
+      message.cid,
+      Number(message.timeoutMs) || undefined,
+    )
+      .then((payload) => sendResponse(payload))
+      .catch((err) =>
+        sendResponse({
+          success: false,
+          reason: "exception",
+          error: String(err?.message || err),
+          tracks: [],
+        }),
+      );
+    return true; // 异步响应
+  }
+
+  if (message.action === "getBilibiliSubtitleFile") {
+    // 字幕文件本体的备用下载路径（background 自己下失败时走这里）
+    fetchBilibiliSubtitleFileInPage(message.url)
+      .then((payload) => sendResponse(payload))
+      .catch((err) =>
+        sendResponse({
+          success: false,
+          reason: "exception",
+          error: String(err?.message || err),
+        }),
+      );
+    return true; // 异步响应
+  }
+
   // Unknown action - still send a response to prevent hanging
   debugLog("[dk-bililearn Content] Unknown action:", message.action);
   sendResponse({ success: false, error: "Unknown action" });
   return false;
-});
+};
+globalThis.__BILILEARN_CONTENT_LISTENER__ = bililearnContentListener;
+chrome.runtime.onMessage.addListener(bililearnContentListener);
 
 // ============================================================
 // BILILEARN BUTTON INJECTION
@@ -375,6 +1162,11 @@ function positionBililearnButton(bililearnButton, shareButton) {
  * during navigation and at responsive breakpoints.
  */
 function injectBililearnButton() {
+  // 学堂在线走自己的注入路径（页面结构完全不同）。
+  if (isXuetangxPage()) {
+    return injectXuetangxButton();
+  }
+
   const existingButtons = Array.from(
     document.querySelectorAll("#ytd-bililearn-button"),
   );
@@ -411,8 +1203,16 @@ function injectBililearnButton() {
   // We strip both the new lowercase key and the old UPPERCASE_WITH_UNDERSCORES
   // key from v1.1.7 — anything still in localStorage from either era is dead
   // weight after this code stops honoring drag coordinates.
-  localStorage.removeItem(BILILEARN_BUTTON_POSITION_KEY);
-  localStorage.removeItem("BILILEARN_BUTTON_POSITION_KEY");
+  //
+  // 2026-10-16: this used to run on EVERY reconcile — that is, on every
+  // observer batch. localStorage is disk-backed and synchronous, so a
+  // mutation-driven hot path was paying sync disk I/O dozens of times a
+  // second for a one-time migration. Now it runs exactly once.
+  if (!legacyButtonPositionCleaned) {
+    legacyButtonPositionCleaned = true;
+    localStorage.removeItem(BILILEARN_BUTTON_POSITION_KEY);
+    localStorage.removeItem("BILILEARN_BUTTON_POSITION_KEY");
+  }
 
   const shareButton = findShareButton(actionsContainer);
   if (!shareButton) return false;
@@ -453,14 +1253,77 @@ function setupBililearnButtonResizeListener() {
 }
 
 /**
+ * True when every mutation in this batch happened inside UI we injected
+ * ourselves. Our own writes (creating the note button, appending the
+ * bililearn button, reparenting into the fullscreen root) are childList
+ * mutations on a page we observe with `subtree: true` — so without this
+ * filter the observer reacts to its own output.
+ */
+function mutationsAreAllBililearnOwned(records) {
+  const OWNED = "#ytd-note-button, #ytd-bililearn-button, #bililearn-toast";
+  for (const record of records) {
+    const target = record && record.target;
+    if (!target || typeof target.closest !== "function") return false;
+    if (!target.closest(OWNED)) return false;
+  }
+  return records.length > 0;
+}
+
+/**
  * Sets up a MutationObserver to watch for Bilibili's dynamic content changes.
  * When the action buttons container appears (after navigation), we inject our button.
+ *
+ * 2026-10-16: this observer is a main-thread hang risk, so it has two brakes:
+ *
+ *  1. It ignores batches produced entirely by our own injected nodes, which
+ *     otherwise form a write -> observe -> write loop that never yields.
+ *  2. It counts its own callbacks. A watch page mutates constantly (player,
+ *     danmaku, comments), and if the injection path keeps writing, the callback
+ *     rate climbs without bound. Past the budget the observer disconnects
+ *     itself for a cooldown and reconnects after — the panel gets a stale
+ *     button for a moment instead of the tab becoming unresponsive.
  */
 function setupButtonObserver() {
   if (bililearnButtonObserver) return;
 
-  bililearnButtonObserver = new MutationObserver(() => {
+  bililearnButtonObserver = new MutationObserver((records) => {
+    observerStats.calls++;
+    const now = Date.now();
+    observerStats.window.push(now);
+    while (observerStats.window.length && now - observerStats.window[0] > 1000) {
+      observerStats.window.shift();
+    }
+
+    if (observerStats.window.length > OBSERVER_MAX_CALLS_PER_SEC) {
+      // Circuit breaker: stop observing rather than pin the renderer.
+      observerStats.trips++;
+      debugLog(
+        `[dk-bililearn Content] observer circuit breaker tripped (${observerStats.window.length} callbacks/s) — pausing 2s`,
+      );
+      try {
+        bililearnButtonObserver.disconnect();
+      } catch {}
+      observerStats.pausedUntil = now + OBSERVER_COOLDOWN_MS;
+      setTimeout(() => {
+        if (!bililearnButtonObserver) return;
+        if (Date.now() < observerStats.pausedUntil) return;
+        try {
+          observeBody();
+        } catch {}
+      }, OBSERVER_COOLDOWN_MS + 50);
+      return;
+    }
+
+    if (mutationsAreAllBililearnOwned(records)) return;
+
     // Check if we need to inject the buttons
+    if (isXuetangxPage()) {
+      scheduleBililearnButtonReconciliation();
+      if (!ytdNoteButton || !ytdNoteButton.isConnected) {
+        tryInjectNoteButton();
+      }
+      return;
+    }
     if (window.location.pathname.includes("/video/")) {
       scheduleBililearnButtonReconciliation();
       if (!ytdNoteButton || !ytdNoteButton.isConnected) {
@@ -469,6 +1332,11 @@ function setupButtonObserver() {
     }
   });
 
+  observeBody();
+}
+
+/** (Re)attach the observer to <body>. */
+function observeBody() {
   // Watch the entire body for changes (Bilibili rebuilds large chunks of the DOM)
   bililearnButtonObserver.observe(document.body, {
     childList: true,
@@ -487,19 +1355,27 @@ function setupButtonObserver() {
  */
 function injectNoteButton() {
   // Don't inject if we're not on a video page
-  if (!window.location.pathname.includes("/video/")) return;
+  const isXuetangx = isXuetangxPage();
+  if (!isXuetangx && !window.location.pathname.includes("/video/")) return;
 
   // Always use the live Bilibili player containing the active video. In native
   // fullscreen this element is inside document.fullscreenElement, so overlays
   // appended here remain visible above the video.
   const fullscreenRoot = document.fullscreenElement || document.webkitFullscreenElement;
   const scope = fullscreenRoot || document;
-  const playerCandidates = Array.from(
-    scope.querySelectorAll?.(
-      ".bpx-player-container, .bilibili-player, #bilibili-player",
-    ) || [],
-  );
-  if (scope.matches?.(".bpx-player-container, .bilibili-player, #bilibili-player")) {
+  // 学堂在线的播放器是 <video class="xt_video_player">，外面没有 B 站那种
+  // 容器 class，所以单独找它的包装元素（笔记按钮按容器矩形定位）。
+  const playerCandidates = isXuetangx
+    ? [findXuetangxPlayerContainer()].filter(Boolean)
+    : Array.from(
+        scope.querySelectorAll?.(
+          ".bpx-player-container, .bilibili-player, #bilibili-player",
+        ) || [],
+      );
+  if (
+    !isXuetangx &&
+    scope.matches?.(".bpx-player-container, .bilibili-player, #bilibili-player")
+  ) {
     playerCandidates.unshift(scope);
   }
   const playerContainer =
@@ -570,23 +1446,38 @@ function injectNoteButton() {
   ytdNoteButton = noteButton;
   ytdNotePlayerContainer = playerContainer;
 
-  // Show button when mouse enters or moves over the player.
-  // Hide after 2 seconds of idle or when the mouse leaves.
-  playerContainer.addEventListener("mouseenter", () => {
-    showNoteButton();
-    resetNoteButtonTimer();
-  });
+  // 2026-10-16: bind the hover listeners ONCE per player container.
+  //
+  // Bilibili's Vue re-renders regularly detach our floating button (it lives
+  // on document.body, not inside the player's virtual DOM), which sends us
+  // back through this creation path — including via the 120ms retry below and
+  // via the MutationObserver, which calls tryInjectNoteButton on every
+  // mutation batch while the button is missing. Before this guard every one of
+  // those passes added three MORE listeners to the same long-lived
+  // .bpx-player-container, with no upper bound: after N rebuilds every mousemove
+  // over the player ran N resetNoteButtonTimer() calls, and the renderer
+  // stopped responding ("1 个页面无响应") exactly while the video was playing.
+  if (playerContainer.dataset.bililearnNoteBound !== "1") {
+    playerContainer.dataset.bililearnNoteBound = "1";
 
-  playerContainer.addEventListener("mousemove", () => {
-    showNoteButton();
-    resetNoteButtonTimer();
-  });
+    // Show button when mouse enters or moves over the player.
+    // Hide after 2 seconds of idle or when the mouse leaves.
+    playerContainer.addEventListener("mouseenter", () => {
+      showNoteButton();
+      resetNoteButtonTimer();
+    });
 
-  playerContainer.addEventListener("mouseleave", () => {
-    clearTimeout(ytdNoteButtonTimer);
-    ytdNoteButtonTimer = null;
-    hideNoteButton();
-  });
+    playerContainer.addEventListener("mousemove", () => {
+      showNoteButton();
+      resetNoteButtonTimer();
+    });
+
+    playerContainer.addEventListener("mouseleave", () => {
+      clearTimeout(ytdNoteButtonTimer);
+      ytdNoteButtonTimer = null;
+      hideNoteButton();
+    });
+  }
 
   // Hover effect — lift slightly
   noteButton.addEventListener("mouseenter", () => {
@@ -847,6 +1738,10 @@ function extractVideoInfo() {
     window.location.hostname.endsWith(".youtube.com")
   ) {
     return extractYouTubeVideoInfo();
+  }
+  // 2026-10-26: 学堂在线 (xuetangx.com) —— 第三方课程平台。
+  if (isXuetangxPage()) {
+    return extractXuetangxVideoInfo();
   }
   // B站 (default branch — unchanged from the previous behaviour).
   // The video title is in an h1 element inside the #title container

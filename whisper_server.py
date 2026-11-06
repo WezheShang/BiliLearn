@@ -44,6 +44,118 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# HF cache bootstrap (2026-11-05)
+#
+# **MUST run before `from faster_whisper import WhisperModel`.**
+#
+# huggingface_hub captures `HF_HUB_CACHE` into `huggingface_hub.constants`
+# at *import time* — setting os.environ afterwards has no effect on where
+# snapshots are looked up / downloaded. So the cache pointer has to be in
+# place before the first import of faster_whisper (which pulls
+# huggingface_hub in transitively).
+#
+# Why this matters: this server may run as **SYSTEM** (the auto-start
+# path), and SYSTEM's HF cache
+# (C:\Windows\System32\config\systemprofile\.cache\huggingface) is EMPTY,
+# while the models the user actually downloaded live in the interactive
+# user's cache (C:\Users\<user>\.cache\huggingface\hub). Compounding it,
+# this machine **cannot reach huggingface.co directly** (curl direct =
+# 14.7s timeout; through the system proxy = 1.2s OK), so every lookup
+# became an online download that died with ConnectTimeout ->
+# LocalEntryNotFoundError -> HTTP 500.
+#
+# Fix: point HF at the cache that actually contains the models, before
+# anything imports huggingface_hub. Model *loading* then goes through an
+# explicit local-snapshot path (see `_resolve_model_reference`) so it is
+# fully offline.
+# ---------------------------------------------------------------------------
+import glob as _glob
+
+
+def _hf_search_roots():
+    """所有可能的 HuggingFace hub 缓存根，按"最可能有模型"排序。"""
+    roots = []
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    roots.append(os.environ.get("HF_HOME"))
+    roots.append(os.environ.get("HF_HUB_CACHE"))
+    # 交互式用户的缓存（SYSTEM 运行时 USERPROFILE 指向 systemprofile）
+    roots.append(os.path.join(home, ".cache", "huggingface", "hub"))
+    drive = os.environ.get("SystemDrive", "C:")
+    roots.append(
+        os.path.join(
+            drive + "\\", "Windows", "System32", "config", "systemprofile",
+            ".cache", "huggingface", "hub",
+        )
+    )
+    # 扫一遍所有用户 profile —— 比硬编码某个用户名更耐换机
+    for profile in sorted(_glob.glob(os.path.join(drive + "\\", "Users", "*"))):
+        candidate = os.path.join(profile, ".cache", "huggingface", "hub")
+        if os.path.isdir(candidate):
+            roots.append(candidate)
+    # 去重但保序
+    seen = set()
+    ordered = []
+    for r in roots:
+        if not r:
+            continue
+        key = os.path.normcase(os.path.abspath(r))
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(r)
+    return ordered
+
+
+def _root_has_models(root):
+    """这个 HF 缓存根里是否真的有**可离线加载**的 faster-whisper 模型。
+
+    判据必须和 `_find_local_model_snapshot` 一致：快照目录里要有
+    model.bin（CT2 权重本体）。只看 repo/snapshots 目录存在是不够的
+    —— 下载中断的缓存会留下空快照目录，把它当成"有模型"就会让
+    `_bootstrap_hf_cache` 指向一个残缺缓存，然后照样去联网下载。
+    """
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    for n in names:
+        if not n.startswith("models--Systran--faster-whisper-"):
+            continue
+        snapshots = os.path.join(root, n, "snapshots")
+        try:
+            entries = os.listdir(snapshots)
+        except OSError:
+            continue
+        for entry in entries:
+            if os.path.isfile(os.path.join(snapshots, entry, "model.bin")):
+                return True
+    return False
+
+
+def _bootstrap_hf_cache():
+    """把 HF_HOME / HF_HUB_CACHE 指向真的装得下模型的缓存根。
+
+    必须早于 faster_whisper 的 import 调用。
+    """
+    fallback = None
+    for root in _hf_search_roots():
+        if not os.path.isdir(root):
+            continue
+        if fallback is None:
+            fallback = root
+        if _root_has_models(root):
+            os.environ["HF_HOME"] = os.path.dirname(root.rstrip("/\\"))
+            os.environ["HF_HUB_CACHE"] = root
+            return root
+    if fallback is not None:
+        os.environ["HF_HUB_CACHE"] = fallback
+        return fallback
+    return None
+
+
+_bootstrap_hf_cache()
+
+# ---------------------------------------------------------------------------
 # Transparent dependency handling (2026-08-30 rework).
 #
 # bililearn never silently pip-installs into the user's Python. If
@@ -127,8 +239,24 @@ def _missing_deps():
         missing.append("yt-dlp")
     return missing
 
-HOST = "127.0.0.1"
-PORT = 7860
+HOST = os.environ.get("BILILEARN_WHISPER_HOST", "127.0.0.1")
+# 2026-11-05: 端口可由环境变量覆盖。
+#
+# 为什么需要：现役的 server 是**SYSTEM 账户**跑的（开机自启任务
+# bililearn-whisper-server-autostart-system），普通用户权限杀不掉
+# （taskkill 报 "Access is denied"）。用户改了代码之后，那个旧进程
+# 仍然在跑**旧代码**，于是：
+#   - 旧代码不认识本地模型解析 → 每次都去 huggingface.co 下载 →
+#     本机直连不通 → LocalEntryNotFoundError → 500
+#   - 旧代码的 /local-file 要全目录读 1200 多个文件头 → 3.1 秒
+#
+# 而 Windows 的 SO_REUSEADDR 允许两个进程绑同一个端口，两个 server
+# 抢 7860 会随机分发连接（"有时能转录、有时 Failed to fetch"）。
+#
+# 所以：让**用户权限**的实例跑在备用端口（默认 7861），扩展连它。
+# SYSTEM 那个旧进程就变成一个无害的僵尸 —— 用户随时可以用管理员
+# 权限重启它，把一切恢复成单实例。
+PORT = int(os.environ.get("BILILEARN_WHISPER_PORT", "7860"))
 DEFAULT_MODEL = "base"
 AVAILABLE_MODELS = [
     "tiny",
@@ -138,6 +266,115 @@ AVAILABLE_MODELS = [
     "large-v3",
     "turbo",
 ]
+
+# ---------------------------------------------------------------------------
+# 本地模型解析（2026-11-05）
+#
+# 事故：用户点 Whisper 转录 → server 回 500
+#   LocalEntryNotFoundError: Got: ConnectTimeout: [WinError 10060]
+#
+# 根因：faster-whisper 认模型名 "base" 时会去 HuggingFace Hub 在线拉
+# `Systran/faster-whisper-base`。这台机器**直连 huggingface.co 不通**
+# （实测 curl 直连 14.7s 超时；经系统代理 1.2s 通），于是 huggingface_hub
+# 抛 ConnectTimeout，最终包装成 LocalEntryNotFoundError。
+#
+# 雪上加霜的是：这个 server 可能以 **SYSTEM 账户**运行（开机自启那条
+# 路径），而 SYSTEM 的 HF 缓存
+# (C:\Windows\System32\config\systemprofile\.cache\huggingface) 是空的
+# —— 模型明明已经在**用户**的缓存里
+# (C:\Users\<user>\.cache\huggingface\hub\models--Systran--faster-whisper-*)
+# 却找不到，于是每次都去下载，每次都超时。
+#
+# 修法（两道）：
+#   1) 把 HF_HOME / HF_HUB_CACHE 指到"能找到的缓存"——优先用户缓存，
+#      找不到才用自己账户的。已下载的模型直接离线加载，零网络。
+#   2) 模型确实不在本地时，先试**本地快照目录**（snapshots/...），再
+#      退回在线下载；下载走系统代理（huggingface_hub 会读
+#      HTTPS_PROXY/requests 的 proxy 设置）。
+#
+# 目的：模型已下载时**绝不联网**（离线加载），从根上消除 ConnectTimeout。
+# ---------------------------------------------------------------------------
+
+# 用户缓存优先（SYSTEM 账户运行时也能找到用户已下好的模型）。
+_USER_HOME = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+_MODEL_SEARCH_ROOTS = _hf_search_roots()
+
+
+def _hf_repo_dir(model_name: str):
+    """模型名 → HuggingFace cache 里的 repo 目录名。"""
+    return "models--Systran--faster-whisper-%s" % model_name
+
+
+def _find_local_model_snapshot(model_name: str):
+    """在各个 HF 缓存根里找已经下载好的模型快照目录。
+
+    返回 Path 或 None。快照目录里必须有 model.bin —— 那是 CT2 权重本体，
+    没有它 faster-whisper 仍然会去网上拉。
+    """
+    repo_dir = _hf_repo_dir(model_name)
+    for root in _MODEL_SEARCH_ROOTS:
+        if not root:
+            continue
+        repo_path = os.path.join(root, repo_dir)
+        snapshots = os.path.join(repo_path, "snapshots")
+        if not os.path.isdir(snapshots):
+            continue
+        try:
+            entries = sorted(os.listdir(snapshots))
+        except OSError:
+            continue
+        for entry in entries:
+            snap = os.path.join(snapshots, entry)
+            if os.path.isfile(os.path.join(snap, "model.bin")):
+                return Path(snap)
+    return None
+
+
+def _point_hf_at_local_cache():
+    """把 HF_HOME / HF_HUB_CACHE 指到**真的装得下模型**的缓存根。
+
+    这样即使没走本地快照的捷径，huggingface_hub 也能在缓存里命中已
+    下载的文件，不会再去联网。
+
+    注意：这里**直接覆盖**而不是 setdefault —— 以 SYSTEM 账户运行时
+    进程里可能已经带着一个指向 systemprofile（空目录）的 HF_HOME，
+    setdefault 不会纠正它，那正是本次 500 的一个诱因。
+    """
+    root = _bootstrap_hf_cache()
+    if root is None:
+        LOG.warning("no HuggingFace cache directory found; model download may fail")
+        return None
+    if _root_has_models(root):
+        LOG.info("HF cache pointed at %s (contains models)", root)
+    else:
+        LOG.info("HF cache pointed at %s (no models found there)", root)
+    return root
+
+
+def _resolve_model_reference(name: str) -> str:
+    """把 "base" 解析成"本地快照路径"（如果本机已经有）。
+
+    找不到就原样返回模型名 —— 那时 faster-whisper 会走在线下载。
+    """
+    if not name or name in ("auto", "default"):
+        name = DEFAULT_MODEL
+    # 已经是本地目录（用户自建模型目录）→ 原样使用。
+    try:
+        if os.path.isdir(name):
+            LOG.info("model reference is an existing directory: %s", name)
+            return name
+    except OSError:
+        pass
+    snapshot = _find_local_model_snapshot(name)
+    if snapshot is not None:
+        LOG.info("model %s resolved to local snapshot: %s", name, snapshot)
+        return str(snapshot)
+    LOG.info(
+        "model %s not found in any local cache (%s); falling back to download",
+        name,
+        ", ".join(r for r in _MODEL_SEARCH_ROOTS if r),
+    )
+    return name
 
 # ---------------------------------------------------------------------------
 # /transcribe dedup — 2026-08-22
@@ -198,6 +435,105 @@ _YT_AUDIO_TTL_SEC = 60 * 60  # 1 hour
 # per-videoId so no need for a per-key lock — yt-dlp's
 # `outtmpl` overwrites our previous download deterministically.
 _YT_AUDIO_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# 字幕缓存目录扫描优化（2026-11-05）
+#
+# 用户报"没字幕的视频要等很久才提示"。实测（真实目录 1204 个文件）：
+#   /local-file → 3091ms   ← 用户等的其实就是这段
+#   /cache      →  633ms
+# 两者在扩展里是**串行**的 → 3.7s 白等。
+#
+# 定位到瓶颈：**不是目录遍历，是逐个读文件头**。
+#   os.walk 1204 个文件            →  22ms（几乎免费）
+#   读 1204 个文件的头 2KB         → ~3000ms（1204 次磁盘读）
+# Pass2 的 bvid grep 必须读每个文本文件的头（`# Source: BVxxx` /
+# `"bvid": "BVxxx"` 都在文件顶部），所以这就是那 3 秒。
+#
+# 两个优化：
+#   1) **文件头按 mtime 长期缓存**（_read_head_cached）—— 文件没改就
+#      复用，第二次起这 1204 次磁盘读全部归零。
+#   2) **目录清单每次重建**（只要 22ms）—— 不做 TTL 缓存。
+#      之前用 30s TTL 缓存清单，结果"刚转录完的新文件 30 秒内查不到"
+#      （探针 P6 抓到）—— 目录清单重建太便宜了，没理由缓存它。
+#      真正该缓存的是文件**内容**，而内容有 mtime 把关。
+# ---------------------------------------------------------------------------
+_head_cache_lock = threading.Lock()
+# Pass2 的 bvid grep 要读每个文本文件的头 —— 1200 多个文件就是 1200 多次
+# 磁盘读，缓存住头内容能把这部分开销降到 0（mtime 没变就复用）。
+_head_cache_store = {}
+_HEAD_CACHE_MAX = 5000
+
+
+def _read_head_cached(file_path):
+    """读文件头 2KB，带 mtime 缓存。返回 str 或 None。
+
+    mtime 变了就重读 —— 所以内容更新（比如刚转录完写入的文件）立刻可见，
+    不存在"缓存过期"的问题。
+    """
+    try:
+        stat = file_path.stat()
+    except OSError:
+        return None
+    key = str(file_path)
+    mtime = stat.st_mtime
+    with _head_cache_lock:
+        hit = _head_cache_store.get(key)
+        if hit and hit[0] == mtime:
+            return hit[1]
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(2048)
+    except OSError:
+        return None
+    with _head_cache_lock:
+        if len(_head_cache_store) > _HEAD_CACHE_MAX:
+            _head_cache_store.clear()
+        _head_cache_store[key] = (mtime, head)
+    return head
+
+
+def _cache_index(cache_path):
+    """返回 (文件名索引, 全量清单)。
+
+    **每次都重建** —— os.walk 只要 ~22ms，而缓存清单会导致新建文件
+    在 TTL 内查不到。真正贵的文件头读取由 _read_head_cached 负责缓存。
+    """
+    entries = []
+    try:
+        for root, _dirs, files in os.walk(cache_path):
+            for filename in files:
+                lower = filename.lower()
+                if lower.endswith(".json"):
+                    kind = "json"
+                elif lower.endswith((".txt", ".md", ".srt", ".lrc")):
+                    kind = "text"
+                else:
+                    continue
+                entries.append((Path(root) / filename, lower, kind))
+    except OSError:
+        entries = []
+    by_name = {}
+    for path, lower, kind in entries:
+        by_name.setdefault(lower, []).append(path)
+    return by_name, entries
+
+
+def invalidate_cache_index(cache_dir=None):
+    """清掉文件头缓存（写完字幕后调用）。
+
+    目录清单已经不缓存了（每次重建，~22ms），所以这里只需要清头缓存。
+    头缓存靠 mtime 自校验，写完新文件后 mtime 会变 → 自动失效；
+    但同路径覆写（同一文件改内容）时保险起见显式清一下。
+    """
+    with _head_cache_lock:
+        if cache_dir is None:
+            _head_cache_store.clear()
+            return
+        prefix = os.path.normcase(str(cache_dir))
+        for key in [k for k in _head_cache_store
+                    if os.path.normcase(k).startswith(prefix)]:
+            _head_cache_store.pop(key, None)
 
 
 def _yt_sweep_stale():
@@ -292,9 +628,16 @@ def _get_model(name: str):
         if _CURRENT_MODEL is not None and _CURRENT_MODEL_NAME == name:
             return _CURRENT_MODEL
         device, compute = _resolve_device()
-        LOG.info("loading model=%s device=%s compute=%s", name, device, compute)
+        # 2026-11-05: 优先加载本地已下载的模型快照（离线，零网络）。
+        # 本机直连 huggingface.co 不通，在线下载必然 ConnectTimeout →
+        # LocalEntryNotFoundError → 500。快照不在才回落到在线下载。
+        model_ref = _resolve_model_reference(name)
+        LOG.info(
+            "loading model=%s (ref=%s) device=%s compute=%s",
+            name, model_ref, device, compute,
+        )
         t0 = time.time()
-        m = WhisperModel(name, device=device, compute_type=compute)
+        m = WhisperModel(model_ref, device=device, compute_type=compute)
         LOG.info("model loaded in %.1fs", time.time() - t0)
         _CURRENT_MODEL = m
         _CURRENT_MODEL_NAME = name
@@ -1078,6 +1421,17 @@ def _kb_read_frontmatter(md_text: str) -> dict:
     return meta
 
 
+# 2026-10-10: 与 kb-shared.js PROTECTED_KB_NAMES 镜像。whisper_server.py 是
+# 文件系统的 source of truth —— 这里改完要把端口契约记在 commit message 里。
+PROTECTED_KBS = {"notes"}
+
+
+def _reject_if_protected(name: str, op: str) -> None:
+    """Raise ValueError when `name` is in PROTECTED_KBS. `op` 用于错误提示。"""
+    if name in PROTECTED_KBS:
+        raise ValueError(f"KB '{name}' is protected and cannot be {op}")
+
+
 def _kb_load_kbs(entry: Path) -> dict:
     """Build the /kb/list info dict for one first-level directory under root."""
     kb_json = entry / "kb.json"
@@ -1086,6 +1440,9 @@ def _kb_load_kbs(entry: Path) -> dict:
         "has_kb_json": kb_json.is_file(),
         "archived": False,
         "build_method": None,
+        # 2026-10-10: protected flag drives UI to hide delete/rename/method
+        # affordances for system-owned KBs (currently just "notes").
+        "protected": entry.name in PROTECTED_KBS,
         "video_count": len(list((entry / "videos").glob("*.md"))) if (entry / "videos").is_dir() else 0,
         "pending_count": len(list((entry / "queue" / "pending").glob("*.json")))
         if (entry / "queue" / "pending").is_dir() else 0,
@@ -1114,6 +1471,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        # PNA (Local Network Access): answer the actual request with the
+        # private-network permission too, not just the preflight.
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1224,6 +1584,20 @@ class Handler(BaseHTTPRequestHandler):
                 "device": _CURRENT_DEVICE,
                 "compute_type": _CURRENT_COMPUTE,
                 "available_models": AVAILABLE_MODELS,
+                # 2026-11-05: 本地模型解析诊断。
+                # server 可能是**旧代码**在跑（用户没重启），用户看到的
+                # 500 就是"旧代码 + 空缓存 + 联网被墙"三件套。这里把
+                # 解析结果直接暴露出来 —— 一眼就能看出跑的是不是新代码。
+                "model_resolution": {
+                    "hf_hub_cache": os.environ.get("HF_HUB_CACHE"),
+                    "hf_home": os.environ.get("HF_HOME"),
+                    "search_roots": [r for r in _MODEL_SEARCH_ROOTS if r],
+                    "local_models": {
+                        name: (str(_find_local_model_snapshot(name))
+                               if _find_local_model_snapshot(name) else None)
+                        for name in AVAILABLE_MODELS
+                    },
+                },
             })
             return
         if self.path == "/models":
@@ -1284,6 +1658,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("root and name are required")
                 if "/" in name or "\\" in name:
                     raise ValueError(f"bad KB name: {name}")
+                # 2026-10-10: protected name → reserve for ensure_notes; refuse here.
+                _reject_if_protected(name, "created manually")
                 if method not in ("karpathy", "nvwa", "raw"):
                     raise ValueError(f"bad build_method: {method}")
                 kb_dir = _kb_realpath_under_root(str(Path(root) / name), root)
@@ -1334,6 +1710,17 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 path = _kb_realpath_under_root(body["path"], body["root"])
+                # 2026-10-10: protected KB 的顶层目录不允许删，但 protected 内部的
+                # 单文件（如过期笔记文件）应该能删——这是 notes mirror 必需的。
+                # 判断标准: path 是 protected KB 一级子目录就拒，否则放行。
+                root_real = Path(body["root"]).resolve()
+                try:
+                    rel = path.relative_to(root_real)
+                    first_component = rel.parts[0] if rel.parts else ""
+                except ValueError:
+                    first_component = ""
+                if first_component in PROTECTED_KBS and rel == Path(first_component):
+                    raise ValueError(f"KB '{first_component}' is protected and cannot be deleted")
                 if body.get("recursive"):
                     shutil.rmtree(path)
                 else:
@@ -1349,6 +1736,13 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 src = _kb_realpath_under_root(body["from"], body["root"])
                 dst = _kb_realpath_under_root(body["to"], body["root"])
+                # 2026-10-10: protected KB 不能改名 / 挪走。比较 dst 第一层组件。
+                root_real = Path(body["root"]).resolve()
+                try:
+                    dst_first = Path(dst).relative_to(root_real).parts[0] if dst != root_real else ""
+                except ValueError:
+                    dst_first = ""
+                _reject_if_protected(dst_first, "renamed/moved into")
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(src), str(dst))
                 self._send_json(HTTPStatus.OK, {"ok": True})
@@ -1401,6 +1795,55 @@ class Handler(BaseHTTPRequestHandler):
                 return
             picked = completed.stdout.strip()
             self._send_json(HTTPStatus.OK, {"path": (picked.replace("\\", "/") or None) if picked else None})
+            return
+        if self.path == "/kb/ensure_notes":
+            # 2026-10-10: bootstrap the system-owned "notes" KB on demand from
+            # background / options.js. Idempotent — if it already exists under
+            # `root`, just return the existing dir.  build_method fixed at
+            # karpathy (per user spec). The .md files under videos/ are written
+            # by background.js saveNote / saveAskAiNote hooks; this endpoint
+            # only creates the skeleton.
+            try:
+                body = self._read_json()
+                root = (body.get("root") or "").strip()
+                if not root:
+                    raise ValueError("root is required")
+                root_dir = Path(root)
+                if not root_dir.is_dir():
+                    raise ValueError(f"root does not exist: {root}")
+                kb_dir = root_dir / "notes"
+                existed = kb_dir.is_dir()
+                if not existed:
+                    kb_dir.mkdir()
+                    (kb_dir / "videos").mkdir()
+                    for sub in ("queue/pending", "queue/done", "queue/failed"):
+                        (kb_dir / sub).mkdir(parents=True)
+                    (kb_dir / "wiki" / "moc").mkdir(parents=True)
+                    (kb_dir / "wiki" / "_meta").mkdir(parents=True)
+                    (kb_dir / "wiki" / "index.md").write_text(
+                        "# notes · 索引\n\n由 bililearn 自动创建；本地笔记 KB。\n",
+                        encoding="utf-8",
+                    )
+                    from datetime import datetime
+                    (kb_dir / "kb.json").write_text(json.dumps({
+                        "name": "notes",
+                        "build_method": "karpathy",
+                        "default_speaker": "",
+                        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                        "archived": False,
+                        "version": 1,
+                        "protected": True,
+                    }, ensure_ascii=False, indent=2), encoding="utf-8")
+                    (kb_dir / "README.md").write_text(
+                        "# notes\n\nbililearn 本地笔记 KB。用户保存到「笔记」tab 的内容会被 mirror 到这里，作为 Ask AI 的 KB 上下文候选。构建方法：karpathy（LLM 增量更新）。\n",
+                        encoding="utf-8",
+                    )
+                self._send_json(HTTPStatus.OK, {"dir": str(kb_dir), "existed": existed})
+            except (ValueError, KeyError) as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("kb ensure_notes failed")
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
         if self.path == "/cache":
             try:
@@ -1683,6 +2126,9 @@ class Handler(BaseHTTPRequestHandler):
         }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(_json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 2026-11-05: 写完要让目录清单 / 文件头缓存失效 —— 否则下一次
+        # 查询还会用旧清单（30s TTL 内看不到刚写的文件）。
+        invalidate_cache_index(str(cache_path.parent))
         LOG.info(
             "server-side cache write: %s (%d segments)",
             cache_path.name,
@@ -1800,17 +2246,19 @@ class Handler(BaseHTTPRequestHandler):
         Reads only file heads (bililearn docs start with bvid/cid), so
         scanning even a few hundred cache files stays cheap. Returns the
         winning Path or None.
+
+        2026-11-05: 复用 _cache_index 的目录清单（带 TTL）+ _read_head_cached
+        的文件头缓存 —— 以前这里是第二次 os.walk + 逐文件现读。
         """
         if not bvid or cid is None:
             return None
         try:
-            for dirpath, _dirs, files in os.walk(root_dir):
-                for filename in files:
-                    if not filename.lower().endswith(".json"):
-                        continue
-                    candidate = Path(dirpath) / filename
-                    if self._json_head_pins(candidate, bvid, cid):
-                        return candidate
+            _by_name, entries = _cache_index(Path(root_dir))
+            for file_path, lower, kind in entries:
+                if kind != "json":
+                    continue
+                if self._json_head_pins(file_path, bvid, cid):
+                    return file_path
         except OSError:
             return None
         return None
@@ -1844,25 +2292,32 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # 2026-11-05：目录清单带 30s TTL 缓存；两个 pass 共用一次扫描
+        # （以前各扫一遍，实测单次 3.1s）
+        by_name, all_entries = _cache_index(cache_path)
+
         # --- Pass 1: filename match (original behavior) ---
         # When `cid` is pinned, a .json hit must ALSO pin the same cid in
         # its doc — filenames are title-based and the parts of a
         # multi-part video share date+title+UP; only cid tells them apart.
         if filenames_str:
-            target_filenames = [f.strip().lower() for f in filenames_str.split(",") if f.strip()]
-            for root, dirs, files in os.walk(cache_path):
-                for filename in files:
-                    if filename.lower() in target_filenames:
-                        candidate = Path(root) / filename
-                        if cid and filename.lower().endswith(".json") and not self._json_head_pins(candidate, bvid, cid):
-                            # 2026-10-03: same whole-video exception as Pass 2 —
-                            # bvid-only backups with no cid field may pass.
-                            if not self._json_pins_bvid_no_cid(candidate, bvid):
-                                continue
-                        result = self._read_subtitle_file(candidate)
-                        if result is not None:
-                            self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
-                            return
+            target_filenames = {f.strip().lower() for f in filenames_str.split(",") if f.strip()}
+            # 按文件名索引直接查，不用遍历全量清单
+            seen_paths = set()
+            for lower_name in target_filenames:
+                for candidate in by_name.get(lower_name, []):
+                    if candidate in seen_paths:
+                        continue
+                    seen_paths.add(candidate)
+                    if cid and lower_name.endswith(".json") and not self._json_head_pins(candidate, bvid, cid):
+                        # 2026-10-03: same whole-video exception as Pass 2 —
+                        # bvid-only backups with no cid field may pass.
+                        if not self._json_pins_bvid_no_cid(candidate, bvid):
+                            continue
+                    result = self._read_subtitle_file(candidate)
+                    if result is not None:
+                        self._send_json(HTTPStatus.OK, {"ok": True, "payload": result})
+                        return
 
         # --- Pass 2: bvid grep (header match) ---
         if bvid:
@@ -1901,13 +2356,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Only consider text-ish files; skip the .m4a/.obsolete cruft
                 # up-master-report drops alongside the real subtitles. .json
                 # caches (saved by the Whisper trigger flow) live here too.
-                for root, dirs, files in os.walk(cache_path):
-                    for filename in files:
-                        lower = filename.lower()
-                        is_json = lower.endswith(".json")
-                        if not is_json and not lower.endswith((".txt", ".md", ".srt", ".lrc")):
-                            continue
-                        file_path = Path(root) / filename
+                # 2026-11-05：复用 all_entries（不再第二次 os.walk）
+                for file_path, lower, kind in all_entries:
+                        is_json = kind == "json"
                         if is_json and cid:
                             # CID pinned: require the doc to pin BOTH bvid
                             # and cid (part-exact). No bvid-only fallback —
@@ -1924,13 +2375,13 @@ class Handler(BaseHTTPRequestHandler):
                                 if not self._json_pins_bvid_no_cid(file_path, target_bvid):
                                     continue
                         else:
-                            try:
-                                # Read the first ~2KB only — headers live at the top.
-                                # A full read of every .txt would be slow on
-                                # directories that also hold gigabytes of m4a.
-                                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                                    head = f.read(2048)
-                            except OSError:
+                            # Read the first ~2KB only — headers live at the top.
+                            # A full read of every .txt would be slow on
+                            # directories that also hold gigabytes of m4a.
+                            # 2026-11-05: 带 mtime 缓存 —— 900 多个文件的
+                            # 头只读一次，之后都走内存。
+                            head = _read_head_cached(file_path)
+                            if head is None:
                                 continue
                             if is_json:
                                 if not json_pattern.search(head):
@@ -1959,11 +2410,11 @@ class Handler(BaseHTTPRequestHandler):
         while this server writes it as a string. A doc that lacks either
         field counts as NOT pinned (callers use this for exact-part
         matching, so "unknown" must not pass).
+
+        2026-11-05: 用 _read_head_cached（mtime 缓存）而不是每次现读。
         """
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                head = f.read(2048)
-        except OSError:
+        head = _read_head_cached(file_path)
+        if head is None:
             return False
         m_bvid = re.search(r'"bvid"\s*:\s*"([^"]+)"', head)
         if not m_bvid:
@@ -1986,11 +2437,11 @@ class Handler(BaseHTTPRequestHandler):
         safe for any part. Distinct from _json_head_pins semantics, where a
         PRESENT-but-different cid is a genuine multi-part mismatch and must
         keep failing.
+
+        2026-11-05: 用 _read_head_cached（mtime 缓存）。
         """
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                head = f.read(2048)
-        except OSError:
+        head = _read_head_cached(file_path)
+        if head is None:
             return False
         m_bvid = re.search(r'"bvid"\s*:\s*"([^"]+)"', head)
         if not m_bvid or m_bvid.group(1) != bvid:
@@ -2352,7 +2803,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # 2026-11-04: the extension's /transcribe POST carries custom X-*
+        # headers (X-Whisper-Model / X-Bvid / X-Cid / X-Title / X-Channel /
+        # X-Pubdate / X-Cache-Dir). A preflight that does not allow them is
+        # rejected by the browser, and the fetch dies with the famously
+        # unhelpful "TypeError: Failed to fetch" — no status, no body, no
+        # hint that a header list was the problem.
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Whisper-Model, X-Whisper-Language, X-Bvid, X-Cid, "
+            "X-Title, X-Channel, X-Pubdate, X-Cache-Dir, X-Initial-Dir, "
+            "X-Dialog-Title",
+        )
+        # Chrome's Local Network Access (PNA) enforcement: a preflight for a
+        # request from a public context into a private network (127.0.0.1)
+        # must be answered with this header, otherwise the browser drops the
+        # request before it is ever sent.
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
 

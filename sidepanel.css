@@ -1009,6 +1009,23 @@ body {
   transform: translateY(-1px);
 }
 
+/* 次要按钮（学堂在线：官方字幕读不出时的"再试一次官方字幕"） */
+.error-btn--secondary {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  box-shadow: none;
+  font-weight: 500;
+  padding: 10px 22px;
+  font-size: 12.5px;
+}
+
+.error-btn--secondary:hover {
+  background: var(--surface-raised);
+  color: var(--text);
+  transform: none;
+}
+
 /* ============================================================
    WELCOME STATE (no video detected)
    ============================================================ */
@@ -1073,6 +1090,27 @@ body {
   max-width: 280px;
   word-break: break-all;
   text-align: left;
+}
+
+/* 2026-10-16: manual escape hatch. Reloading the extension invalidates
+   every open extension document and Chrome does NOT reload the side
+   panel, so it freezes; this button (plus the self-healing watchdog in
+   sidepanel.js) means a dead panel never requires quitting Chrome. */
+.welcome-reload-btn {
+  margin-top: 14px;
+  padding: 7px 16px;
+  font-family: var(--font-ui, system-ui, sans-serif);
+  font-size: 12.5px;
+  color: var(--text-muted, #8a8f98);
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.welcome-reload-btn:hover {
+  color: var(--text, #1f2329);
+  border-color: rgba(0, 0, 0, 0.3);
 }
 
 /* ============================================================
@@ -1141,6 +1179,14 @@ body {
 .explain-tooltip {
   position: absolute;
   z-index: 1000;
+  display: flex;
+  gap: 6px;
+  /* 2026-10-16: keep all three pills on ONE row. Without this, a narrow
+     side panel let the labelled buttons wrap their own text ("💡" on line 1,
+     "Explain" on line 2), which doubled the pill's height and squashed the
+     icon-only 📝 button into a tall sliver. */
+  flex-wrap: nowrap;
+  white-space: nowrap;
   transform: translateX(-50%);
   animation: fadeIn 0.15s ease;
 }
@@ -1158,11 +1204,43 @@ body {
   cursor: pointer;
   box-shadow: 0 6px 16px rgba(251, 114, 153, 0.32);
   transition: all 0.18s ease;
+  /* Never let a flex item shrink below its own content — a squeezed pill
+     wraps its label mid-word, which is what produced the two-line bar. */
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .explain-btn:hover {
   background: var(--accent-hover);
   transform: scale(1.05);
+}
+
+/* 2026-10-16: the note pill carries only the 📝 icon — no text label — so it
+   needs a square hit area instead of the text pills' content-driven width.
+   Width is fixed (not padding) so the three pills line up as one row. */
+.explain-btn--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  padding: 9px 0;
+  font-size: 14px;
+}
+
+/* Save result shown in the pill's place after 📝 is clicked. Mirrors
+   .explain-btn's look so the swap reads as the same control. */
+.explain-pill-status {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 11.5px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  padding: 9px 16px;
+  background: var(--accent);
+  color: white;
+  border-radius: var(--r-pill);
+  box-shadow: 0 6px 16px rgba(251, 114, 153, 0.32);
 }
 
 .explain-modal-overlay {
@@ -2249,3 +2327,351 @@ body {
 .kb-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #444; }
 .kb-field input, .kb-field select { padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
 .kb-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ============================================================
+   ASK AI DRAWER (selection pill → 💬 Ask AI)
+   ============================================================ */
+.ask-ai-drawer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--ask-ai-h, 33vh);
+  min-height: 180px;
+  max-height: 80vh;
+  z-index: 9000; /* below the Explain modal overlay (9999) */
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  transform: translateY(105%);
+  transition: transform 0.28s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+/* 2026-10-11: 顶部拖拽条 —— 用 CSS 变量把用户拖出来的高度喂回 height,
+   CSS 自带的 min/max 仍能夹住。grip 自身置顶 + 中间一根横杠作为视觉提示。*/
+.ask-ai-resize-grip {
+  position: relative;
+  flex: 0 0 6px;
+  background: var(--border);
+  cursor: ns-resize;
+  user-select: none;
+  touch-action: none;
+  transition: background 0.15s ease;
+}
+.ask-ai-resize-grip::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0.45;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.ask-ai-resize-grip:hover {
+  background: var(--accent-dim);
+}
+.ask-ai-resize-grip:hover::before,
+.ask-ai-resize-grip.is-dragging::before {
+  background: var(--accent);
+  opacity: 1;
+}
+.ask-ai-resize-grip.is-dragging { background: var(--accent-dim); }
+
+.ask-ai-drawer.open {
+  transform: translateY(0);
+}
+
+.ask-ai-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+  flex: 0 0 auto;
+}
+
+.ask-ai-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent);
+  margin-right: auto;
+}
+
+.ask-ai-model-select {
+  font-family: var(--font-body);
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  max-width: 240px;
+  cursor: pointer;
+}
+.ask-ai-model-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ask-ai-context-badge {
+  display: none;
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  background: var(--border);
+  color: var(--text-muted);
+}
+
+.ask-ai-context-badge.uses-context {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.ask-ai-close {
+  font-family: var(--font-body);
+  font-size: 14px;
+  padding: 4px 10px;
+  background: none;
+  border: none;
+  border-radius: var(--r-pill);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.ask-ai-close:hover {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.ask-ai-selection {
+  display: none;
+  padding: 8px 16px;
+  font-family: var(--font-reading);
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-secondary);
+  background: var(--accent-dim);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ask-ai-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ask-ai-empty {
+  margin: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 0 20px;
+  line-height: 1.6;
+}
+
+.ask-ai-bubble {
+  max-width: 86%;
+  padding: 10px 14px;
+  border-radius: var(--r-lg);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  line-height: 1.6;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  box-sizing: border-box;
+}
+
+.ask-ai-bubble.user {
+  align-self: flex-end;
+  background: var(--accent-dim);
+  color: var(--text);
+  border-bottom-right-radius: 4px;
+  border: 1px solid rgba(251, 114, 153, 0.2);
+}
+
+.ask-ai-bubble.assistant {
+  align-self: flex-start;
+  /* 2026-10-11: 用户反馈"颜色太深", 改成半透明 surface-raised —— 透出
+     drawer 的 --surface (#ffffff) 背景, 视觉上跟容器融为一体, 边框保留
+     var(--border) 以维持消息边界感。原文 / 链接 / 颜色仍走 :root 全局变量,
+     不受 opacity 影响. */
+  background: rgba(241, 242, 243, 0.45);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-bottom-left-radius: 4px;
+  padding: 12px 16px;
+}
+
+.ask-ai-bubble.assistant ul,
+.ask-ai-bubble.assistant ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.ask-ai-bubble.assistant li {
+  margin: 4px 0;
+}
+.ask-ai-bubble.assistant p {
+  margin: 6px 0;
+}
+.ask-ai-bubble.assistant blockquote {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-dim);
+  border-radius: 0 var(--r-md, 8px) var(--r-md, 8px) 0;
+  color: var(--text-secondary);
+}
+.ask-ai-bubble.assistant code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.ask-ai-bubble.ask-ai-pending {
+  display: flex;
+  align-items: center;
+}
+
+.ask-ai-bubble.ask-ai-pending .loading-bar {
+  width: 120px;
+  height: 3px;
+}
+
+/* 2026-10-10: assistant 回复底部的拷贝 + 添加到笔记 icon —— 位于最后一个段落后,
+   视觉上像脚注 action row, 不抢主题气泡的注意力。悬停轻微高亮 + 颜色与文字同色系。*/
+.ask-ai-bubble-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.ask-ai-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.ask-ai-act:hover {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.ask-ai-act:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.ask-ai-act:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ask-ai-act svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.ask-ai-input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.ask-ai-kb-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ask-ai-kb-select {
+  flex: 1;
+  font-family: var(--font-body);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  max-width: 100%;
+}
+.ask-ai-kb-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ask-ai-prompt-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.ask-ai-input {
+  flex: 1;
+  resize: none;
+  max-height: 90px;
+  overflow-y: auto;
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+
+.ask-ai-input:focus {
+  border-color: var(--accent);
+}
+
+.ask-ai-send {
+  font-family: var(--font-body);
+  font-size: 14px;
+  padding: 9px 14px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.ask-ai-send:hover {
+  background: var(--accent-hover);
+}

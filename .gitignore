@@ -27,3 +27,30 @@ package-lock.json
 
 # Whisper server runtime logs (output by whisper_server.py)
 *.err
+
+# 2026-11-06: 敏感数据与本地运行时产物 —— 绝不进仓库。
+#
+# logs/ 里有 yt-dlp 生成的**真实 cookie**（Netscape 格式）和从 Chrome
+# 拷出来的 **cookie 数据库**（.db）。这两个泄漏出去等于把登录态交出去。
+logs/
+*cookies*.txt
+*cookies*.json
+*.db
+# 注意：tests/fake_cookies.txt 也**不**入库 —— 磁盘上那份是 yt-dlp 从浏览器
+# 导出的真实 visitor cookie（__Secure-YNID / __Secure-ROLLOUT_TOKEN 等）。
+# tests/probe_yt_with_cookies.py 每次运行会自己写一份假 cookie，无需入库。
+
+# 探针产生的二进制媒体文件（1MB+，不该进版本库）
+bilidown-tests/_diag_*.m4s
+bilidown-tests/_diag_*.mp4
+bilidown-tests/_diag_*.webm
+bilidown-tests/_diag_tiny.*
+# 探针工作产物：一次性 diff dump 和旧 commit message 草稿，不进版本库
+bilidown-tests/_diag_sidepanel_diff.txt
+bilidown-tests/commit_msg_*.txt
+
+# Python 缓存（Chrome 拒载含 __pycache__ 的扩展目录）
+__pycache__/
+*.pyc
+# Python 编译规则集的二进制缓存（tests/_pycache_archive/_ruleset1.bin）
+tests/_pycache_archive/

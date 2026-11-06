@@ -45,5 +45,7 @@
     write: (root, path, content) => call("POST", "/kb/write", { root, path, content }),
     deletePath: (root, path, recursive) => call("POST", "/kb/delete", { root, path, recursive: !!recursive }),
     move: (root, from, to) => call("POST", "/kb/move", { root, from, to }),
+    // 2026-10-10: 本地笔记 KB 的引导入口（幂等）。返回 { dir, existed }。
+    ensureNotes: (root) => call("POST", "/kb/ensure_notes", { root }),
   };
 })(typeof self !== "undefined" ? self : globalThis);
