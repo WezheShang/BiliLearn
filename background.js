@@ -146,6 +146,114 @@ function portFromWhisperUrl(url) {
   return m ? Number(m[1]) || 7860 : 7860;
 }
 
+// 2026-11-22: whisper server 的默认地址与备用端口。
+// DEFAULT_WHISPER_URL —— 没配过 / 配坏了时的兜底。
+// WHISPER_SPARE_PORT —— 默认端口上跑着旧代码时（开机自启的 SYSTEM 实例，
+// 普通用户权限杀不掉）改用它拉一个新代码实例，旧实例变成无害僵尸。
+const DEFAULT_WHISPER_URL = "http://127.0.0.1:7860";
+const WHISPER_SPARE_PORT = 7861;
+
+/**
+ * 探一次 /health。**永不抛异常** —— 返回 { ok, health }。
+ *
+ * 2026-11-22 新增：启动/修复流程需要"先看看那个端口上到底有什么"，
+ * 每次都自己写 try/catch 容易漏。
+ */
+async function whisperHealthProbe(baseUrl, timeoutMs) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  if (!base) return { ok: false, health: null };
+  try {
+    const r = await whisperServerFetch(
+      `${base}/health`,
+      { method: "GET" },
+      timeoutMs || 3000,
+    );
+    if (!r || !r.ok) return { ok: false, health: null };
+    let health = null;
+    try {
+      health = await r.json();
+    } catch (_e) {
+      health = null;
+    }
+    return { ok: true, health };
+  } catch (_e) {
+    return { ok: false, health: null };
+  }
+}
+
+/**
+ * /health 里带 model_resolution = 跑的是**新代码**（2026-11-05 起才有这个
+ * 字段）。旧代码不会解析本地 HF 缓存 → 每次都去 huggingface.co 下载 →
+ * 本机直连不通 → 转写必 500 ConnectTimeout。
+ */
+function whisperServerIsFresh(health) {
+  return !!(health && health.model_resolution);
+}
+
+/**
+ * 在一个**备用端口**上拉起新代码的 whisper server，并把 whisperUrl 切过去。
+ * 完全不需要管理员权限 —— 旧的 SYSTEM 实例杀不掉，只能绕开它。
+ *
+ * 2026-11-22 修掉的坑：
+ *   旧实现固定用 7861；如果 7861 上跑的是**旧代码**，它照样在 7861 上再拉
+ *   一个 —— Windows 的 SO_REUSEADDR 允许两个进程绑同一个端口，于是两个
+ *   server 抢一个端口，表现是"时好时坏 / Failed to fetch"。现在会跳过
+ *   "跑着旧代码"的端口，继续找下一个空端口。
+ */
+async function startFreshWhisperServerOnSparePort() {
+  const settings = await getSettings();
+  const currentPort = portFromWhisperUrl(settings.whisperUrl || "");
+  const candidates = [WHISPER_SPARE_PORT, 7862, 7863, 7864];
+
+  for (const p of candidates) {
+    if (p === currentPort) continue; // 不在当前端口上叠实例
+    const url = `http://127.0.0.1:${p}`;
+    const probe = await whisperHealthProbe(url, 3000);
+    if (probe.ok) {
+      if (whisperServerIsFresh(probe.health)) {
+        // 这个端口上已经跑着健康的新实例 —— 直接切过去，别重复拉起。
+        await setSettings({ whisperUrl: url });
+        return {
+          success: true,
+          alreadyRunning: true,
+          whisperUrl: url,
+          port: p,
+        };
+      }
+      continue; // 跑的是旧代码 → 换下一个端口
+    }
+
+    // 空端口 → 拉起
+    const nat = await sendNativeLaunch({ cmd: "restart", port: p });
+    if (!nat.response || !nat.response.success) {
+      const errText =
+        nat.error || (nat.response && nat.response.error) || "启动新实例失败";
+      return {
+        success: false,
+        error: errText,
+        nativeNotRegistered: isNativeNotRegisteredError(errText),
+      };
+    }
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      const h = await whisperHealthProbe(url, 3000);
+      if (h.ok && whisperServerIsFresh(h.health)) {
+        await setSettings({ whisperUrl: url });
+        return { success: true, whisperUrl: url, port: p };
+      }
+      await new Promise((res) => setTimeout(res, 1500));
+    }
+    return {
+      success: false,
+      error: "新实例 60 秒内没有就绪，请查看 logs 目录下的日志。",
+    };
+  }
+  return {
+    success: false,
+    error: `找不到可用端口（${candidates.join(" / ")} 都被占用或跑着旧代码）。`,
+  };
+}
+
 // Lightweight path join that normalises to forward slashes (whisper_server
 // uses os.path.join internally on either separator; this keeps the
 // value uniform on the JS side).
@@ -1471,39 +1579,78 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
         //    重启之后那上面跑的就是**新代码**了。所以"启动"的时候先探一下
         //    7860 —— 如果它在线、而且是新代码（/health 带 model_resolution
         //    字段），直接把 whisperUrl 切回去，连实例都不用再拉一个。
+        //
+        // 2026-11-22（用户报「按钮拉不起 server」）修掉两个真 bug：
+        //   · 旧逻辑只在 `configuredPort !== 7860` 时才探测 → 配置已经是
+        //     7860 时**盲目再拉一个实例**。Windows 的 SO_REUSEADDR 允许
+        //     两个进程绑同一个端口 → 两个 server 抢 7860 → 时好时坏。
+        //   · 切换 whisperUrl 之后**不回传新 URL**，调用方只能继续拿页面
+        //     上的旧文本去轮询 → 自愈明明成功了，界面却说"未启动"。
+        //     现在每个分支都带 whisperUrl 回去。
         const settings = await getSettings();
-        const configuredUrl = (settings.whisperUrl || "").trim();
+        const configuredUrl =
+          (settings.whisperUrl || "").trim() || DEFAULT_WHISPER_URL;
         const configuredPort = portFromWhisperUrl(configuredUrl);
 
-        if (configuredPort !== 7860) {
-          try {
-            const r = await whisperServerFetch(
-              "http://127.0.0.1:7860/health",
-              { method: "GET" },
-              3000,
-            );
-            if (r && r.ok) {
-              const h = await r.json();
-              if (h && h.model_resolution) {
-                await setSettings({ whisperUrl: "http://127.0.0.1:7860" });
-                sendResponse({
-                  success: true,
-                  via: "native",
-                  switchedTo: 7860,
-                  note:
-                    "默认端口 7860 上的 server 已经是新代码，已直接切回去（不需要再拉实例）。",
-                });
-                return;
-              }
-            }
-          } catch (_e) {
-            /* 7860 上没有实例 → 下面按配置端口拉起 */
-          }
+        // ① 配置端口上已经跑着**新代码** → 什么都不用做。
+        //    这条必须在拉起之前查：否则会在同一个端口上叠第二个实例。
+        const onConfigured = await whisperHealthProbe(configuredUrl, 3000);
+        if (onConfigured.ok && whisperServerIsFresh(onConfigured.health)) {
+          sendResponse({
+            success: true,
+            via: "native",
+            alreadyRunning: true,
+            whisperUrl: configuredUrl,
+            port: configuredPort,
+            note: "配置端口上已经跑着新版本 server，无需再启动。",
+          });
+          return;
+        }
+        // ② 配置端口上跑的是**旧代码** → 不在同一个端口上再拉一个
+        //    （双进程同端口 = 时好时坏）→ 改用备用端口起新实例。
+        if (onConfigured.ok) {
+          const fix = await startFreshWhisperServerOnSparePort();
+          sendResponse({ ...fix, via: "native" });
+          return;
         }
 
+        // ③ 配置端口不通 → 探默认端口 7860（开机自启任务拉的那个）。
+        //    重启之后那上面跑的就是新代码 → 直接切回去，不用再拉实例。
+        try {
+          const r = await whisperServerFetch(
+            "http://127.0.0.1:7860/health",
+            { method: "GET" },
+            3000,
+          );
+          if (r && r.ok) {
+            const h = await r.json();
+            if (h && h.model_resolution) {
+              await setSettings({ whisperUrl: "http://127.0.0.1:7860" });
+              sendResponse({
+                success: true,
+                via: "native",
+                switchedTo: 7860,
+                whisperUrl: "http://127.0.0.1:7860",
+                port: 7860,
+                note:
+                  "默认端口 7860 上的 server 已经是新代码，已直接切回去（不需要再拉实例）。",
+              });
+              return;
+            }
+          }
+        } catch (_e) {
+          /* 7860 上没有实例 → 下面按配置端口拉起 */
+        }
+
+        // ④ 都没有 → 在配置端口上拉起（③/① 已经确认它现在是空的）。
         const nat = await sendNativeLaunch({ cmd: "launch", port: configuredPort });
         if (nat.response && nat.response.success) {
-          sendResponse({ success: true, via: "native", port: configuredPort });
+          sendResponse({
+            success: true,
+            via: "native",
+            port: configuredPort,
+            whisperUrl: configuredUrl,
+          });
           return;
         }
         const errText =
@@ -1579,72 +1726,25 @@ chrome.runtime?.onMessage?.addListener((message, sender, sendResponse) => {
         }
 
         // ---- 修复：备用端口起新实例 ----
-        const sparePort = 7861;
-        const spareUrl = `http://127.0.0.1:${sparePort}`;
-        // 先看备用端口上是不是已经有健康的新实例了（避免重复拉起）
-        try {
-          const r = await whisperServerFetch(`${spareUrl}/health`, { method: "GET" }, 3000);
-          if (r && r.ok) {
-            const h = await r.json();
-            if (h && h.model_resolution) {
-              await setSettings({ whisperUrl: spareUrl });
-              sendResponse({
-                ...diag,
-                success: true,
-                repaired: true,
-                alreadyRunning: true,
-                whisperUrl: spareUrl,
-              });
-              return;
-            }
-          }
-        } catch (_e) {
-          /* 备用端口没有实例 —— 下面拉起 */
-        }
-
-        const nat = await sendNativeLaunch({ cmd: "restart", port: sparePort });
-        if (!nat.response || !nat.response.success) {
+        // 2026-11-22: 抽成共用实现。旧代码固定用 7861；如果 7861 上跑的
+        // 是**旧代码**，它照样在 7861 上再拉一个 —— Windows 的 SO_REUSEADDR
+        // 允许两个进程绑同一个端口 → 两个 server 抢一个端口 → 时好时坏。
+        // 共用实现会跳过"跑着旧代码"的端口，继续找下一个空的。
+        const fix = await startFreshWhisperServerOnSparePort();
+        if (fix.success) {
           sendResponse({
             ...diag,
-            success: false,
-            error:
-              nat.error ||
-              (nat.response && nat.response.error) ||
-              "启动新实例失败",
-            nativeNotRegistered: isNativeNotRegisteredError(
-              nat.error || (nat.response && nat.response.error) || "",
-            ),
+            ...fix,
+            success: true,
+            repaired: true,
           });
           return;
-        }
-        // 等新实例就绪
-        const deadline = Date.now() + 60000;
-        while (Date.now() < deadline) {
-          try {
-            const r = await whisperServerFetch(`${spareUrl}/health`, { method: "GET" }, 3000);
-            if (r && r.ok) {
-              const h = await r.json();
-              if (h && h.model_resolution) {
-                await setSettings({ whisperUrl: spareUrl });
-                sendResponse({
-                  ...diag,
-                  success: true,
-                  repaired: true,
-                  whisperUrl: spareUrl,
-                  port: sparePort,
-                });
-                return;
-              }
-            }
-          } catch (_e) {
-            /* 还没起来 */
-          }
-          await new Promise((res) => setTimeout(res, 1500));
         }
         sendResponse({
           ...diag,
           success: false,
-          error: "新实例 60 秒内没有就绪，请查看 logs 目录下的日志。",
+          error: fix.error || "启动新实例失败",
+          nativeNotRegistered: !!fix.nativeNotRegistered,
         });
       } catch (e) {
         sendResponse({

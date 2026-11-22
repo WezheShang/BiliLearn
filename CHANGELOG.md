@@ -4,6 +4,64 @@ bililearn 的所有可记录改动。按"用户能感知到的影响"维度写�
 
 ## Unreleased
 
+### 2026-11-22（第七轮）：「启动 Whisper server」按钮点了拉不起来 —— 端口判定 + 就绪回传
+
+**症状**：设置页点「启动 Whisper server（本会话）」→ 按钮变成「已拉起 — 等待服务就绪…」→ 然后报 **「Whisper server —— 未启动」**。用户点第二次、第三次都一样。
+
+**真机现场（17:20-17:30 实测取证）**：
+
+| 事实 | 取证方式 |
+| --- | --- |
+| 扩展的 whisperUrl 当时是 **7861**（11-06 自动修复切的），7861 上什么都没有 | 扩展的 /kb/* 请求全部打到 7860，且 7861 无监听 |
+| 7860 上跑着**新代码**实例（/health 带 `model_resolution`） | `curl /health` → `fresh=True ok=True` |
+| 7860 上其实有**两个** server 在抢 | `netstat` 同时显示 PID 7376 和 9708 都是 `LISTENING 7860` |
+| server 本身没问题 | 手动跑 `python -B -I whisper_server.py` → **2 秒**就 `listening on` |
+
+#### 根因一：自愈成功了，但**不回传新 URL**
+
+旧逻辑：探到 7860 是新代码 → 把 `whisperUrl` 切回 7860 → `sendResponse({success:true, switchedTo:7860})`，**但没有把切换后的 URL 带回去**。
+
+options 页于是只能拿 `whisperUrlText.textContent` 去轮询 —— 而那个文本**只在页面加载时写一次**（`options.js:1534`），页面没刷新，它还是 7861 → 轮询 7861 → 90 秒超时 → 明明自愈成功了，界面却说"未启动"。
+
+> 同一个 bug 在「一键修好」按钮上也有一份：修复把 URL 切到 7861，紧接着的 `runWhisperCheck()` 还是拿旧文本去 ping。
+
+#### 根因二：配置端口已经是 7860 时，**盲目再拉一个实例**
+
+旧逻辑的探测被 `if (configuredPort !== 7860)` 挡着 —— 配置正好是 7860 时根本不探测，直接 `sendNativeLaunch({cmd:"launch", port:7860})`，于是**在已经有人占着的端口上又起一个**。Windows 的 `SO_REUSEADDR` 允许两个进程绑同一个端口 → 两个 server 抢 7860 → 表现是"时好时坏 / Failed to fetch"（这条坑 11-05 就记过，这次是它第一次真正被触发）。
+
+#### 修法
+
+**后台（`background.js`）**：
+
+1. 抽出三个共用件：`whisperHealthProbe()`（探一次 /health，永不抛）、`whisperServerIsFresh()`（有没有 `model_resolution`）、`startFreshWhisperServerOnSparePort()`（在备用端口起新实例并切过去）。
+2. `launchWhisperServerOnce` 改成**先探测再决定**：
+   - 配置端口上已经是新代码 → **什么都不用做**（`alreadyRunning: true`），不再叠实例；
+   - 配置端口上是**旧代码** → 不在同端口再拉一个，改用备用端口；
+   - 配置端口不通、7860 是新代码 → 切回 7860；
+   - 都没有 → 才在配置端口上拉起。
+3. **每个分支都回传 `whisperUrl`** —— 调用方据此轮询，而不是继续用页面上的旧文本。
+4. `repairWhisperServer` 也改用共用实现：旧代码固定用 7861，如果 7861 上跑的是旧代码，它照样在 7861 上再拉一个（同端口双进程）；现在会跳过"跑着旧代码"的端口，继续找下一个空的。
+
+**选项页（`options.js`）**：加 `whisperUrlOverride` —— 启动/修复的响应里带了 `whisperUrl` 就更新它和页面上的只读文本；`waitForWhisperHealth()` 与 `runWhisperCheck()` 统一走 `whisperBaseUrl()`。
+
+#### 测试
+
+新增 `tests/whisper-launch-ports.test.js`（**5/5**，已并入 `npm test`）—— JSDOM 加载**真实的 background.js**，用假 fetch 打桩各端口上 `/health` 有什么，用 `chrome.runtime.sendNativeMessage` 记录 native 启动调用，走真实 onMessage 通道断言五种场景：
+
+1. 配置端口上已是新代码 → **不调用** native 启动器（不叠实例）；
+2. 配置端口不通 + 7860 是新代码 → 切回 7860 **且回传新 URL**（用户报的那个）；
+3. 配置端口上是旧代码 → 新实例起在**备用端口**，不在旧代码占着的端口；
+4. 两边都不通 → 按配置端口拉起；
+5. `repairWhisperServer`：备用端口已有健康新实例 → 不重复拉起，直接切过去。
+
+**红/绿反向验证过**：把 `launchWhisperServerOnce` 临时退回 2026-11-06 的旧逻辑 → 测试第 1 组立刻失败（`alreadyRunning` 为 undefined，即旧代码确实盲目拉了第二个实例）、exit 1；恢复修复版 → 5/5 通过。
+
+**现场清理**：杀掉了那个多余的实例（PID 7376），现在 7860 上只剩开机自启那一个（PID 9708），`/health` 连续 3 次 200 + `fresh=True`。
+
+**版本**：`BG_BUILD` / `SP_BUILD` 不变（仍是 `2026-11-06.2`）—— 本次只改扩展侧逻辑，server 代码没动。
+
+**用户需要做的**：chrome://extensions → bililearn → 点**刷新**，然后重开设置页再点「启动 Whisper server」。
+
 ### 2026-11-22：扩展**整个加载不了** —— Chrome 拒载根目录里 `_` 开头的文件
 
 **症状**：chrome://extensions →「加载已解压的扩展程序」→ 选 `~\bilidown` → Chrome 弹窗：

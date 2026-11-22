@@ -1716,11 +1716,7 @@ const YTD_OPTIONS = (() => {
       // the new report.
       const fallbackBlock = doc.getElementById("whisperFallbackBlock");
       if (fallbackBlock) fallbackBlock.hidden = true;
-      const r = await pingWhisper(
-        whisperUrlText
-          ? whisperUrlText.textContent.trim()
-          : "http://127.0.0.1:7860",
-      );
+      const r = await pingWhisper(whisperBaseUrl());
       renderWhisperCheckResults((r && r.data) || null);
     }
 
@@ -1746,10 +1742,25 @@ const YTD_OPTIONS = (() => {
     // response comes back: health polling, the one-time registration
     // card, and per-row failure copy.
     // ------------------------------------------------------------
+    // 2026-11-22: whisperUrlText 只在**页面加载时**写一次。
+    // 但「启动 Whisper server」/「一键修好」随时可能把 whisperUrl 切到
+    // 另一个端口（自愈回 7860 / 修复到备用端口 7861）。继续拿页面上的
+    // 旧文本去轮询 → 一直打那个没人监听的端口 → server 明明起来了，
+    // 界面却说"未启动"（用户报的就是这个）。
+    // 所以这里维护一个"当前生效的 URL"覆盖值，响应里带 whisperUrl 就更新。
+    let whisperUrlOverride = "";
     function whisperBaseUrl() {
+      if (whisperUrlOverride) return whisperUrlOverride;
       return whisperUrlText && whisperUrlText.textContent
         ? whisperUrlText.textContent.trim()
         : "http://127.0.0.1:7860";
+    }
+    // 把新的生效 URL 记下来，并同步到页面上的只读文本。
+    function applyWhisperUrl(url) {
+      const next = String(url || "").trim();
+      if (!next) return;
+      whisperUrlOverride = next;
+      if (whisperUrlText) whisperUrlText.textContent = next;
     }
 
     // Poll /health until it answers ok or the deadline passes. A cold
@@ -1850,6 +1861,10 @@ const YTD_OPTIONS = (() => {
         const list = li ? li.parentElement : null;
         if (resp && resp.success) {
           btn.textContent = translate(currentLanguage, "whisperWaitHealthBtn");
+          // 启动流程可能顺手把 whisperUrl 切到了别的端口（自愈回 7860）。
+          // 轮询必须用**切换之后**的 URL，否则一直打旧端口 → 明明起来了
+          // 却报"未启动"（2026-11-22 用户报的就是这个）。
+          applyWhisperUrl(resp.whisperUrl);
           const up = await waitForWhisperHealth(90000);
           if (up) {
             runWhisperCheck(); // re-render; this li is replaced anyway
@@ -2194,6 +2209,10 @@ const YTD_OPTIONS = (() => {
               onResult: async (resp, btn, li) => {
                 if (resp && resp.success) {
                   btn.textContent = translate(currentLanguage, "whisperRepairDoneBtn");
+                  // 修复可能把 whisperUrl 切到了备用端口 —— 先更新"当前生效
+                  // 的 URL"，否则紧接着的 runWhisperCheck() 还在打旧端口，
+                  // 又会显示"未启动"（2026-11-22 用户报的就是这个）。
+                  applyWhisperUrl(resp.whisperUrl);
                   await runWhisperCheck();
                   return false;
                 }
