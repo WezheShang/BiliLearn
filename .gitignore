@@ -48,6 +48,15 @@ bilidown-tests/_diag_tiny.*
 # 探针工作产物：一次性 diff dump 和旧 commit message 草稿，不进版本库
 bilidown-tests/_diag_sidepanel_diff.txt
 bilidown-tests/commit_msg_*.txt
+# sidepanel 预览产物（生成器在 bilidown-tests/preview_sidepanel.js）
+bilidown-tests/_preview_sidepanel.html
+
+# ⚠️ 扩展**根目录**不能有任何 "_" 开头的文件或目录 —— Chrome 会拒绝加载整个
+# 扩展（"Filenames starting with '_' are reserved for use by the system."）。
+# 唯一例外是 Chrome 自己的 _metadata/（DNR 规则集编译产物），它也不入库。
+# 一次性预览产物一律写进 bilidown-tests/。tests/no-underscore-root.test.js
+# 会在 npm test 里把这条规则守住。
+/_metadata/
 
 # Python 缓存（Chrome 拒载含 __pycache__ 的扩展目录）
 __pycache__/

@@ -16,7 +16,7 @@ const debugLog = (...args) => {
 // 一句人话，比让旧后台把请求处理坏、报出 "Invalid Bilibili BV ID." 这种
 // 完全看不懂的错要好得多。tests/xuetangx.test.js 里有一条用例守着这个
 // 一致性 —— 以后改了任一边忘了改另一边，测试会直接挂。
-const SP_BUILD = "2026-11-06.1";
+const SP_BUILD = "2026-11-06.2";
 
 // ============================================================
 // STATE
@@ -990,6 +990,14 @@ function setupEventListeners() {
 
   document.getElementById("settingsBtn")?.addEventListener("click", () => {
     chrome.runtime.sendMessage({ action: "openOptions" });
+  });
+
+  // 2026-11-06: 底栏常驻 Ask AI 入口 —— 以前只有「选中文字 → 药丸 →
+  // 💬 Ask AI」这一条门进，没有选区就开不了抽屉。
+  // 不传 selection：openAskAiDrawer 只在拿到值时才覆盖上下文，所以连续
+  // 对话里已有的选区上下文会被保留，不会被这个按钮清掉。
+  document.getElementById("askAiOpenBtn")?.addEventListener("click", () => {
+    openAskAiDrawer();
   });
 
   // Transcript actions
@@ -4384,6 +4392,36 @@ let askAiKbs = [];
 // Ask-AI 用临时覆盖 (不写 storage)。键名 = select 的 value "providerId|modelName"
 let askAiSelectedModelKey = "";
 
+// 2026-11-06: 用户手动改过的模型要跨会话记住。存在 chrome.storage.local 的
+// 独立键里（跟 ytd_askai_drawer_height 一个套路），不塞进 ytd_settings ——
+// 那个键的 provider 语义归 options 页管，侧边栏往里写会把设置页搞乱。
+// 值格式 = select 的 value "providerId|modelName"。
+const ASK_AI_MODEL_STORAGE_KEY = "ytd_askai_model_key";
+
+// 读回上次记住的模型。读不到 / 存的不是字符串 → 空串（当作"没记住"）。
+async function readAskAiModelMemory() {
+  try {
+    const r = await chrome.storage.local.get(ASK_AI_MODEL_STORAGE_KEY);
+    const v = r && r[ASK_AI_MODEL_STORAGE_KEY];
+    return typeof v === "string" ? v : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+// 记住用户选的模型。写不进去也不能影响聊天本身，所以整段吞掉异常。
+async function writeAskAiModelMemory(key) {
+  try {
+    if (key) {
+      await chrome.storage.local.set({ [ASK_AI_MODEL_STORAGE_KEY]: key });
+    } else {
+      await chrome.storage.local.remove(ASK_AI_MODEL_STORAGE_KEY);
+    }
+  } catch (e) {
+    console.warn("[ask-ai] 记住模型失败（不影响本次对话）:", e);
+  }
+}
+
 // 列出所有「有对应 key」的 provider+model 选项。key 优先级:
 //   minimax > deepseek > glm > other (settings.aiBaseUrl 兜底)
 function listAskAiModelOptions(settings) {
@@ -4433,6 +4471,19 @@ async function populateAskAiModels(drawer) {
   const raw = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
   const fullSettings = YTD_SETTINGS.normalize(raw[YTD_SETTINGS.STORAGE_KEY] || {});
   const opts = listAskAiModelOptions(fullSettings);
+  const isValidKey = (k) => !!(k && opts.some((o) => o.key === k));
+
+  // 2026-11-06: 把上次手动选的模型读回来。
+  //   - 同一会话内以内存值为准：刚改完就重开抽屉时，storage 的写可能还没
+  //     落地，用内存值不会把用户的选择抖掉。
+  //   - 跨会话（面板重开）内存是空的 → 从 storage 读回。
+  //   - 记着的那个模型不在当前候选里（对应 provider 的 key 被删了）→ 当作
+  //     没记住，照旧退回 settings.provider。
+  if (!isValidKey(askAiSelectedModelKey)) {
+    const remembered = await readAskAiModelMemory();
+    if (isValidKey(remembered)) askAiSelectedModelKey = remembered;
+  }
+
   sel.innerHTML = "";
   if (!opts.length) {
     const o = document.createElement("option");
@@ -4451,7 +4502,11 @@ async function populateAskAiModels(drawer) {
   const active = getActiveAskAiModelKey(fullSettings);
   sel.value = active;
   askAiSelectedModelKey = active;
-  sel.onchange = () => { askAiSelectedModelKey = sel.value; };
+  // 用户手动改过 → 记住它（下次开抽屉默认还是这个）。
+  sel.onchange = () => {
+    askAiSelectedModelKey = sel.value;
+    void writeAskAiModelMemory(sel.value);
+  };
 }
 
 async function populateAskAiKbSelect(drawer) {

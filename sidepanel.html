@@ -389,6 +389,21 @@
       </div>
     </div>
 
+    <!-- 2026-11-06: 常驻底栏入口。Ask AI 以前只有一条门进 —— 「选中文字 →
+         药丸 → 💬 Ask AI」，没有选区就进不去。这里给一个常驻按钮，无选区
+         也能直接打开底部抽屉（对话上下文照旧，不会被这个按钮清空）。 -->
+    <div class="panel-footer" id="panelFooter">
+      <button
+        class="panel-footer-ask-btn"
+        id="askAiOpenBtn"
+        type="button"
+        title="打开 Ask AI 助手"
+        aria-label="打开 Ask AI 助手"
+      >
+        💬 Ask AI
+      </button>
+    </div>
+
     <!-- Auto-scroll follow button — appears when user scrolls away from playback position -->
     <button
       class="follow-playback-btn"

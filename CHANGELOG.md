@@ -4,6 +4,81 @@ bililearn 的所有可记录改动。按"用户能感知到的影响"维度写�
 
 ## Unreleased
 
+### 2026-11-22：扩展**整个加载不了** —— Chrome 拒载根目录里 `_` 开头的文件
+
+**症状**：chrome://extensions →「加载已解压的扩展程序」→ 选 `~\bilidown` → Chrome 弹窗：
+
+```
+Cannot load extension with file or directory name _preview_gen.js.
+Filenames starting with "_" are reserved for use by the system.
+无法加载清单
+```
+
+扩展**一个都装不进去**，侧边栏、后台、选项页全都用不了。
+
+**根因**：Chrome 加载 unpacked 扩展时，会检查**扩展根目录**的每个条目 —— 任何以 `_` 开头的**文件或目录**都会让整个扩展加载失败。
+
+- **只查顶层，子目录不受影响**：`node_modules/@exodus/bytes/fallback/_utils.js`（2026-08-20 就在了）、`tests/_metadata_archive`（2026-10-04）、`bilidown-tests/_diag_*`（2026-11-05）**长期共存且不影响加载**，所以不必把整个开发目录搬走。
+- **唯一例外是 `_metadata`** —— 那是 **Chrome 自己写的**：manifest 声明了 `declarative_net_request` 静态规则集（`rules/bililearn-audio.json`），Chrome 把编译后的规则集写进 `<扩展根目录>/_metadata/generated_indexed_rulesets/_ruleset1`（内容与规则文件逐字对应：Referer 头 + bilivideo CDN 正则）。实测它存在时扩展**加载并正常运行**（2026-11-22 17:20–17:30 期间它一直在，扩展持续正常服务请求），所以不能当违规项、更不能随手删。
+- **同一个规则也解释了 `__pycache__`**：它以 `_` 开头，放在扩展根目录一样会让 Chrome 拒载整个扩展。之前只知道"根目录不能有 `__pycache__`，Chrome 会拒绝加载"，现在知道机制了。
+- **顺带修正了一处旧认知**：`dev-clean.ps1`（2026-09-23 写的）当时只匹配**两个**下划线（`__xxx`）—— 因为那时只撞到过 `__pycache__`。但这次的用户报错是**单个**下划线的 `_preview_gen.js`，**单下划线同样被拒**。清理脚本的正则已从 `^__` 改成 `^_`（并排除 `_metadata`）。
+
+**这次踩坑的具体路径**：预览生成器 `_preview_gen.js`（文件头自己写着「一次性预览生成器（**用完即删**）」）放在扩展根目录，产物 `_preview_sidepanel.html` 也写在根目录。2026-11-06 13:23 有个后台任务跑了一次它，产物留在那儿没删 —— 十六天后用户点「加载已解压」就撞上了。
+
+**修法（三层）**：
+
+1. **删掉根目录的两个残留** —— `_preview_gen.js`、`_preview_sidepanel.html`（已移入回收站，可恢复）。
+2. **把生成器搬进开发目录** —— 现在是 `bilidown-tests/preview_sidepanel.js`，**产物也写在自己旁边**（`bilidown-tests/_preview_sidepanel.html`，已 gitignore）。工具保留，但再也碰不到扩展根目录。
+3. **加一条制度化的防线** —— 新增 `tests/no-underscore-root.test.js`，**挂在 `npm test` 的第一个**（失败最早暴露）：
+   - 根目录出现任何 `_` 开头的文件/目录（**`_metadata` 除外** —— 那是 Chrome 自己的，守卫会打印说明并放过它）→ **FAIL**，错误信息直接列出是哪个文件，并给出 Chrome 报错原文和处理办法；
+   - 根目录出现 `__pycache__` → 单独一条（同一个坑的常见形态）；
+   - `manifest.json` 必须在根目录、能解析；
+   - **manifest 引用的每个文件都必须存在** —— 顺手挡住"改了 manifest 但文件没加"这类"装上才发现"的坑；
+   - manifest 引用的文件也不能以 `_` 开头（那样能加载，运行时才炸）。
+
+**红/绿反向验证**：临时在根目录放一个 `_redcheck_probe.tmp` → 守卫立刻 **FAIL，exit 1**，并正确报出文件名；删掉后恢复 **6/6 通过**。这条防线是真的会红的，不是摆设。
+
+**版本**：本次只动开发目录和测试，不涉及扩展运行时代码，`BG_BUILD` / `SP_BUILD` 不变（仍是 `2026-11-06.2`）。
+
+**用户需要做的**：chrome://extensions → 选 `C:\Users\shangweizhe\bilidown` → 「加载已解压的扩展程序」。这次应该能正常加载了。如果还报错，把弹窗里的文件名发我 —— 守卫测试会把根目录的 `_` 条目全部列出来。
+
+### 2026-11-06（第六轮）：Ask AI 有了常驻入口，模型选择会记住
+
+用户提了两件事，都属于「明明有功能却找不到」这一类。
+
+#### ① 侧边栏最下面加一个常驻「💬 Ask AI」按钮
+
+**症状**：Ask AI 抽屉只有一条门进 —— 选中文字 → 文本选区药丸 → 💬 Ask AI。**没有选区就根本开不了**这个功能。用户想在字幕页随便问一句，得先随便划几个字把药丸勾出来。
+
+**修法**：
+- `sidepanel.html` 的内容区（`.content`）之后加了一个 `.panel-footer` 常驻底栏，里面一个 `.panel-footer-ask-btn`（Terracotta 主色药丸，跟「跟随播放位置」同一套设计语言）；
+- `sidepanel.js` 的 `setupEventListeners()` 里绑定点击 → `openAskAiDrawer()`；
+- **不传 selection**：`openAskAiDrawer` 只在拿到值时才覆盖上下文，所以连续对话里已有的选区上下文会被保留 —— 这个按钮是"开门"，不是"清场"。
+
+**顺带**：浮动药丸「跟随播放位置」原来是 `bottom: 18px`，底栏加进来之后会跟它叠在一起 → 上移到 `bottom: 74px`。
+
+#### ② 模型下拉记住用户的选择
+
+**症状**：抽屉里的 model 下拉**每次打开都回到 options 页选的那个 provider**。用户临时换成另一个模型问两句，下一次开抽屉又被打回原形 —— 手改的设置等于没改。
+
+**修法**：记在 `chrome.storage.local["ytd_askai_model_key"]`（值格式 `"providerId|modelName"`），跟抽屉高度 `ytd_askai_drawer_height` 一个套路。
+
+- **不塞进 `ytd_settings`** —— 那个键的 `provider` 语义归 options 页管，侧边栏往里写会把设置页搞乱；
+- **优先级**：同会话内的内存值（刚改完立刻重开抽屉也不丢）→ storage 里的记忆值 → `settings.provider` → 候选列表第一个；
+- **失效自动降级**：记住的那个 provider 的 key 被删了 → 记忆值不在候选列表里 → 当作没记住，照旧退回 `settings.provider`；
+- 只有**用户手动改过**才写 storage（`sel.onchange`）。初始状态不写 —— 这样"没改过"和"改过"两件事在 storage 里是可区分的。
+
+#### 测试
+
+- 新增 `tests/askai-drawer-entry.test.js`（**14/14**）：底栏按钮存在且排在内容区之后 → 点击真的打开抽屉（无选区时选区条不显示）→ 初始模型 = `settings.provider` → 改过之后写进独立键且**不污染 `ytd_settings`** → **换一个全新的窗口（= 用户重开面板）仍然默认显示改过的那个**。
+  跨会话这条是用**两个独立 JSDOM 窗口共用同一份 storage** 测的 —— 只测同一个窗口的话，内存变量会骗过测试。
+- **红/绿反向验证过**：故意注释掉 `writeAskAiModelMemory` → 第 4 组用例超时失败；故意注释掉底栏的 `openAskAiDrawer()` → 第 2 组用例超时失败。两个探针都真的会红。
+- `npm test` 全绿（exit 0）。
+
+**版本**：后台 `BG_BUILD=2026-11-06.2`，侧边栏 `SP_BUILD=2026-11-06.2`（两侧同时 +1，握手仍然相等）。
+
+**用户需要做的**：chrome://extensions → bililearn → 点**刷新**按钮，然后刷新 B 站页面。**不需要**重开面板，**不需要**重启 whisper server。
+
 ### 2026-11-06（第五轮）：「明明有字幕却逼我用 Whisper」「45 秒才出按钮」「Whisper 500」「转圈 3 秒」—— 四条用户可见的链路修复
 
 这一轮修的全是**用户能直接感知**的东西，根因分四层，每层都有真机实测数据。

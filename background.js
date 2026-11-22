@@ -43,7 +43,7 @@ const DEBUG = true;
 // 症状是报错长得莫名其妙：2026-10-27 学堂在线那次，旧后台不认识 xt- 开头的
 // videoId，把它当 B 站处理，抛出 "Invalid Bilibili BV ID."。
 // 版本对不上时侧边栏直接提示去刷新扩展，而不是让旧后台把请求处理坏。
-const BG_BUILD = "2026-11-06.1";
+const BG_BUILD = "2026-11-06.2";
 const SW_STARTED_AT = Date.now();
 const formatTimestamp = (seconds) => {
   const secs = Math.max(0, Number(seconds) || 0);
